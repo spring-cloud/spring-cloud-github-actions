@@ -175,17 +175,17 @@ jobs:
             {
               "id": "spring-commercial-snapshot",
               "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
-              "password": "${{ COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+              "password": "${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}"
             },
             {
               "id": "spring-commercial-release",
               "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
-              "password": "${{ COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+              "password": "${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}"
             },
             {
               "id": "spring-commercial-release",
               "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
-              "password": "${{ COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+              "password": "${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}"
             }]
 
       - name: Login to Docker Hub
