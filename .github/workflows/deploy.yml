@@ -7,6 +7,10 @@ on:
         description: 'Which branch should be built (for workflow_dispatch)'
         required: false
         type: string
+      custom_build_command:
+        description: 'Custom run command for the Build and Deploy step (overrides default Maven command)'
+        required: false
+        type: string
     secrets:
       ARTIFACTORY_USERNAME:
         required: true
@@ -158,9 +162,31 @@ jobs:
           java-version: ${{ matrix.java-version }}
           distribution: 'temurin'
           cache: 'maven'
-          server-id: repo.spring.io
-          server-username: REPO_SPRING_IO_USERNAME
-          server-password: REPO_SPRING_IO_PASSWORD
+
+      - name: Configure Maven settings
+        uses: s4u/maven-settings-action@v3.0.0
+        with:
+          servers: |
+            [{
+              "id": "repo.spring.io",
+              "username": "${{ secrets.ARTIFACTORY_USERNAME }}",
+              "password": "${{ secrets.ARTIFACTORY_PASSWORD }}"
+            },
+            {
+              "id": "spring-commercial-snapshot",
+              "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
+              "password": "${{ COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+            },
+            {
+              "id": "spring-commercial-release",
+              "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
+              "password": "${{ COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+            },
+            {
+              "id": "spring-commercial-release",
+              "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
+              "password": "${{ COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+            }]
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -180,13 +206,19 @@ jobs:
         run: ./mvnw --version
 
       - name: Build and deploy
-        env:
-          REPO_SPRING_IO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-          REPO_SPRING_IO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
         run: |
-          if [[ "${{ matrix.java-version }}" == "17" ]]; then
-            ./mvnw clean deploy -Pdocs,deploy,spring -B -U
+          if [[ -n "${{ inputs.custom_build_command }}" ]]; then
+            # Write custom command to a script file to support multi-line commands
+            cat > /tmp/custom-build.sh << CUSTOM_BUILD_EOF
+          ${{ inputs.custom_build_command }}
+          CUSTOM_BUILD_EOF
+            chmod +x /tmp/custom-build.sh
+            bash /tmp/custom-build.sh
           else
-            ./mvnw clean deploy -Pdeploy,spring -B -U
+            if [[ "${{ matrix.java-version }}" == "17" ]]; then
+              ./mvnw clean deploy -Pdocs,deploy,spring -B -U
+            else
+              ./mvnw clean deploy -Pdeploy,spring -B -U
+            fi
           fi
 
