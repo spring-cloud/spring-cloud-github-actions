@@ -16,6 +16,10 @@ on:
         required: true
       ARTIFACTORY_PASSWORD:
         required: true
+      COMMERCIAL_ARTIFACTORY_USERNAME:
+        required: false
+      COMMERCIAL_ARTIFACTORY_PASSWORD:
+        required: false
       DOCKERHUB_USERNAME:
         required: true
       DOCKERHUB_TOKEN:
