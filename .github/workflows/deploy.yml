@@ -11,6 +11,10 @@ on:
         description: 'Custom run command for the Build and Deploy step (overrides default Maven command)'
         required: false
         type: string
+      runs_on:
+        description: 'Runner to use for the build job (defaults to ubuntu-latest)'
+        required: false
+        type: string
     secrets:
       ARTIFACTORY_USERNAME:
         required: true
@@ -146,7 +150,7 @@ jobs:
   build:
     name: Build ${{ matrix.branch }} (JDK ${{ matrix.java-version }})
     needs: setup
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
