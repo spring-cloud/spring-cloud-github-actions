@@ -132,8 +132,15 @@ jobs:
             
             echo "  JDK versions: $JDK_VERSIONS"
             
+            # Check if JDK 8 is in the configuration for this branch
+            HAS_JDK8=false
+            if echo "$JDK_VERSIONS" | grep -q "^8$"; then
+              HAS_JDK8=true
+            fi
+            echo "  Has JDK 8: $HAS_JDK8"
+            
             for VERSION in $JDK_VERSIONS; do
-              MATRIX_ENTRIES+=("{\"branch\":\"$BRANCH\",\"java-version\":\"$VERSION\"}")
+              MATRIX_ENTRIES+=("{\"branch\":\"$BRANCH\",\"java-version\":\"$VERSION\",\"has-jdk8\":$HAS_JDK8}")
             done
           done
           
@@ -218,7 +225,9 @@ jobs:
             chmod +x /tmp/custom-build.sh
             bash /tmp/custom-build.sh
           else
-            if [[ "${{ matrix.java-version }}" == "17" ]]; then
+            # If branch config contains JDK 8, use docs profile with JDK 8
+            # Otherwise, use docs profile with JDK 17
+            if [[ ("${{ matrix.has-jdk8 }}" == "true" && "${{ matrix.java-version }}" == "8") ]] || [[ ("${{ matrix.has-jdk8 }}" == "false" && "${{ matrix.java-version }}" == "17") ]]; then
               ./mvnw clean deploy -Pdocs,deploy,spring -B -U
             else
               ./mvnw clean deploy -Pdeploy,spring -B -U
