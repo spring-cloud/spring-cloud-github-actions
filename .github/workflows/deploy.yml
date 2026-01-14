@@ -232,11 +232,13 @@ jobs:
           echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS"
 
       - name: Build and deploy
+        env:
+          CUSTOM_BUILD_COMMAND: ${{ inputs.custom_build_command }}
         run: |
           # Write build command to temporary script file
-          if [[ -n "${{ inputs.custom_build_command }}" ]]; then
+          if [[ -n "$CUSTOM_BUILD_COMMAND" ]]; then
             # Custom build command provided by caller
-            printf '%s\n' '${{ inputs.custom_build_command }}' > /tmp/build-deploy.sh
+            printf '%s\n' "$CUSTOM_BUILD_COMMAND" > /tmp/build-deploy.sh
           else
             # Default Maven build command with conditional docs profile
             cat > /tmp/build-deploy.sh << 'DEFAULT_BUILD_EOF'
