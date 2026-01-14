@@ -237,8 +237,8 @@ jobs:
           if [[ -n "${{ inputs.custom_build_command }}" ]]; then
             # Custom build command provided by caller
             cat > /tmp/build-deploy.sh << CUSTOM_BUILD_EOF
-          ${{ inputs.custom_build_command }}
-          CUSTOM_BUILD_EOF
+${{ inputs.custom_build_command }}
+CUSTOM_BUILD_EOF
           else
             # Default Maven build command with conditional docs profile
             cat > /tmp/build-deploy.sh << 'DEFAULT_BUILD_EOF'
@@ -255,8 +255,7 @@ jobs:
           fi
           DEFAULT_BUILD_EOF
           fi
-          echo "Contents of /tmp/build-deploy.sh:"
-          cat /tmp/build-deploy.sh
+
           chmod +x /tmp/build-deploy.sh
           bash /tmp/build-deploy.sh
 
