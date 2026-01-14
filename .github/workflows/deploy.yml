@@ -88,7 +88,7 @@ jobs:
             CONFIG_PATH=".[\"$BASE_REPO_NAME\"].$CONFIG_SECTION"
           else
             echo "No specific configuration found for $BASE_REPO_NAME, using defaults"
-            CONFIG_PATH=".defaults"
+            CONFIG_PATH=".defaults.$CONFIG_SECTION"
           fi
           
           # Determine the branch to use
@@ -101,7 +101,7 @@ jobs:
           # Determine which branches to build based on event type
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             echo "Trigger: Scheduled run - building multiple branches"
-            BRANCHES=$(jq -r "$CONFIG_PATH.branches.scheduled // .defaults.branches.scheduled" "$CONFIG_FILE" | jq -r '.[]')
+            BRANCHES=$(jq -r "$CONFIG_PATH.branches.scheduled // .defaults.$CONFIG_SECTION.branches.scheduled" "$CONFIG_FILE" | jq -r '.[]')
           else
             echo "Trigger: ${{ github.event_name }} - building single branch"
             BRANCHES="$BRANCH"
@@ -122,12 +122,12 @@ jobs:
             
             # Get JDK versions for this branch
             JDK_VERSIONS=$(jq -r --arg branch "$BRANCH" \
-              "$CONFIG_PATH.jdkVersions[\$branch] // $CONFIG_PATH.jdkVersions.default // .defaults.jdkVersions.default" \
+              "$CONFIG_PATH.jdkVersions[\$branch] // $CONFIG_PATH.jdkVersions.default // .defaults.$CONFIG_SECTION.jdkVersions.default" \
               "$CONFIG_FILE" | jq -r '.[]')
             
             if [[ -z "$JDK_VERSIONS" ]]; then
               # Fallback to global defaults
-              JDK_VERSIONS=$(jq -r '.defaults.jdkVersions.default[]' "$CONFIG_FILE")
+              JDK_VERSIONS=$(jq -r ".defaults.$CONFIG_SECTION.jdkVersions.default[]" "$CONFIG_FILE")
             fi
             
             echo "  JDK versions: $JDK_VERSIONS"
