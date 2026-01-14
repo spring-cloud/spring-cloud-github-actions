@@ -236,7 +236,7 @@ jobs:
           # Write build command to temporary script file
           if [[ -n "${{ inputs.custom_build_command }}" ]]; then
             # Custom build command provided by caller
-            cat > /tmp/build-deploy.sh << 'CUSTOM_BUILD_EOF'
+            cat > /tmp/build-deploy.sh << CUSTOM_BUILD_EOF
           ${{ inputs.custom_build_command }}
           CUSTOM_BUILD_EOF
           else
