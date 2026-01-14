@@ -228,6 +228,7 @@ jobs:
             # If branch config contains JDK 8, use docs profile with JDK 8
             # Otherwise, use docs profile with JDK 17
             if [[ ("${{ matrix.has-jdk8 }}" == "true" && "${{ matrix.java-version }}" == "8") ]] || [[ ("${{ matrix.has-jdk8 }}" == "false" && "${{ matrix.java-version }}" == "17") ]]; then
+              echo "Building with docs profile"
               ./mvnw clean deploy -Pdocs,deploy,spring -B -U
             else
               ./mvnw clean deploy -Pdeploy,spring -B -U
