@@ -255,7 +255,8 @@ jobs:
           fi
           DEFAULT_BUILD_EOF
           fi
-
+          echo "Contents of /tmp/build-deploy.sh:"
+          cat /tmp/build-deploy.sh
           chmod +x /tmp/build-deploy.sh
           bash /tmp/build-deploy.sh
 
