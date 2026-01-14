@@ -236,9 +236,7 @@ jobs:
           # Write build command to temporary script file
           if [[ -n "${{ inputs.custom_build_command }}" ]]; then
             # Custom build command provided by caller
-            cat > /tmp/build-deploy.sh << CUSTOM_BUILD_EOF
-${{ inputs.custom_build_command }}
-CUSTOM_BUILD_EOF
+            printf '%s\n' '${{ inputs.custom_build_command }}' > /tmp/build-deploy.sh
           else
             # Default Maven build command with conditional docs profile
             cat > /tmp/build-deploy.sh << 'DEFAULT_BUILD_EOF'
