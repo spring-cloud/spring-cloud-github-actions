@@ -1,0 +1,47 @@
+# Example caller workflow for Spring Cloud projects
+# Copy this file to your project's .github/workflows/deploy.yml
+# and customize the branch names in the 'on.push.branches' section
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - 4.3.x
+      # Add other branches that should trigger builds on push
+
+  # Scheduled builds run daily at midnight UTC
+  # The reusable workflow will build all branches defined in the config
+  schedule:
+    - cron: '0 0 * * *'
+
+  # Manual trigger with optional branch override
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Which branch should be built'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  deploy:
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
+    with:
+      branch: ${{ inputs.branch }}
+      # Optional: Custom build command to override the default Maven deploy command
+      # Supports both single-line and multi-line commands
+      # Single-line example:
+      # custom_build_command: './mvnw clean install -B'
+      # Multi-line example:
+      # custom_build_command: |
+      #   ./mvnw clean install -B
+      #   ./mvnw verify -B
+      #   echo "Build completed"
+    secrets:
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+

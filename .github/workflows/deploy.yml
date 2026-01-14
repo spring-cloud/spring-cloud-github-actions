@@ -215,24 +215,47 @@ jobs:
       - name: Verify Maven installation
         run: ./mvnw --version
 
+      - name: Set build configuration
+        run: |
+          # Determine if docs profile should be included based on JDK configuration
+          # Logic: Include docs if (has-jdk8=true AND java-version=8) OR (has-jdk8=false AND java-version=17)
+          BUILD_WITH_DOCS=false
+
+          if [[ ("${{ matrix.has-jdk8 }}" == "true" && "${{ matrix.java-version }}" == "8") ]] || [[ ("${{ matrix.has-jdk8 }}" == "false" && "${{ matrix.java-version }}" == "17") ]]; then
+            BUILD_WITH_DOCS=true
+            echo "Docs profile will be included in this build"
+          else
+            echo "Docs profile will NOT be included in this build"
+          fi
+
+          echo "BUILD_WITH_DOCS=$BUILD_WITH_DOCS" >> $GITHUB_ENV
+          echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS"
+
       - name: Build and deploy
         run: |
+          # Write build command to temporary script file
           if [[ -n "${{ inputs.custom_build_command }}" ]]; then
-            # Write custom command to a script file to support multi-line commands
-            cat > /tmp/custom-build.sh << CUSTOM_BUILD_EOF
+            # Custom build command provided by caller
+            cat > /tmp/build-deploy.sh << 'CUSTOM_BUILD_EOF'
           ${{ inputs.custom_build_command }}
           CUSTOM_BUILD_EOF
-            chmod +x /tmp/custom-build.sh
-            bash /tmp/custom-build.sh
           else
-            # If branch config contains JDK 8, use docs profile with JDK 8
-            # Otherwise, use docs profile with JDK 17
-            if [[ ("${{ matrix.has-jdk8 }}" == "true" && "${{ matrix.java-version }}" == "8") ]] || [[ ("${{ matrix.has-jdk8 }}" == "false" && "${{ matrix.java-version }}" == "17") ]]; then
-              echo "Building with docs profile, and deploying docs"
-              ./mvnw clean deploy -Pdocs,deploy,spring -B -U
-            else
-              echo "Will not add docs profile, docs will not be deployed"
-              ./mvnw clean deploy -Pdeploy,spring -B -U
-            fi
+            # Default Maven build command with conditional docs profile
+            cat > /tmp/build-deploy.sh << 'DEFAULT_BUILD_EOF'
+          #!/bin/bash
+          set -e
+
+          # BUILD_WITH_DOCS is set by the "Set build configuration" step
+          if [[ "$BUILD_WITH_DOCS" == "true" ]]; then
+            echo "Building with docs profile, and deploying docs"
+            ./mvnw clean deploy -Pdocs,deploy,spring -B -U
+          else
+            echo "Will not add docs profile, docs will not be deployed"
+            ./mvnw clean deploy -Pdeploy,spring -B -U
           fi
+          DEFAULT_BUILD_EOF
+          fi
+
+          chmod +x /tmp/build-deploy.sh
+          bash /tmp/build-deploy.sh
 
