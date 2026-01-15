@@ -217,45 +217,46 @@ jobs:
 
       - name: Set build configuration
         run: |
-          # Determine if docs profile should be included based on JDK configuration
-          # Logic: Include docs if (has-jdk8=true AND java-version=8) OR (has-jdk8=false AND java-version=17)
+          # Determine if docs profile should be included and if artifacts should be deployed
+          # Logic: Include docs and deploy if (has-jdk8=true AND java-version=8) OR (has-jdk8=false AND java-version=17)
           BUILD_WITH_DOCS=false
+          SHOULD_DEPLOY=false
 
           if [[ ("${{ matrix.has-jdk8 }}" == "true" && "${{ matrix.java-version }}" == "8") ]] || [[ ("${{ matrix.has-jdk8 }}" == "false" && "${{ matrix.java-version }}" == "17") ]]; then
             BUILD_WITH_DOCS=true
+            SHOULD_DEPLOY=true
             echo "Docs profile will be included in this build"
+            echo "This build will deploy artifacts"
           else
             echo "Docs profile will NOT be included in this build"
+            echo "This build will NOT deploy artifacts"
           fi
 
           echo "BUILD_WITH_DOCS=$BUILD_WITH_DOCS" >> $GITHUB_ENV
-          echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS"
+          echo "SHOULD_DEPLOY=$SHOULD_DEPLOY" >> $GITHUB_ENV
+          echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS, SHOULD_DEPLOY=$SHOULD_DEPLOY"
+
+      - name: Build
+        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'false' }}
+        run: |
+          # Run Maven install for non-deploying JDK versions (no docs profile needed)
+          echo "Building without deployment"
+          ./mvnw clean install -Pspring -B -U
 
       - name: Build and deploy
+        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
+        run: |
+          # Run Maven deploy for the designated JDK version (always includes docs profile)
+          echo "Building with docs profile and deploying artifacts"
+          ./mvnw clean deploy -Pdocs,deploy,spring -B -U
+
+      - name: Custom build command
+        if: ${{ inputs.custom_build_command != '' }}
         env:
           CUSTOM_BUILD_COMMAND: ${{ inputs.custom_build_command }}
         run: |
-          # Write build command to temporary script file
-          if [[ -n "$CUSTOM_BUILD_COMMAND" ]]; then
-            # Custom build command provided by caller
-            printf '%s\n' "$CUSTOM_BUILD_COMMAND" > /tmp/build-deploy.sh
-          else
-            # Default Maven build command with conditional docs profile
-            cat > /tmp/build-deploy.sh << 'DEFAULT_BUILD_EOF'
-          #!/bin/bash
-          set -e
-
-          # BUILD_WITH_DOCS is set by the "Set build configuration" step
-          if [[ "$BUILD_WITH_DOCS" == "true" ]]; then
-            echo "Building with docs profile, and deploying docs"
-            ./mvnw clean deploy -Pdocs,deploy,spring -B -U
-          else
-            echo "Will not add docs profile, docs will not be deployed"
-            ./mvnw clean deploy -Pdeploy,spring -B -U
-          fi
-          DEFAULT_BUILD_EOF
-          fi
-
+          # Execute custom build command provided by caller
+          printf '%s\n' "$CUSTOM_BUILD_COMMAND" > /tmp/build-deploy.sh
           chmod +x /tmp/build-deploy.sh
           bash /tmp/build-deploy.sh
 
