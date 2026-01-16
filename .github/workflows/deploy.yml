@@ -11,18 +11,6 @@ on:
         description: 'Custom run command for the Build and Deploy step (overrides default Maven command)'
         required: false
         type: string
-      custom_build_action:
-        description: 'Custom action reference for build/test (e.g., ./.github/actions/build-and-test or org/repo/.github/actions/name@ref)'
-        required: false
-        type: string
-      custom_build_action_inputs:
-        description: 'JSON string of inputs to pass to custom build action'
-        required: false
-        type: string
-      custom_deploy_command:
-        description: 'Custom deploy command to run after custom build action when SHOULD_DEPLOY is true'
-        required: false
-        type: string
       runs_on:
         description: 'Runner to use for the build job (defaults to ubuntu-latest)'
         required: false
@@ -138,40 +126,22 @@ jobs:
           echo "SHOULD_DEPLOY=$SHOULD_DEPLOY" >> $GITHUB_ENV
           echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS, SHOULD_DEPLOY=$SHOULD_DEPLOY"
 
-      - name: Custom build action
-        if: ${{ inputs.custom_build_action != '' }}
-        uses: ${{ inputs.custom_build_action }}
-        with:
-          java-version: ${{ matrix.java-version }}
-          inputs: ${{ inputs.custom_build_action_inputs }}
-
-      - name: Custom deploy command
-        if: ${{ inputs.custom_build_action != '' && inputs.custom_deploy_command != '' && env.SHOULD_DEPLOY == 'true' }}
-        env:
-          CUSTOM_DEPLOY_COMMAND: ${{ inputs.custom_deploy_command }}
-        run: |
-          # Execute custom deploy command after custom build action
-          echo "Running custom deploy command"
-          printf '%s\n' "$CUSTOM_DEPLOY_COMMAND" > /tmp/custom-deploy.sh
-          chmod +x /tmp/custom-deploy.sh
-          bash /tmp/custom-deploy.sh
-
       - name: Build
-        if: ${{ inputs.custom_build_action == '' && inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'false' }}
+        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'false' }}
         run: |
           # Run Maven install for non-deploying JDK versions (no docs profile needed)
           echo "Building without deployment"
           ./mvnw clean install -Pspring -B -U
 
       - name: Build and deploy
-        if: ${{ inputs.custom_build_action == '' && inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
+        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
         run: |
           # Run Maven deploy for the designated JDK version (always includes docs profile)
           echo "Building with docs profile and deploying artifacts"
           ./mvnw clean deploy -Pdocs,deploy,spring -B -U
 
       - name: Custom build command
-        if: ${{ inputs.custom_build_action == '' && inputs.custom_build_command != '' }}
+        if: ${{ inputs.custom_build_command != '' }}
         env:
           CUSTOM_BUILD_COMMAND: ${{ inputs.custom_build_command }}
         run: |
