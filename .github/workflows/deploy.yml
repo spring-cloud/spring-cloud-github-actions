@@ -35,12 +35,9 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Determine branches and JDK versions
         id: set-matrix
-        uses: ./.github/actions/determine-matrix
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
         with:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}
