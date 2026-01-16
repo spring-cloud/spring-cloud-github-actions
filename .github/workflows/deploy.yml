@@ -35,124 +35,17 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Checkout spring-cloud-github-actions for config
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          repository: spring-cloud/spring-cloud-github-actions
-          ref: main
-          path: github-actions-config
 
       - name: Determine branches and JDK versions
         id: set-matrix
-        run: |
-          echo "=== Workflow Debug Information ==="
-          echo "Event name: ${{ github.event_name }}"
-          echo "Ref name: ${{ github.ref_name }}"
-          echo "Repository: ${{ github.repository }}"
-          echo "Branch input: ${{ inputs.branch }}"
-          echo ""
-          
-          # Extract repository name (without org)
-          FULL_REPO="${{ github.repository }}"
-          REPO_NAME="${FULL_REPO#*/}"
-          echo "Repository name: $REPO_NAME"
-          
-          # Check if this is a commercial repository
-          IS_COMMERCIAL=false
-          BASE_REPO_NAME="$REPO_NAME"
-          if [[ "$REPO_NAME" == *"-commercial" ]]; then
-            IS_COMMERCIAL=true
-            BASE_REPO_NAME="${REPO_NAME%-commercial}"
-            echo "Commercial repository detected, base name: $BASE_REPO_NAME"
-          fi
-          
-          # Read the configuration file
-          CONFIG_FILE="github-actions-config/config/projects.json"
-          if [[ ! -f "$CONFIG_FILE" ]]; then
-            echo "ERROR: Configuration file not found: $CONFIG_FILE"
-            exit 1
-          fi
-          
-          # Determine which config section to use (oss or commercial)
-          if [[ "$IS_COMMERCIAL" == "true" ]]; then
-            CONFIG_SECTION="commercial"
-          else
-            CONFIG_SECTION="oss"
-          fi
-          echo "Using config section: $CONFIG_SECTION"
-          
-          # Check if project exists in config, otherwise use defaults
-          PROJECT_EXISTS=$(jq -r --arg repo "$BASE_REPO_NAME" 'has($repo)' "$CONFIG_FILE")
-          if [[ "$PROJECT_EXISTS" == "true" ]]; then
-            echo "Found configuration for project: $BASE_REPO_NAME"
-            CONFIG_PATH=".[\"$BASE_REPO_NAME\"].$CONFIG_SECTION"
-          else
-            echo "No specific configuration found for $BASE_REPO_NAME, using defaults"
-            CONFIG_PATH=".defaults.$CONFIG_SECTION"
-          fi
-          
-          # Determine the branch to use
-          BRANCH="${{ inputs.branch }}"
-          if [[ -z "$BRANCH" ]]; then
-            BRANCH="${{ github.ref_name }}"
-          fi
-          echo "Target branch: $BRANCH"
-          
-          # Determine which branches to build based on event type
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "Trigger: Scheduled run - building multiple branches"
-            BRANCHES=$(jq -r "$CONFIG_PATH.branches.scheduled // .defaults.$CONFIG_SECTION.branches.scheduled" "$CONFIG_FILE" | jq -r '.[]')
-          else
-            echo "Trigger: ${{ github.event_name }} - building single branch"
-            BRANCHES="$BRANCH"
-          fi
-          
-          echo ""
-          echo "=== Branches to Build ==="
-          echo "$BRANCHES"
-          
-          echo ""
-          echo "=== Building Matrix ==="
-          
-          # Build matrix entries
-          MATRIX_ENTRIES=()
-          
-          for BRANCH in $BRANCHES; do
-            echo "Processing branch: $BRANCH"
-            
-            # Get JDK versions for this branch
-            JDK_VERSIONS=$(jq -r --arg branch "$BRANCH" \
-              "$CONFIG_PATH.jdkVersions[\$branch] // $CONFIG_PATH.jdkVersions.default // .defaults.$CONFIG_SECTION.jdkVersions.default" \
-              "$CONFIG_FILE" | jq -r '.[]')
-            
-            if [[ -z "$JDK_VERSIONS" ]]; then
-              # Fallback to global defaults
-              JDK_VERSIONS=$(jq -r ".defaults.$CONFIG_SECTION.jdkVersions.default[]" "$CONFIG_FILE")
-            fi
-            
-            echo "  JDK versions: $JDK_VERSIONS"
-            
-            # Check if JDK 8 is in the configuration for this branch
-            HAS_JDK8=false
-            if echo "$JDK_VERSIONS" | grep -q "^8$"; then
-              HAS_JDK8=true
-            fi
-            echo "  Has JDK 8: $HAS_JDK8"
-            
-            for VERSION in $JDK_VERSIONS; do
-              MATRIX_ENTRIES+=("{\"branch\":\"$BRANCH\",\"java-version\":\"$VERSION\",\"has-jdk8\":$HAS_JDK8}")
-            done
-          done
-          
-          # Join entries with comma and wrap in array
-          MATRIX_JSON="[$(IFS=,; echo "${MATRIX_ENTRIES[*]}")]"
-          
-          echo ""
-          echo "=== Generated Matrix ==="
-          echo "$MATRIX_JSON" | jq .
-          echo ""
-          
-          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+        uses: ./.github/actions/determine-matrix
+        with:
+          repository: ${{ github.repository }}
+          event-name: ${{ github.event_name }}
+          ref-name: ${{ github.ref_name }}
+          branch: ${{ inputs.branch }}
 
   build:
     name: Build ${{ matrix.branch }} (JDK ${{ matrix.java-version }})

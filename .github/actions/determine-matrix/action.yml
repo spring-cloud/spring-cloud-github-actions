@@ -1,0 +1,199 @@
+name: 'Determine Build Matrix'
+description: 'Determines branches and JDK versions for Spring Cloud project builds'
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Repository name (format: org/repo-name)'
+    required: true
+  event-name:
+    description: 'GitHub event name (schedule, push, workflow_dispatch, etc.)'
+    required: true
+  ref-name:
+    description: 'Git ref name (branch name)'
+    required: true
+  branch:
+    description: 'Optional branch override for single-branch builds'
+    required: false
+    default: ''
+  config-ref:
+    description: 'Git ref for spring-cloud-github-actions config (default: main)'
+    required: false
+    default: 'main'
+
+outputs:
+  matrix:
+    description: 'JSON matrix for GitHub Actions matrix strategy'
+    value: ${{ steps.determine-matrix.outputs.matrix }}
+  branches:
+    description: 'Comma-separated list of branches being built'
+    value: ${{ steps.determine-matrix.outputs.branches }}
+  branch-jdk-mapping:
+    description: 'JSON object mapping branches to JDK versions'
+    value: ${{ steps.determine-matrix.outputs.branch-jdk-mapping }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout config repository
+      uses: actions/checkout@v4
+      with:
+        repository: spring-cloud/spring-cloud-github-actions
+        ref: ${{ inputs.config-ref }}
+        path: github-actions-config
+
+    - name: Determine branches and JDK versions
+      id: determine-matrix
+      shell: bash
+      run: |
+        echo "=== Workflow Debug Information ==="
+        echo "Event name: ${{ inputs.event-name }}"
+        echo "Ref name: ${{ inputs.ref-name }}"
+        echo "Repository: ${{ inputs.repository }}"
+        echo "Branch input: ${{ inputs.branch }}"
+        echo ""
+
+        # Extract repository name (without org)
+        FULL_REPO="${{ inputs.repository }}"
+        REPO_NAME="${FULL_REPO#*/}"
+        echo "Repository name: $REPO_NAME"
+
+        # Check if this is a commercial repository
+        IS_COMMERCIAL=false
+        BASE_REPO_NAME="$REPO_NAME"
+        if [[ "$REPO_NAME" == *"-commercial" ]]; then
+          IS_COMMERCIAL=true
+          BASE_REPO_NAME="${REPO_NAME%-commercial}"
+          echo "Commercial repository detected, base name: $BASE_REPO_NAME"
+        fi
+
+        # Read the configuration file
+        CONFIG_FILE="github-actions-config/config/projects.json"
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+          echo "ERROR: Configuration file not found: $CONFIG_FILE"
+          exit 1
+        fi
+
+        # Determine which config section to use (oss or commercial)
+        if [[ "$IS_COMMERCIAL" == "true" ]]; then
+          CONFIG_SECTION="commercial"
+        else
+          CONFIG_SECTION="oss"
+        fi
+        echo "Using config section: $CONFIG_SECTION"
+
+        # Check if project exists in config, otherwise use defaults
+        PROJECT_EXISTS=$(jq -r --arg repo "$BASE_REPO_NAME" 'has($repo)' "$CONFIG_FILE")
+        if [[ "$PROJECT_EXISTS" == "true" ]]; then
+          echo "Found configuration for project: $BASE_REPO_NAME"
+          CONFIG_PATH=".[\"$BASE_REPO_NAME\"].$CONFIG_SECTION"
+        else
+          echo "No specific configuration found for $BASE_REPO_NAME, using defaults"
+          CONFIG_PATH=".defaults.$CONFIG_SECTION"
+        fi
+
+        # Determine the branch to use
+        BRANCH="${{ inputs.branch }}"
+        if [[ -z "$BRANCH" ]]; then
+          BRANCH="${{ inputs.ref-name }}"
+        fi
+        echo "Target branch: $BRANCH"
+
+        # Determine which branches to build based on event type
+        if [[ "${{ inputs.event-name }}" == "schedule" ]]; then
+          echo "Trigger: Scheduled run - building multiple branches"
+          BRANCHES=$(jq -r "$CONFIG_PATH.branches.scheduled // .defaults.$CONFIG_SECTION.branches.scheduled" "$CONFIG_FILE" | jq -r '.[]')
+        else
+          echo "Trigger: ${{ inputs.event-name }} - building single branch"
+          BRANCHES="$BRANCH"
+        fi
+
+        echo ""
+        echo "=== Branches to Build ==="
+        echo "$BRANCHES"
+
+        echo ""
+        echo "=== Building Matrix ==="
+
+        # Build matrix entries and branch-jdk mapping
+        MATRIX_ENTRIES=()
+        declare -A BRANCH_JDK_MAP
+
+        for BRANCH in $BRANCHES; do
+          echo "Processing branch: $BRANCH"
+
+          # Get JDK versions for this branch
+          JDK_VERSIONS=$(jq -r --arg branch "$BRANCH" \
+            "$CONFIG_PATH.jdkVersions[\$branch] // $CONFIG_PATH.jdkVersions.default // .defaults.$CONFIG_SECTION.jdkVersions.default" \
+            "$CONFIG_FILE" | jq -r '.[]')
+
+          if [[ -z "$JDK_VERSIONS" ]]; then
+            # Fallback to global defaults
+            JDK_VERSIONS=$(jq -r ".defaults.$CONFIG_SECTION.jdkVersions.default[]" "$CONFIG_FILE")
+          fi
+
+          echo "  JDK versions: $JDK_VERSIONS"
+
+          # Check if JDK 8 is in the configuration for this branch
+          HAS_JDK8=false
+          if echo "$JDK_VERSIONS" | grep -q "^8$"; then
+            HAS_JDK8=true
+          fi
+          echo "  Has JDK 8: $HAS_JDK8"
+
+          # Build JDK array for this branch
+          JDK_ARRAY="["
+          FIRST=true
+          for VERSION in $JDK_VERSIONS; do
+            if [[ "$FIRST" == "true" ]]; then
+              JDK_ARRAY+="\"$VERSION\""
+              FIRST=false
+            else
+              JDK_ARRAY+=",\"$VERSION\""
+            fi
+            MATRIX_ENTRIES+=("{\"branch\":\"$BRANCH\",\"java-version\":\"$VERSION\",\"has-jdk8\":$HAS_JDK8}")
+          done
+          JDK_ARRAY+="]"
+
+          # Store branch-jdk mapping
+          BRANCH_JDK_MAP["$BRANCH"]="$JDK_ARRAY"
+        done
+
+        # Join entries with comma and wrap in array
+        MATRIX_JSON="[$(IFS=,; echo "${MATRIX_ENTRIES[*]}")]"
+
+        echo ""
+        echo "=== Generated Matrix ==="
+        echo "$MATRIX_JSON" | jq .
+        echo ""
+
+        # Generate branches list (comma-separated)
+        BRANCHES_LIST=$(echo "$BRANCHES" | tr '\n' ',' | sed 's/,$//')
+        echo "Branches list: $BRANCHES_LIST"
+
+        # Generate branch-jdk-mapping JSON
+        MAPPING_JSON="{"
+        FIRST=true
+        for BRANCH in $BRANCHES; do
+          if [[ "$FIRST" == "true" ]]; then
+            MAPPING_JSON+="\"$BRANCH\":${BRANCH_JDK_MAP[$BRANCH]}"
+            FIRST=false
+          else
+            MAPPING_JSON+=",\"$BRANCH\":${BRANCH_JDK_MAP[$BRANCH]}"
+          fi
+        done
+        MAPPING_JSON+="}"
+
+        echo ""
+        echo "=== Branch-JDK Mapping ==="
+        echo "$MAPPING_JSON" | jq .
+        echo ""
+
+        # Output all three values
+        echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+        echo "branches=$BRANCHES_LIST" >> $GITHUB_OUTPUT
+        echo "branch-jdk-mapping=$MAPPING_JSON" >> $GITHUB_OUTPUT
+
+branding:
+  icon: 'git-branch'
+  color: 'green'
