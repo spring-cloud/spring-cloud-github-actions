@@ -3,8 +3,8 @@ name: Spring Cloud Deploy (Reusable)
 on:
   workflow_call:
     inputs:
-      branch:
-        description: 'Which branch should be built (for workflow_dispatch)'
+      branches:
+        description: 'Which branch(es) should be built - single branch or comma-separated list (e.g., "main,3.3.x,3.2.x")'
         required: false
         type: string
       custom_build_command:
@@ -42,7 +42,7 @@ jobs:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}
           ref-name: ${{ github.ref_name }}
-          branch: ${{ inputs.branch }}
+          branches: ${{ inputs.branches }}
 
   build:
     name: Build ${{ matrix.branch }} (JDK ${{ matrix.java-version }})

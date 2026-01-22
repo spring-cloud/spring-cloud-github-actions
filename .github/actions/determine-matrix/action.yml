@@ -12,8 +12,8 @@ inputs:
   ref-name:
     description: 'Git ref name (branch name)'
     required: true
-  branch:
-    description: 'Optional branch override for single-branch builds'
+  branches:
+    description: 'Optional branch override (single branch or comma-separated list) for builds'
     required: false
     default: ''
   config-ref:
@@ -50,7 +50,7 @@ runs:
         echo "Event name: ${{ inputs.event-name }}"
         echo "Ref name: ${{ inputs.ref-name }}"
         echo "Repository: ${{ inputs.repository }}"
-        echo "Branch input: ${{ inputs.branch }}"
+        echo "Branch input: ${{ inputs.branches }}"
         echo ""
 
         # Extract repository name (without org)
@@ -92,20 +92,29 @@ runs:
           CONFIG_PATH=".defaults.$CONFIG_SECTION"
         fi
 
-        # Determine the branch to use
-        BRANCH="${{ inputs.branch }}"
-        if [[ -z "$BRANCH" ]]; then
-          BRANCH="${{ inputs.ref-name }}"
-        fi
-        echo "Target branch: $BRANCH"
-
         # Determine which branches to build based on event type
         if [[ "${{ inputs.event-name }}" == "schedule" ]]; then
-          echo "Trigger: Scheduled run - building multiple branches"
+          echo "Trigger: Scheduled run - building multiple branches from config"
           BRANCHES=$(jq -r "$CONFIG_PATH.branches.scheduled // .defaults.$CONFIG_SECTION.branches.scheduled" "$CONFIG_FILE" | jq -r '.[]')
         else
-          echo "Trigger: ${{ inputs.event-name }} - building single branch"
-          BRANCHES="$BRANCH"
+          # Non-scheduled event: check branch input
+          BRANCH_INPUT="${{ inputs.branches }}"
+          if [[ -n "$BRANCH_INPUT" ]]; then
+            # Check if comma-separated
+            if [[ "$BRANCH_INPUT" == *","* ]]; then
+              echo "Trigger: ${{ inputs.event-name }} - building multiple branches from comma-separated input"
+              # Parse comma-separated branches: split, trim whitespace, filter empty
+              BRANCHES=$(echo "$BRANCH_INPUT" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+              BRANCH_COUNT=$(echo "$BRANCHES" | wc -l | tr -d ' ')
+              echo "Detected $BRANCH_COUNT branch(es) in comma-separated input: $(echo "$BRANCHES" | tr '\n' ',' | sed 's/,$//')"
+            else
+              echo "Trigger: ${{ inputs.event-name }} - building single branch from input"
+              BRANCHES="$BRANCH_INPUT"
+            fi
+          else
+            echo "Trigger: ${{ inputs.event-name }} - building single branch from ref"
+            BRANCHES="${{ inputs.ref-name }}"
+          fi
         fi
 
         echo ""

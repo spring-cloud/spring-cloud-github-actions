@@ -24,7 +24,7 @@ This action reads project configuration from `config/projects.json` in the sprin
 | `repository` | Repository name in format `org/repo-name` | Yes | - |
 | `event-name` | GitHub event name (schedule, push, workflow_dispatch, etc.) | Yes | - |
 | `ref-name` | Git ref name (branch name) | Yes | - |
-| `branch` | Optional branch override for single-branch builds | No | `''` |
+| `branches` | Optional branch override (single branch or comma-separated list) for builds | No | `''` |
 | `config-ref` | Git ref for spring-cloud-github-actions config | No | `main` |
 
 ## Outputs
@@ -56,7 +56,7 @@ jobs:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}
           ref-name: ${{ github.ref_name }}
-          branch: ${{ inputs.branch }}
+          branches: ${{ inputs.branches }}
 
   build:
     needs: setup
@@ -86,8 +86,31 @@ Other Spring Cloud repositories can reference this action:
     repository: ${{ github.repository }}
     event-name: ${{ github.event_name }}
     ref-name: ${{ github.ref_name }}
-    branch: ${{ inputs.branch }}
+    branches: ${{ inputs.branches }}
 ```
+
+### Using Comma-Separated Branches
+
+You can specify multiple branches using a comma-separated list. This is useful for manual workflow dispatches or when you want to build specific branches:
+
+```yaml
+- name: Determine build matrix
+  id: determine-matrix
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
+  with:
+    repository: ${{ github.repository }}
+    event-name: ${{ github.event_name }}
+    ref-name: ${{ github.ref_name }}
+    branches: "main,3.3.x,3.2.x"  # Build multiple branches
+```
+
+**Note**: Comma-separated branch input is ignored for scheduled events, which always use the `branches.scheduled` configuration from `projects.json`.
+
+**Examples**:
+- Single branch: `branches: "main"` → builds only `main`
+- Multiple branches: `branches: "main,3.3.x,3.2.x"` → builds all three branches
+- With whitespace: `branches: "main, 3.3.x , 3.2.x"` → automatically trims whitespace
+- Empty input: `branches: ""` → falls back to `ref-name`
 
 ### Using Additional Outputs
 
@@ -99,7 +122,7 @@ Other Spring Cloud repositories can reference this action:
     repository: ${{ github.repository }}
     event-name: ${{ github.event_name }}
     ref-name: ${{ github.ref_name }}
-    branch: ${{ inputs.branch }}
+    branches: ${{ inputs.branches }}
 
 - name: Display build info
   run: |
@@ -117,7 +140,7 @@ Other Spring Cloud repositories can reference this action:
     repository: ${{ github.repository }}
     event-name: ${{ github.event_name }}
     ref-name: ${{ github.ref_name }}
-    branch: ${{ inputs.branch }}
+    branches: ${{ inputs.branches }}
     config-ref: 'feature/new-config-structure'  # Use feature branch config
 ```
 
@@ -162,8 +185,11 @@ The action reads configuration from `config/projects.json` in the spring-cloud-g
 1. **Repository Detection**: Extracts repository name and detects commercial vs OSS variant
 2. **Config Loading**: Checks out spring-cloud-github-actions repo and reads `config/projects.json`
 3. **Branch Determination**:
-   - For scheduled runs: builds multiple branches from config
-   - For other events: builds single branch (from input or ref-name)
+   - For scheduled runs: builds multiple branches from config (ignores branch input)
+   - For other events:
+     - If `branch` input is provided and contains commas: parses comma-separated list
+     - If `branch` input is provided (single branch): uses that branch
+     - Otherwise: uses `ref-name` (the triggering branch)
 4. **JDK Mapping**: Maps each branch to its configured JDK versions
 5. **Matrix Generation**: Creates matrix entries for each branch + JDK combination
 6. **Additional Outputs**: Generates branches list and branch-jdk-mapping
@@ -189,8 +215,8 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'Branch to build'
+      branches:
+        description: 'Branch(es) to build - single branch or comma-separated list'
         required: false
 
 jobs:
@@ -210,7 +236,7 @@ jobs:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}
           ref-name: ${{ github.ref_name }}
-          branch: ${{ inputs.branch }}
+          branches: ${{ inputs.branches }}
 
   build:
     name: Build ${{ matrix.branch }} (JDK ${{ matrix.java-version }})

@@ -1,6 +1,9 @@
 # Example caller workflow for Spring Cloud projects
 # Copy this file to your project's .github/workflows/deploy.yml
 # and customize the branch names in the 'on.push.branches' section
+#
+# Note: The 'branches' input accepts either a single branch name or a comma-separated
+# list of branches (e.g., "main,3.3.x,3.2.x") for building multiple branches in one run.
 
 name: Deploy
 
@@ -19,8 +22,8 @@ on:
   # Manual trigger with optional branch override
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'Which branch should be built'
+      branches:
+        description: 'Which branch(es) should be built - single branch or comma-separated list (e.g., "main,3.3.x,3.2.x")'
         required: false
         default: ''
         type: string
@@ -29,7 +32,7 @@ jobs:
   deploy:
     uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
     with:
-      branch: ${{ inputs.branch }}
+      branches: ${{ inputs.branches }}
       # Optional: Custom build command to override the default Maven deploy command
       # Supports both single-line and multi-line commands
       # Single-line example:
