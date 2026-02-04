@@ -5,7 +5,7 @@
 # Note: The 'branches' input accepts either a single branch name or a comma-separated
 # list of branches (e.g., "main,3.3.x,3.2.x") for building multiple branches in one run.
 
-name: Deploy
+name: Spring Cloud CI Job
 
 on:
   push:
@@ -19,7 +19,7 @@ on:
   schedule:
     - cron: '0 0 * * *'
 
-  # Manual trigger with optional branch override
+  # Manual trigger with optional inputs
   workflow_dispatch:
     inputs:
       branches:
@@ -27,12 +27,18 @@ on:
         required: false
         default: ''
         type: string
+      runs_on:
+        description: 'Runner to use for the build job (defaults to ubuntu-latest)'
+        required: false
+        default: 'ubuntu-latest'
+        type: string
 
 jobs:
   deploy:
     uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
     with:
       branches: ${{ inputs.branches }}
+      runs_on: ${{ inputs.runs_on }}
       # Optional: Custom build command to override the default Maven deploy command
       # Supports both single-line and multi-line commands
       # Single-line example:
@@ -45,6 +51,9 @@ jobs:
     secrets:
       ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
       ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+      # Required for commercial repositories (e.g., *-commercial)
+      # COMMERCIAL_ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+      # COMMERCIAL_ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
