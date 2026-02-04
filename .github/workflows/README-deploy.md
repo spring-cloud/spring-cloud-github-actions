@@ -127,9 +127,15 @@ To override the default Maven command:
 with:
   branches: ${{ inputs.branches }}
   custom_build_command: |
-    ./mvnw clean install -B
-    ./mvnw verify -B
+    if [[ "$SHOULD_DEPLOY" == "true" ]]; then
+      ./mvnw clean deploy -Pdocs,deploy,spring -B -U
+    else
+      echo "Will not deploy artifacts"
+    ./mvnw clean install -Pspring -B -U
+    fi
 ```
+When using a custom_build_command there is an environment variable named `SHOULD_DEPLOY` which indicates that the JDK being used is the one we should deploy snapshots from (currently JDK 8 if supported or JDK 17).  This is also the JDK
+we should use to build docs.  This is why in the snippet above we call the `deploy` goal and add the `docs` and `deploy` profiles when `SHOULD_DEPLOY` is true.
 
 ## Configuration
 
