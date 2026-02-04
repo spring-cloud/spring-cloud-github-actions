@@ -29,6 +29,6 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 
 1. In your Spring Cloud project, add a workflow that calls the deploy workflow (see [examples/deploy.yml](examples/deploy.yml)).
 2. Configure the required secrets in your repository (`ARTIFACTORY_*`, `DOCKERHUB_*`; add `COMMERCIAL_*` for commercial repos).
-3. Trigger via push, schedule, or `workflow_dispatch`. The deploy workflow will use this repo’s config and actions to decide what to build and deploy.
+3. Trigger via push, schedule, and/or `workflow_dispatch`. The deploy workflow will use this repo’s config and actions to decide what to build and deploy.
 
 For full details on inputs, secrets, and behavior, see the [Deploy workflow README](.github/workflows/README-deploy.md) and the [Determine Matrix action README](.github/actions/determine-matrix/README.md).

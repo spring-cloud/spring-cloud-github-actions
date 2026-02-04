@@ -54,7 +54,7 @@ Deploy and docs are enabled for one JDK per branch (JDK 8 if the branch has JDK 
 
 ### Basic usage from a Spring Cloud repo
 
-In your project’s `.github/workflows/deploy.yml`:
+In your project’s `.github/workflows/ci.yml`:
 
 ```yaml
 jobs:
@@ -71,6 +71,49 @@ jobs:
 ```
 
 For commercial projects, also pass `COMMERCIAL_ARTIFACTORY_USERNAME` and `COMMERCIAL_ARTIFACTORY_PASSWORD`.
+
+#### Triggering The Workflow
+
+You can trigger the workflow from a variety of events.  Most repos will want to trigger the workflow on pushes, a schedule, and a manual trigger.
+
+```yaml
+on:
+  push:
+    branches:
+      - main
+      # other supported branched
+      - 4.3.x
+      - 4.2.x
+
+  # Scheduled builds run daily at midnight UTC
+  schedule:
+    - cron: '0 0 * * *'
+
+  # Manual trigger with optional branch override
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: "Which branch should be built (can be a comma-separated list of branches)"
+        required: true
+        default: 'main'
+        type: string
+```
+
+There are a few things to note about how the schedule and push triggers work on GitHub.
+
+##### Scheduled Triggers
+
+**Scheduled triggers only get triggered from the repo's default branch.**
+This means that if `main` is the default branch in your repo and you have the configuration above setup in your workflow, that there will not be any scheduled execution on the 4.3.x. and 4.2.x branches.  The `deploy.yaml` in this repo takes that into account.  When your workflow is triggered to run via a schedule event `deploy.yaml` will setup the matrix to build all supported branches configured in the projects.json.  When you look at the workflow in the GitHub Actions UI you will see something that looks like this for scheduled executions.
+
+![scheduled_triggers.png](../../docs/images/scheduled_triggers.png)
+
+Notice the workflow was triggered via a scheduled event, ran on the `main`
+branch (which is the default branch in this repo) but it checked out and built all supported branches for this repo (determined via `projects.json`).
+
+##### Push Triggers
+
+Given that scheduled triggers only execute on the default branch and we can build all the other branches from the default branch it might not seem necessary to have a workflow on the other supported branches in the repo.  Unfortunately for push events the workflow needs to be present on the branch the push event occurred in order for it to execute.  **If you want to build and deploy your snapshots on push events to branches other than the default branch your workflow also needs to be in the `.github/workflows` folder on those branches.**
 
 ### Example caller workflow
 
