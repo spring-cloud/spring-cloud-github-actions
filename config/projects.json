@@ -2,21 +2,21 @@
   "spring-cloud-kubernetes": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "3.3.x", "3.2.x"],
+        "scheduled": ["main", "3.3.x"],
         "default": ["main"]
       },
       "jdkVersions": {
         "main": ["17", "21", "25"],
-        "3.3.x": ["17", "21", "25"],
-        "3.2.x": ["17", "21"]
+        "3.3.x": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["3.1.x", "2.1.x"],
-        "default": ["3.1.x"]
+        "scheduled": ["3.2.x", "3.1.x", "2.1.x"],
+        "default": ["3.2.x"]
       },
       "jdkVersions": {
+        "3.2.x": ["17", "21"],
         "3.1.x": ["17", "21"],
         "2.1.x": ["8", "11", "17"]
       }
@@ -25,21 +25,21 @@
   "spring-cloud-circuitbreaker": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "3.3.x", "3.2.x"],
+        "scheduled": ["main", "3.3.x"],
         "default": ["main"]
       },
       "jdkVersions": {
         "main": ["17", "21", "25"],
-        "3.3.x": ["17", "21", "25"],
-        "3.2.x": ["17", "21"]
+        "3.3.x": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["3.1.x", "2.1.x"],
-        "default": ["3.1.x"]
+        "scheduled": ["3.2.x", "3.1.x", "2.1.x"],
+        "default": ["3.2.x"]
       },
       "jdkVersions": {
+        "3.2.x": ["17", "21"],
         "3.1.x": ["17", "21"],
         "2.1.x": ["8", "11", "17"]
       }
@@ -48,22 +48,22 @@
   "defaults": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x", "4.2.x"],
+        "scheduled": ["main", "4.3.x"],
         "default": ["main"]
       },
       "jdkVersions": {
         "main": ["17", "21", "25"],
         "4.3.x": ["17", "21", "25"],
-        "4.2.x": ["17", "21"],
         "default": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["4.1.x", "3.1.x"],
-        "default": ["4.1.x"]
+        "scheduled": ["4.2.x", "4.1.x", "3.1.x"],
+        "default": ["4.2.x", "4.1.x"]
       },
       "jdkVersions": {
+        "4.2.x": ["17", "21"],
         "4.1.x": ["17", "21"],
         "3.1.x": ["8", "11", "17"],
         "default": ["17", "21"]
