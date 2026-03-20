@@ -140,6 +140,12 @@ jobs:
 
       - name: Build and deploy
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
+        env:
+          # Projects may need these to pull/deploy artifacts
+          # For example spring cloud contract uses Gradle and its docker/spring-cloud-contract-docker/project/build.gradle needs the credentials 
+          ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+
         run: |
           # Run Maven deploy for the designated JDK version (always includes docs profile)
           echo "Building with docs profile and deploying artifacts"
