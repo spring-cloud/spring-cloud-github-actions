@@ -1,0 +1,25 @@
+{
+  "name": "extract-bom-versions",
+  "version": "1.0.0",
+  "description": "GitHub Action to extract version properties from a Spring Cloud release train BOM pom.xml",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/index.js -o dist --license licenses.txt",
+    "test": "jest",
+    "test:coverage": "jest --coverage"
+  },
+  "dependencies": {
+    "@actions/core": "1.11.1",
+    "fast-xml-parser": "4.5.4"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "0.38.3",
+    "jest": "29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ]
+  }
+}
