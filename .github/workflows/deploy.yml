@@ -34,11 +34,16 @@ on:
       DOCKERHUB_TOKEN:
         required: true
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      non-default-branches: ${{ steps.set-matrix.outputs.non-default-branches }}
     steps:
       - name: Determine branches and JDK versions
         id: set-matrix
@@ -160,4 +165,30 @@ jobs:
           printf '%s\n' "$CUSTOM_BUILD_COMMAND" > /tmp/build-deploy.sh
           chmod +x /tmp/build-deploy.sh
           bash /tmp/build-deploy.sh
+
+  trigger-branch-ci:
+    name: Trigger CI for ${{ matrix.branch }}
+    needs: setup
+    if: github.event_name == 'schedule' && needs.setup.outputs.non-default-branches != '[]'
+    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.setup.outputs.non-default-branches) }}
+    steps:
+      - name: Dispatch ci.yml or ci.yaml for ${{ matrix.branch }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${{ matrix.branch }}"
+          REPO="${{ github.repository }}"
+          if gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+            echo "Dispatched ci.yml for $BRANCH"
+          elif gh workflow run ci.yaml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+            echo "Dispatched ci.yaml for $BRANCH"
+          else
+            echo "ERROR: Could not dispatch ci.yml or ci.yaml on branch $BRANCH"
+            echo "Ensure the workflow file exists on that branch and has 'workflow_dispatch' as a trigger"
+            exit 1
+          fi
 

@@ -31,6 +31,9 @@ outputs:
   branch-jdk-mapping:
     description: 'JSON object mapping branches to JDK versions'
     value: ${{ steps.determine-matrix.outputs.branch-jdk-mapping }}
+  non-default-branches:
+    description: 'JSON array of scheduled branches that are not the default branch (to have their CI dispatched)'
+    value: ${{ steps.determine-matrix.outputs.non-default-branches }}
 
 runs:
   using: 'composite'
@@ -94,9 +97,26 @@ runs:
 
         # Determine which branches to build based on event type
         if [[ "${{ inputs.event-name }}" == "schedule" ]]; then
-          echo "Trigger: Scheduled run - building multiple branches from config"
-          BRANCHES=$(jq -r "$CONFIG_PATH.branches.scheduled // .defaults.$CONFIG_SECTION.branches.scheduled" "$CONFIG_FILE" | jq -r '.[]')
+          echo "Trigger: Scheduled run - building default branch directly, dispatching CI for others"
+          DEFAULT_BRANCH="${{ inputs.ref-name }}"
+          echo "Default branch (from ref-name): $DEFAULT_BRANCH"
+
+          ALL_SCHEDULED=$(jq -r "$CONFIG_PATH.branches.scheduled // .defaults.$CONFIG_SECTION.branches.scheduled" "$CONFIG_FILE" | jq -r '.[]')
+
+          # Only build the default branch directly in the matrix
+          BRANCHES="$DEFAULT_BRANCH"
+
+          # Compute non-default branches (scheduled branches that are not the default branch)
+          NON_DEFAULT_ENTRIES=()
+          for B in $ALL_SCHEDULED; do
+            if [[ "$B" != "$DEFAULT_BRANCH" ]]; then
+              NON_DEFAULT_ENTRIES+=("\"$B\"")
+            fi
+          done
+          NON_DEFAULT_JSON="[$(IFS=,; echo "${NON_DEFAULT_ENTRIES[*]}")]"
+          echo "Non-default branches to dispatch CI for: $NON_DEFAULT_JSON"
         else
+          NON_DEFAULT_JSON="[]"
           # Non-scheduled event: check branch input
           BRANCH_INPUT="${{ inputs.branches }}"
           if [[ -n "$BRANCH_INPUT" ]]; then
@@ -198,10 +218,11 @@ runs:
         echo "$MAPPING_JSON" | jq .
         echo ""
 
-        # Output all three values
+        # Output all values
         echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
         echo "branches=$BRANCHES_LIST" >> $GITHUB_OUTPUT
         echo "branch-jdk-mapping=$MAPPING_JSON" >> $GITHUB_OUTPUT
+        echo "non-default-branches=$NON_DEFAULT_JSON" >> $GITHUB_OUTPUT
 
 branding:
   icon: 'git-branch'
