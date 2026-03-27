@@ -22,12 +22,23 @@ async function run() {
     let versions;
     let projectVersion;
 
+    const substitutionsInput = core.getInput('project-version-substitutions');
+    let substitutions = {};
+    if (substitutionsInput) {
+      try {
+        substitutions = JSON.parse(substitutionsInput);
+      } catch {
+        core.setFailed('Invalid JSON supplied for the project-version-substitutions input');
+        return;
+      }
+    }
+
     if (releaseTrainVersion) {
       // ── Fetch versions from the jenkins-releaser-config properties file ──────
       const url = getReleaserConfigUrl(commercial, releaseTrainVersion);
       core.info(`Fetching releaser config from ${url}`);
       const content = await fetchReleaserConfig(url, token);
-      versions = parseReleaserConfig(content);
+      versions = parseReleaserConfig(content, substitutions);
 
       // Auto-detect the project name from the root pom.xml <artifactId>
       const projectName = detectProjectName(directory);
@@ -112,6 +123,8 @@ async function run() {
         const { changed } = updateBuildGradleVersion(file, projectVersion);
         if (changed) {
           core.info(`Updated ${path.relative(directory, file)}: version`);
+        } else {
+          core.info(`No changes to ${path.relative(directory, file)}: version`);
         }
       }
     }
@@ -185,7 +198,7 @@ async function fetchReleaserConfig(url, token) {
  * @param {string} content - raw text of the properties file
  * @returns {Record<string, string>} e.g. { "spring-boot": "3.2.3", ... }
  */
-function parseReleaserConfig(content) {
+function parseReleaserConfig(content, substitutions = {}) {
   const versions = {};
   for (const line of content.split('\n')) {
     const match = line.match(/^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/);
@@ -193,6 +206,11 @@ function parseReleaserConfig(content) {
       const projectName = match[1].trim();
       const version = match[2].trim();
       versions[projectName] = version;
+    }
+  }
+  for (const [key, value] of Object.entries(substitutions)) {
+    if (versions[value] !== undefined) {
+      versions[key] = versions[value];
     }
   }
   return versions;
@@ -225,7 +243,7 @@ function detectProjectName(directory) {
       'Could not auto-detect project name: no <artifactId> found in root pom.xml'
     );
   }
-  return String(artifactId);
+  return artifactIdToProjectName(String(artifactId));
 }
 
 // ── pom.xml ────────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ The following directories are always skipped: `.git`, `node_modules`, `target`, 
 | `versions` | ✴️ | — | JSON object mapping project names to versions (e.g. `{"spring-boot":"3.2.3","spring-cloud-config":"4.1.1"}`). Typically produced by the `extract-bom-versions` action. Required when `release-train-version` is not set. |
 | `project-version` | ✴️ | — | The new version for this project (e.g. `4.1.2`). Used to update the root `pom.xml` `<version>`, child `<parent><version>` when the parent is the root project, the bare `version=` in `gradle.properties`, and the `version = '...'` line in `build.gradle`. Required when `release-train-version` is not set. |
 | `directory` | ❌ | `.` | Root directory of the project to update. Defaults to the repository root. |
+| `project-version-substitutions` | ❌ | — | JSON object mapping additional version property name prefixes to project names already in the versions map. Only used with `release-train-version`. See [Version name substitutions](#version-name-substitutions). |
 
 ✴️ Either `release-train-version` **or** both `versions` and `project-version` must be supplied.
 
@@ -137,6 +138,24 @@ Property keys follow the camelCase convention used by Spring Cloud projects:
 
 Only keys matching the pattern `^[a-zA-Z0-9]+Version$` (a camelCase prefix immediately followed by `Version`) are considered. Keys like `releaseVersion` or `versionCode` are intentionally ignored.
 
+## Version name substitutions
+
+Some projects use version property names that don't follow the standard camelCase-to-kebab-case convention. The `project-version-substitutions` input lets you bridge these non-standard names to the correct project entry in the versions map.
+
+For example, `spring-cloud-contract` uses `verifierVersion` in its `gradle.properties` instead of the expected `springCloudContractVersion`. The camelCase-to-kebab conversion of `verifier` is just `verifier`, which has no entry in the versions map. To fix this, pass:
+
+```yaml
+- name: Update project versions
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+  with:
+    release-train-version: '2025.1.0'
+    project-version-substitutions: '{"verifier":"spring-cloud-contract"}'
+```
+
+This adds a synthetic `verifier` entry to the versions map with the same version as `spring-cloud-contract`, so `verifierVersion` in `gradle.properties` is updated correctly.
+
+The format is `{"<property-prefix>": "<existing-project-name>"}`. The value must be a key already present in the parsed versions map; unknown values are silently ignored. This input is only used when `release-train-version` is set.
+
 ## Example — Maven multi-module project
 
 Given a `versions` map of `{"spring-boot":"3.2.3","spring-cloud-commons":"4.1.1"}` and `project-version` of `4.1.2`:
@@ -227,4 +246,18 @@ The action runs from `dist/index.js`, which is a self-contained bundle produced 
 npm run build
 git add dist/index.js dist/licenses.txt
 git commit -m "rebuild dist"
+```
+
+### Testing Locally
+
+You can run node script for this action against a project checked out locally on your machine.  Here is an example:
+
+```bash
+env \
+  'INPUT_RELEASE-TRAIN-VERSION=2025.1.0' \
+  INPUT_DIRECTORY=/git-repos/spring-cloud/spring-cloud-contract \
+  GITHUB_OUTPUT=/dev/null \
+  GITHUB_ENV=/dev/null \
+  'INPUT_PROJECT-VERSION-SUBSTITUTIONS={"verifier":"spring-cloud-contract", "boot":"spring-boot"}' \
+  node src/index.js
 ```

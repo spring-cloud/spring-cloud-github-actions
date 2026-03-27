@@ -44,6 +44,15 @@ inputs:
     description: 'Root directory of the project to update. Defaults to the current working directory.'
     required: false
     default: '.'
+  project-version-substitutions:
+    description: >
+      A JSON object that maps project names in pom.xml, gradle.properties, or build.gradle to versions when the action uses release-train-version
+      to derive the versions map and project version.  In some projects there may be properties for versions that don't conform to normal
+      naming conventions.  For example, in spring-cloud-contract uses verifierVersion in gradle.properties files.  This should map
+      to the version of spring-cloud-contract from the properties file for the release-train-version.  To accomplish this, you
+      can pass a JSON object {"verifier":"spring-cloud-contract"}.  This will map the verifierVersion property in gradle.properties to
+      the version of spring-cloud-contract in the properties file.
+    required: false
 
 runs:
   using: node20

@@ -140,11 +140,12 @@ describe('replacePropertyValue', () => {
 // ── updateGradlePropertiesContent ─────────────────────────────────────────────
 
 describe('updateGradlePropertiesContent', () => {
-  const versions = {
-    'spring-boot': '3.2.3',
-    'spring-cloud-commons': '4.1.1',
-    'spring-cloud-bus': '4.1.1',
-  };
+  const content = loadFixture('releaser-config', '2024_1_0.properties');
+  const substitutions = {
+    'verifier': 'spring-cloud-contract',
+    'boot': 'spring-boot'
+  }
+  const versions = parseReleaserConfig(content, substitutions);
   const projectVersion = '3.1.1';
 
   let result;
@@ -165,6 +166,10 @@ describe('updateGradlePropertiesContent', () => {
     expect(result.updated).toMatch(/^springBootVersion=3\.2\.3$/m);
     expect(result.updatedProperties).toContain('springBootVersion: 3.2.3');
   });
+  it('updates bootVersion', () => {
+    expect(result.updated).toMatch(/^bootVersion=3\.2\.3$/m);
+    expect(result.updatedProperties).toContain('bootVersion: 3.2.3');
+  });
 
   it('updates springCloudCommonsVersion', () => {
     expect(result.updated).toMatch(/^springCloudCommonsVersion=4\.1\.1$/m);
@@ -172,6 +177,10 @@ describe('updateGradlePropertiesContent', () => {
 
   it('updates springCloudBusVersion', () => {
     expect(result.updated).toMatch(/^springCloudBusVersion=4\.1\.1$/m);
+  });
+
+  it('updates verifierVersion', () => {
+    expect(result.updated).toMatch(/^verifierVersion=4\.1\.1$/m);
   });
 
   it('leaves non-Version keys unchanged', () => {
@@ -446,6 +455,22 @@ releaser.fixed-versions[spring-cloud-config]=4.1.1
   it('returns an empty map when no fixed-versions entries are present', () => {
     expect(parseReleaserConfig('# no versions here\n')).toEqual({});
   });
+
+  it('adds substitution entries from the versions map', () => {
+    const content = `
+releaser.fixed-versions[spring-cloud-contract]=4.1.0
+releaser.fixed-versions[spring-boot]=3.2.3
+`;
+    const versions = parseReleaserConfig(content, { verifier: 'spring-cloud-contract' });
+    expect(versions['verifier']).toBe('4.1.0');
+    expect(versions['spring-cloud-contract']).toBe('4.1.0');
+  });
+
+  it('silently ignores substitutions whose value is not in the versions map', () => {
+    const content = `releaser.fixed-versions[spring-boot]=3.2.3\n`;
+    const versions = parseReleaserConfig(content, { verifier: 'spring-cloud-contract' });
+    expect(versions['verifier']).toBeUndefined();
+  });
 });
 
 // ── detectProjectName ─────────────────────────────────────────────────────────
@@ -454,6 +479,19 @@ describe('detectProjectName', () => {
   it('reads the artifactId from the root pom.xml', () => {
     const name = detectProjectName(fixturePath('maven-single'));
     expect(name).toBe('spring-cloud-config');
+  });
+
+  it('strips -parent suffix from the artifactId', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'detect-project-test-'));
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, 'pom.xml'),
+        '<project><artifactId>spring-cloud-task-parent</artifactId></project>'
+      );
+      expect(detectProjectName(tmpDir)).toBe('spring-cloud-task');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('throws when no pom.xml is present in the directory', () => {
