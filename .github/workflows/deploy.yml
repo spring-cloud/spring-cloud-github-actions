@@ -47,7 +47,7 @@ jobs:
     steps:
       - name: Determine branches and JDK versions
         id: set-matrix
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@run-workflow-for-other-branch-when-schedule
         with:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}
@@ -167,28 +167,33 @@ jobs:
           bash /tmp/build-deploy.sh
 
   trigger-branch-ci:
-    name: Trigger CI for ${{ matrix.branch }}
+    name: Trigger CI for non-default branches
     needs: setup
-    if: github.event_name == 'schedule' && needs.setup.outputs.non-default-branches != '[]'
-    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        branch: ${{ fromJson(needs.setup.outputs.non-default-branches) }}
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
     steps:
-      - name: Dispatch ci.yml or ci.yaml for ${{ matrix.branch }}
+      - name: Dispatch CI workflows for non-default branches
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          BRANCH="${{ matrix.branch }}"
+          BRANCHES='${{ needs.setup.outputs.non-default-branches }}'
           REPO="${{ github.repository }}"
-          if gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
-            echo "Dispatched ci.yml for $BRANCH"
-          elif gh workflow run ci.yaml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
-            echo "Dispatched ci.yaml for $BRANCH"
-          else
-            echo "ERROR: Could not dispatch ci.yml or ci.yaml on branch $BRANCH"
-            echo "Ensure the workflow file exists on that branch and has 'workflow_dispatch' as a trigger"
-            exit 1
+
+          if [[ -z "$BRANCHES" || "$BRANCHES" == "[]" ]]; then
+            echo "No non-default branches to dispatch CI for"
+            exit 0
           fi
+
+          echo "$BRANCHES" | jq -r '.[]' | while read -r BRANCH; do
+            echo "Dispatching CI for branch: $BRANCH"
+            if gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+              echo "Dispatched ci.yml for $BRANCH"
+            elif gh workflow run ci.yaml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+              echo "Dispatched ci.yaml for $BRANCH"
+            else
+              echo "ERROR: Could not dispatch ci.yml or ci.yaml on branch $BRANCH"
+              echo "Ensure the workflow file exists on that branch and has 'workflow_dispatch' as a trigger"
+              exit 1
+            fi
+          done
 
