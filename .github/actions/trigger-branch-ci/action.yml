@@ -1,0 +1,47 @@
+name: 'Trigger Branch CI'
+description: 'Dispatches the ci.yml or ci.yaml workflow for each non-default branch in a Spring Cloud project'
+author: 'Spring Cloud Team'
+
+inputs:
+  non-default-branches:
+    description: 'JSON array of branch names to dispatch CI for (e.g. ["3.3.x","4.3.x"])'
+    required: true
+  repository:
+    description: 'Repository to dispatch workflows in (format: org/repo-name)'
+    required: true
+  token:
+    description: 'GitHub token with actions: write permission'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Dispatch CI for non-default branches
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        BRANCHES='${{ inputs.non-default-branches }}'
+        REPO="${{ inputs.repository }}"
+
+        if [[ -z "$BRANCHES" || "$BRANCHES" == "[]" ]]; then
+          echo "No non-default branches to dispatch CI for"
+          exit 0
+        fi
+
+        echo "$BRANCHES" | jq -r '.[]' | while read -r BRANCH; do
+          echo "Dispatching CI for branch: $BRANCH"
+          if gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+            echo "Dispatched ci.yml for $BRANCH"
+          elif gh workflow run ci.yaml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+            echo "Dispatched ci.yaml for $BRANCH"
+          else
+            echo "ERROR: Could not dispatch ci.yml or ci.yaml on branch $BRANCH"
+            echo "Ensure the workflow file exists on that branch and has 'workflow_dispatch' as a trigger"
+            exit 1
+          fi
+        done
+
+branding:
+  icon: 'git-branch'
+  color: 'green'

@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: 'temurin'
+      trigger_ci_on_non_default_branches:
+        description: 'Trigger CI on non-default branches'
+        required: false
+        type: boolean
+        default: true
     secrets:
       ARTIFACTORY_USERNAME:
         required: true
@@ -169,31 +174,13 @@ jobs:
   trigger-branch-ci:
     name: Trigger CI for non-default branches
     needs: setup
-    if: github.event_name == 'schedule'
+    if: ${{ github.event_name == 'schedule' && inputs.trigger_ci_on_non_default_branches }}
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch CI workflows for non-default branches
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          BRANCHES='${{ needs.setup.outputs.non-default-branches }}'
-          REPO="${{ github.repository }}"
-
-          if [[ -z "$BRANCHES" || "$BRANCHES" == "[]" ]]; then
-            echo "No non-default branches to dispatch CI for"
-            exit 0
-          fi
-
-          echo "$BRANCHES" | jq -r '.[]' | while read -r BRANCH; do
-            echo "Dispatching CI for branch: $BRANCH"
-            if gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
-              echo "Dispatched ci.yml for $BRANCH"
-            elif gh workflow run ci.yaml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
-              echo "Dispatched ci.yaml for $BRANCH"
-            else
-              echo "ERROR: Could not dispatch ci.yml or ci.yaml on branch $BRANCH"
-              echo "Ensure the workflow file exists on that branch and has 'workflow_dispatch' as a trigger"
-              exit 1
-            fi
-          done
+      - name: Dispatch CI for non-default branches
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@run-workflow-for-other-branch-when-schedule
+        with:
+          non-default-branches: ${{ needs.setup.outputs.non-default-branches }}
+          repository: ${{ github.repository }}
+          token: ${{ github.token }}
 
