@@ -1,0 +1,34 @@
+name: Build
+
+on:
+  workflow_call:
+    secrets:
+      ARTIFACTORY_USERNAME:
+        required: false
+      ARTIFACTORY_PASSWORD:
+        required: false
+
+jobs:
+  pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Cache local Maven repository
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+      - name: set env variables
+        env:
+          RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+        uses: "./.github/actions/set-commercial-creds-env-vars"
+      - name: Build with Maven
+        run: ./mvnw -s .settings.xml clean install -B -U -Pspring
