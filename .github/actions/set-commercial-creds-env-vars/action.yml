@@ -1,0 +1,36 @@
+# This set will set the correct environment variable for access to the commercial repositories
+# When our normal CI actions build runs the action has access to the read/write credential 
+# When the CI actions build for PRs run we only have access to read only (RO) credentials hence we need this logic
+# # Jobs can use this composite by doing the following
+# jobs:
+#   build:
+#       - name: set env variables
+#         env:
+#           PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+#           RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+#           USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+#           RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+#         uses: "spring-cloud/spring-cloud-github-actions/.github/set-commercial-creds-env-vars@main"
+name: Set Commercial Creds Env Vars
+description: Sets environment variables for commercial repos
+runs:
+  using: "composite"
+  steps:
+    - name: set env variables
+      shell: bash
+      run: |
+        if [[ $PASSWORD == "" ]]; then
+          echo "COMMERCIAL_ARTIFACTORY_PASSWORD is not set using read only secret"
+          echo "COMMERCIAL_ARTIFACTORY_PASSWORD=$(echo ${RO_PASSWORD})" >> $GITHUB_ENV
+        else
+          echo "COMMERCIAL_ARTIFACTORY_PASSWORD is set"
+          echo "COMMERCIAL_ARTIFACTORY_PASSWORD=$(echo ${PASSWORD})" >> $GITHUB_ENV
+        fi
+        
+        if [[ $USERNAME == "" ]]; then
+          echo "COMMERCIAL_ARTIFACTORY_USERNAME is not set using read only secret"
+          echo "COMMERCIAL_ARTIFACTORY_USERNAME=$(echo ${RO_USERNAME})" >> $GITHUB_ENV
+        else
+          echo "COMMERCIAL_ARTIFACTORY_USERNAME is set"
+          echo "COMMERCIAL_ARTIFACTORY_USERNAME=$(echo ${USERNAME})" >> $GITHUB_ENV
+        fi
