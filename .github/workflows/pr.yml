@@ -29,6 +29,6 @@ jobs:
         env:
           RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
           RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-        uses: "./.github/actions/set-commercial-creds-env-vars"
+        uses: "spring-cloud/spring-cloud-github-actions/actions/set-commercial-creds-env-vars/action.yml@main"
       - name: Build with Maven
         run: ./mvnw -s .settings.xml clean install -B -U -Pspring
