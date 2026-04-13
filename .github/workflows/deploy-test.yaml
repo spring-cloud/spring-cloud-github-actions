@@ -1,0 +1,185 @@
+name: Spring Cloud Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      branches:
+        description: 'Which branch(es) should be built - single branch or comma-separated list (e.g., "main,3.3.x,3.2.x")'
+        required: false
+        type: string
+      custom_build_command:
+        description: 'Custom run command for the Build and Deploy step (overrides default Maven command)'
+        required: false
+        type: string
+      runs_on:
+        description: 'Runner to use for the build job (defaults to ubuntu-latest)'
+        required: false
+        type: string
+      java_distribution:
+        description: 'The Java distribution to use for the JDK'
+        required: false
+        type: string
+        default: 'temurin'
+      trigger_ci_on_non_default_branches:
+        description: 'Trigger CI on non-default branches'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      ARTIFACTORY_USERNAME:
+        required: true
+      ARTIFACTORY_PASSWORD:
+        required: true
+      COMMERCIAL_ARTIFACTORY_USERNAME:
+        required: false
+      COMMERCIAL_ARTIFACTORY_PASSWORD:
+        required: false
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      non-default-branches: ${{ steps.set-matrix.outputs.non-default-branches }}
+    steps:
+      - name: Determine branches and JDK versions
+        id: set-matrix
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@run-workflow-for-other-branch-when-schedule
+        with:
+          repository: ${{ github.repository }}
+          event-name: ${{ github.event_name }}
+          ref-name: ${{ github.ref_name }}
+          branches: ${{ inputs.branches }}
+
+  build:
+    name: Build ${{ matrix.branch }} (JDK ${{ matrix.java-version }})
+    needs: setup
+    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          clean: true
+
+      - name: Set up JDK ${{ matrix.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: ${{ inputs.java_distribution }}
+          cache: 'maven'
+
+      - name: Configure Maven settings
+        uses: s4u/maven-settings-action@v3.0.0
+        with:
+          servers: |
+            [{
+              "id": "repo.spring.io",
+              "username": "${{ secrets.ARTIFACTORY_USERNAME }}",
+              "password": "${{ secrets.ARTIFACTORY_PASSWORD }}"
+            },
+            {
+              "id": "spring-commercial-snapshot",
+              "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
+              "password": "${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+            },
+            {
+              "id": "spring-commercial-release",
+              "username": "${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}",
+              "password": "${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}"
+            }]
+
+#      - name: Login to Docker Hub
+#        uses: docker/login-action@v3
+#        with:
+#          username: ${{ secrets.DOCKERHUB_USERNAME }}
+#          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Stop running Docker containers
+        continue-on-error: true
+        run: |
+          #!/bin/bash
+          if command -v timeout &> /dev/null; then
+            timeout 10s docker ps -a -q | xargs -n 1 -P 8 -I {} docker stop {} || echo "Failed to stop docker... Hopefully you know what you're doing"
+          fi
+
+      - name: Verify Maven installation
+        run: ./mvnw --version
+
+      - name: Set build configuration
+        run: |
+          # Determine if docs profile should be included and if artifacts should be deployed
+          # Logic: Include docs and deploy if (has-jdk8=true AND java-version=8) OR (has-jdk8=false AND java-version=17)
+          BUILD_WITH_DOCS=false
+          SHOULD_DEPLOY=false
+
+          if [[ ("${{ matrix.has-jdk8 }}" == "true" && "${{ matrix.java-version }}" == "8") ]] || [[ ("${{ matrix.has-jdk8 }}" == "false" && "${{ matrix.java-version }}" == "17") ]]; then
+            BUILD_WITH_DOCS=true
+            SHOULD_DEPLOY=true
+            echo "Docs profile will be included in this build"
+            echo "This build will deploy artifacts"
+          else
+            echo "Docs profile will NOT be included in this build"
+            echo "This build will NOT deploy artifacts"
+          fi
+
+          echo "BUILD_WITH_DOCS=$BUILD_WITH_DOCS" >> $GITHUB_ENV
+          echo "SHOULD_DEPLOY=$SHOULD_DEPLOY" >> $GITHUB_ENV
+          echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS, SHOULD_DEPLOY=$SHOULD_DEPLOY"
+
+      - name: Build
+        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'false' }}
+        run: |
+          # Run Maven install for non-deploying JDK versions (no docs profile needed)
+          echo "Building without deployment"
+          ./mvnw clean install -Pspring -B -U
+
+      - name: Build and deploy
+        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
+        env:
+          # Projects may need these to pull/deploy artifacts
+          # For example spring cloud contract uses Gradle and its docker/spring-cloud-contract-docker/project/build.gradle needs the credentials 
+          ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+
+        run: |
+          # Run Maven deploy for the designated JDK version (always includes docs profile)
+          echo "Building with docs profile and deploying artifacts"
+          ./mvnw clean deploy -Pdocs,deploy,spring -B -U
+
+      - name: Custom build command
+        if: ${{ inputs.custom_build_command != '' }}
+        env:
+          CUSTOM_BUILD_COMMAND: ${{ inputs.custom_build_command }}
+        run: |
+          # Execute custom build command provided by caller
+          printf '%s\n' "$CUSTOM_BUILD_COMMAND" > /tmp/build-deploy.sh
+          chmod +x /tmp/build-deploy.sh
+          bash /tmp/build-deploy.sh
+
+  trigger-branch-ci:
+    name: Trigger CI for non-default branches
+    needs: setup
+    if: ${{ github.event_name == 'schedule' && inputs.trigger_ci_on_non_default_branches }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch CI for non-default branches
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@run-workflow-for-other-branch-when-schedule
+        with:
+          non-default-branches: ${{ needs.setup.outputs.non-default-branches }}
+          repository: ${{ github.repository }}
+          token: ${{ github.token }}
