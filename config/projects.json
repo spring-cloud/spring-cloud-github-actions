@@ -150,7 +150,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["4.3.4.x, "4.2.x", "4.1.x", "3.1.x"],
+        "scheduled": ["4.3.4.x", "4.2.x", "4.1.x", "3.1.x"],
         "default": ["4.2.x"]
       },
       "jdkVersions": {
