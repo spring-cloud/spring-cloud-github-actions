@@ -2,6 +2,11 @@ name: Build
 
 on:
   workflow_call:
+    inputs:
+      custom_build_command:
+        description: 'Custom run command for the Build and Deploy step (overrides default Maven command)'
+        required: false
+        type: string
     secrets:
       ARTIFACTORY_USERNAME:
         required: false
@@ -31,4 +36,14 @@ jobs:
           RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
         uses: spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@main
       - name: Build with Maven
+        if: ${{ inputs.custom_build_command == '' }}
         run: ./mvnw -s .settings.xml clean install -B -U -Pspring
+      - name: Custom build command
+        if: ${{ inputs.custom_build_command != '' }}
+        env:
+          CUSTOM_BUILD_COMMAND: ${{ inputs.custom_build_command }}
+        run: |
+          # Execute custom build command provided by caller
+          printf '%s\n' "$CUSTOM_BUILD_COMMAND" > /tmp/build-deploy.sh
+          chmod +x /tmp/build-deploy.sh
+          bash /tmp/build-deploy.sh
