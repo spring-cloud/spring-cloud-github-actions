@@ -1,0 +1,25 @@
+{
+  "name": "update-commercial-repositories",
+  "version": "1.0.0",
+  "description": "GitHub Action to replace Spring OSS repo.spring.io references with commercial Broadcom repositories",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/index.js -o dist --license licenses.txt",
+    "test": "jest",
+    "test:coverage": "jest --coverage"
+  },
+  "dependencies": {
+    "@actions/core": "1.11.1",
+    "@actions/exec": "1.1.1"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "0.38.3",
+    "jest": "29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ]
+  }
+}

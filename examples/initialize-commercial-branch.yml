@@ -1,0 +1,38 @@
+# Example caller workflow for initializing a new branch in a commercial repository.
+# Copy this file to your project's .github/workflows/initialize-commercial-branch.yml
+# and fill in the oss_repo and commercial_repo values.
+
+name: Initialize Commercial Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      oss_branch:
+        description: 'OSS branch to copy (e.g. 3.3.x)'
+        required: true
+        type: string
+      commercial_branch:
+        description: 'Target branch name in the commercial repo (defaults to oss_branch)'
+        required: false
+        default: ''
+        type: string
+      set_default_branch:
+        description: 'Set the new branch as the default branch of the commercial repo'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  initialize:
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/initialize-commercial-branch.yml@main
+    with:
+      oss_repo: spring-cloud/spring-cloud-foo
+      oss_branch: ${{ inputs.oss_branch }}
+      commercial_repo: spring-cloud/spring-cloud-foo-commercial
+      commercial_branch: ${{ inputs.commercial_branch }}
+      set_default_branch: ${{ inputs.set_default_branch }}
+    secrets:
+      token: ${{ secrets.COMMERCIAL_REPO_TOKEN }}

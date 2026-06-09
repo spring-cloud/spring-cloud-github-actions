@@ -1,0 +1,34 @@
+name: 'Update License Headers'
+description: 'Replaces Apache License 2.0 headers with the Broadcom license header and replaces the LICENSE / LICENSE.txt file'
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Commercial repository to update (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'Branch to update'
+    required: true
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+  commit-message:
+    description: 'Commit message for the license updates'
+    required: false
+    default: 'Updating license headers'
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'file-text'
+  color: 'orange'

@@ -1,0 +1,34 @@
+name: 'Update Projects JSON'
+description: >
+  Updates config/projects.json when a new commercial branch is initialized.
+  Adds the branch to commercial.branches.scheduled, optionally updates
+  commercial.branches.default, adds commercial.jdkVersions sourced from the
+  OSS entry, and removes the branch from the OSS entry (regular branches only).
+author: 'Spring Cloud Team'
+
+inputs:
+  oss-repo:
+    description: 'OSS repository (format: org/repo-name)'
+    required: true
+  oss-branch:
+    description: 'OSS branch being copied. Leave empty when using an oss-tag (hotfix).'
+    required: false
+    default: ''
+  commercial-branch:
+    description: 'The new commercial branch name'
+    required: true
+  set-default-branch:
+    description: 'Set to "true" to update commercial.branches.default to the new branch'
+    required: false
+    default: 'false'
+  token:
+    description: 'GitHub token with contents:write on the spring-cloud-github-actions repository'
+    required: true
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'file-text'
+  color: 'blue'

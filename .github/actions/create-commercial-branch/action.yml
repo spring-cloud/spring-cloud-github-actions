@@ -1,0 +1,162 @@
+name: 'Create Commercial Branch'
+description: 'Creates a branch in a commercial repo from an OSS repo branch without carrying over OSS git history'
+author: 'Spring Cloud Team'
+
+inputs:
+  oss-repo:
+    description: 'Open source repository to copy from (format: org/repo-name)'
+    required: true
+  oss-branch:
+    description: 'Branch in the OSS repository to copy. Mutually exclusive with oss-tag.'
+    required: false
+    default: ''
+  oss-tag:
+    description: 'Tag in the OSS repository to copy. Mutually exclusive with oss-branch. When used, commercial-branch is required.'
+    required: false
+    default: ''
+  commercial-repo:
+    description: 'Commercial repository to create the branch in (format: org/repo-name)'
+    required: true
+  commercial-branch:
+    description: 'Target branch name in the commercial repo. Defaults to the value of oss-branch. Required when oss-tag is used.'
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token with contents: write permission on the commercial repo'
+    required: true
+  commit-message:
+    description: 'Commit message for the initial commit on the new commercial branch'
+    required: false
+    default: ''
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+outputs:
+  previous-default-branch:
+    description: 'The default branch of the commercial repo before the new branch was created'
+    value: ${{ steps.create-branch.outputs.previous-default-branch }}
+  commercial-branch:
+    description: 'The name of the branch that was created in the commercial repo'
+    value: ${{ steps.create-branch.outputs.commercial-branch }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Create commercial branch from OSS
+      id: create-branch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        OSS_REPO="${{ inputs.oss-repo }}"
+        OSS_BRANCH="${{ inputs.oss-branch }}"
+        OSS_TAG="${{ inputs.oss-tag }}"
+        COMMERCIAL_REPO="${{ inputs.commercial-repo }}"
+        COMMERCIAL_BRANCH="${{ inputs.commercial-branch }}"
+        COMMIT_MSG="${{ inputs.commit-message }}"
+
+        # Validate: exactly one of oss-branch or oss-tag must be provided
+        if [[ -z "$OSS_BRANCH" && -z "$OSS_TAG" ]]; then
+          echo "ERROR: Either oss-branch or oss-tag must be specified."
+          exit 1
+        fi
+        if [[ -n "$OSS_BRANCH" && -n "$OSS_TAG" ]]; then
+          echo "ERROR: oss-branch and oss-tag are mutually exclusive — specify only one."
+          exit 1
+        fi
+
+        # Resolve the OSS ref and default commercial-branch when needed
+        if [[ -n "$OSS_TAG" ]]; then
+          OSS_REF="$OSS_TAG"
+          OSS_SOURCE_DESC="tag '${OSS_TAG}'"
+          if [[ -z "$COMMERCIAL_BRANCH" ]]; then
+            echo "ERROR: commercial-branch is required when oss-tag is used."
+            exit 1
+          fi
+        else
+          OSS_REF="$OSS_BRANCH"
+          OSS_SOURCE_DESC="branch '${OSS_BRANCH}'"
+          if [[ -z "$COMMERCIAL_BRANCH" ]]; then
+            COMMERCIAL_BRANCH="$OSS_BRANCH"
+          fi
+        fi
+
+        if [[ -z "$COMMIT_MSG" ]]; then
+          COMMIT_MSG="Initialize ${COMMERCIAL_BRANCH} from ${OSS_REPO}@${OSS_REF}"
+        fi
+
+        echo "=== Create Commercial Branch ==="
+        echo "OSS repo:           $OSS_REPO"
+        echo "OSS source:         $OSS_SOURCE_DESC"
+        echo "Commercial repo:    $COMMERCIAL_REPO"
+        echo "Commercial branch:  $COMMERCIAL_BRANCH"
+        echo ""
+
+        # Capture the existing default branch before making any changes
+        PREVIOUS_DEFAULT=$(gh repo view "$COMMERCIAL_REPO" --json defaultBranchRef --jq '.defaultBranchRef.name')
+        echo "Existing default branch: ${PREVIOUS_DEFAULT}"
+        echo "previous-default-branch=${PREVIOUS_DEFAULT}" >> $GITHUB_OUTPUT
+        echo "commercial-branch=${COMMERCIAL_BRANCH}" >> $GITHUB_OUTPUT
+
+        # Clone the OSS repo (shallow, single branch — files only, no full history needed)
+        echo "Cloning OSS ${OSS_SOURCE_DESC} from ${OSS_REPO}..."
+        git clone --depth 1 --single-branch --branch "$OSS_REF" \
+          "https://x-access-token:${GH_TOKEN}@github.com/${OSS_REPO}.git" _oss_source
+
+        # Clone the commercial repo so we can push to it
+        echo "Cloning commercial repo ${COMMERCIAL_REPO}..."
+        git clone \
+          "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _commercial_repo
+
+        cd _commercial_repo
+
+        # Abort early if the target branch already exists remotely
+        if git ls-remote --exit-code --heads origin "$COMMERCIAL_BRANCH" > /dev/null 2>&1; then
+          echo "ERROR: Branch '${COMMERCIAL_BRANCH}' already exists in ${COMMERCIAL_REPO}."
+          echo "Delete it first or choose a different target branch name."
+          exit 1
+        fi
+
+        # Configure git identity
+        git config user.name "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        # Create an orphan branch so there is no connection to any prior history
+        git checkout --orphan "$COMMERCIAL_BRANCH"
+
+        # Remove any files that were staged from the clone (the orphan branch starts
+        # with the working tree of whatever HEAD was, but we want a clean slate)
+        git rm -rf . > /dev/null 2>&1 || true
+
+        # Extract the OSS content (excluding .git) into the commercial working tree
+        cd ../_oss_source
+        git archive HEAD | tar -x -C ../_commercial_repo
+        cd ../_commercial_repo
+
+        # Use --force so that files tracked in the OSS repo but matched by a
+        # nested .gitignore (e.g. docs/src/main/.gitignore ignoring org/) are
+        # still staged.  Everything here came from git-archive so there are no
+        # unintended build artifacts to worry about.
+        git add --force .
+
+        # Exit cleanly when the OSS branch is empty (nothing to commit)
+        if git diff --cached --quiet; then
+          echo "WARNING: No files found in '${OSS_BRANCH}' — nothing to commit."
+          exit 0
+        fi
+
+        git commit -m "$COMMIT_MSG"
+        git push origin "$COMMERCIAL_BRANCH"
+
+        echo ""
+        echo "Successfully created branch '${COMMERCIAL_BRANCH}' in ${COMMERCIAL_REPO}."
+
+branding:
+  icon: 'git-branch'
+  color: 'blue'

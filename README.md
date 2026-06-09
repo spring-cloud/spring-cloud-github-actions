@@ -12,14 +12,31 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 ## Workflows
 
 | Workflow | Description | Documentation |
-|----------|-------------|----------------|
-| [deploy.yml](.github/workflows/deploy.yml) | Build and deploy Spring Cloud projects with matrix builds (branch × JDK). Uses centralized config to decide what to build and deploy. | [Deploy workflow README](.github/workflows/README-deploy.md) |
+|----------|-------------|---------------|
+| [deploy.yml](.github/workflows/deploy.yml) | Build and deploy Spring Cloud projects with matrix builds (branch × JDK). Uses centralized config to decide what to build and deploy. | [README](.github/workflows/README-deploy.md) |
+| [pr.yml](.github/workflows/pr.yml) | Reusable build workflow called during pull requests. Accepts a custom build command and Artifactory/Dockerhub secrets. | — |
+| [initialize-commercial-branch.yml](.github/workflows/initialize-commercial-branch.yml) | Full-control workflow that creates a new commercial branch from an OSS branch and runs all commercial setup steps (settings, CI/PR workflows, licenses, repositories, distribution management, Antora playbook, projects.json). | [Example](examples/initialize-commercial-branch.yml) |
+| [create-commercial-branch.yml](.github/workflows/create-commercial-branch.yml) | Simplified wrapper over `initialize-commercial-branch` for the common case: copies an OSS branch to `<repo>-commercial` using the same branch name. | — |
+| [create-hotfix-branch.yml](.github/workflows/create-hotfix-branch.yml) | Creates a commercial hotfix branch from an OSS tag, applies all commercial setup steps, and stamps the project version to a hotfix snapshot. | [README](.github/workflows/README-create-hotfix-branch.md) |
+| [retire-branch.yml](.github/workflows/retire-branch.yml) | Retires a branch: removes it from `projects.json`, removes its Dependabot entries, and locks the branch via the GitHub API. | [README](.github/workflows/README-retire-branch.md) |
 
 ## Actions
 
 | Action | Description | Documentation |
 |--------|-------------|---------------|
-| [determine-matrix](.github/actions/determine-matrix/) | Reads [config/projects.json](config/projects.json) and produces a build matrix (branches × JDK versions) for the current repo and event. Supports OSS/commercial, scheduled vs single-branch, and comma-separated branch overrides. | [Determine Matrix README](.github/actions/determine-matrix/README.md) |
+| [determine-matrix](.github/actions/determine-matrix/) | Reads [config/projects.json](config/projects.json) and produces a build matrix (branches × JDK versions) for the current repo and event. Supports OSS/commercial, scheduled vs single-branch, and comma-separated branch overrides. | [README](.github/actions/determine-matrix/README.md) |
+| [create-commercial-branch](.github/actions/create-commercial-branch/) | Copies the content of an OSS branch into a new orphan branch in a commercial repository, with no OSS git history. Optionally sets the new branch as the repo default. | [README](.github/actions/create-commercial-branch/README.md) |
+| [copy-dependabot-config](.github/actions/copy-dependabot-config/) | Copies `dependabot.yml` / `dependabot.yaml` from one branch to another within the same repository as a separate commit. | [README](.github/actions/copy-dependabot-config/README.md) |
+| [copy-settings-xml](.github/actions/copy-settings-xml/) | Replaces `.settings.xml` on a target branch with the version from the source (or default) branch. | [README](.github/actions/copy-settings-xml/README.md) |
+| [update-oss-workflows-to-commercial](.github/actions/update-oss-workflows-to-commercial/) | Updates `ci` and `pr` workflow files on a commercial branch: restricts branches, adds `runs_on`, and injects Artifactory secrets. | [README](.github/actions/update-oss-workflows-to-commercial/README.md) |
+| [update-license-headers](.github/actions/update-license-headers/) | Replaces Apache License 2.0 headers with the Broadcom license header across all source files, and replaces `LICENSE` / `LICENSE.txt` with the Broadcom license file. | [README](.github/actions/update-license-headers/README.md) |
+| [update-commercial-repositories](.github/actions/update-commercial-repositories/) | Replaces `repo.spring.io` OSS repository references with commercial Broadcom Artifactory repositories in all Maven POM and Gradle build files. | [README](.github/actions/update-commercial-repositories/README.md) |
+| [update-distribution-management](.github/actions/update-distribution-management/) | Replaces OSS `<distributionManagement>` targets with commercial Broadcom Artifactory repositories and removes Maven Central publishing plugin references. | [README](.github/actions/update-distribution-management/README.md) |
+| [update-antora-playbook](.github/actions/update-antora-playbook/) | Registers a new commercial branch in the Antora playbook on the `docs-build` branch, expanding tag patterns as needed. | [README](.github/actions/update-antora-playbook/README.md) |
+| [update-projects-json](.github/actions/update-projects-json/) | Updates `config/projects.json` when a new commercial branch is initialized: adds the branch to `scheduled`, copies JDK versions from the OSS entry, and optionally updates the default branch. | [README](.github/actions/update-projects-json/README.md) |
+| [retire-branch-projects-json](.github/actions/retire-branch-projects-json/) | Updates `config/projects.json` when a branch is retired: removes it from `scheduled` and `jdkVersions`. Fails fast if the branch is still set as the default. | [README](.github/actions/retire-branch-projects-json/README.md) |
+| [trigger-branch-ci](.github/actions/trigger-branch-ci/) | Dispatches the `ci.yml` or `ci.yaml` workflow for each non-default branch in a Spring Cloud project. | [README](.github/actions/trigger-branch-ci/README.md) |
+| [set-commercial-creds-env-vars](.github/actions/set-commercial-creds-env-vars/) | Sets `COMMERCIAL_ARTIFACTORY_USERNAME/PASSWORD` environment variables, falling back to read-only credentials during PR builds. | [README](.github/actions/set-commercial-creds-env-vars/README.md) |
 
 ## Configuration
 
@@ -29,6 +46,6 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 
 1. In your Spring Cloud project, add a workflow that calls the deploy workflow (see [examples/deploy.yml](examples/deploy.yml)).
 2. Configure the required secrets in your repository (`ARTIFACTORY_*`, `DOCKERHUB_*`; add `COMMERCIAL_*` for commercial repos).
-3. Trigger via push, schedule, and/or `workflow_dispatch`. The deploy workflow will use this repo’s config and actions to decide what to build and deploy.
+3. Trigger via push, schedule, and/or `workflow_dispatch`. The deploy workflow will use this repo's config and actions to decide what to build and deploy.
 
 For full details on inputs, secrets, and behavior, see the [Deploy workflow README](.github/workflows/README-deploy.md) and the [Determine Matrix action README](.github/actions/determine-matrix/README.md).

@@ -1,0 +1,153 @@
+name: 'Update OSS Workflows to Commercial'
+description: 'Updates ci and pr GitHub Actions workflow files on a commercial branch with commercial-specific configuration'
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Commercial repository containing the workflows to update (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'Branch to update the workflow files on'
+    required: true
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+  commit-message:
+    description: 'Commit message for the workflow updates'
+    required: false
+    default: 'updating workflows for commercial repo'
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Update OSS workflows for commercial
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        REPO="${{ inputs.repository }}"
+        BRANCH="${{ inputs.branch }}"
+
+        echo "=== Update OSS Workflows to Commercial ==="
+        echo "Repository: $REPO"
+        echo "Branch:     $BRANCH"
+        echo ""
+
+        git clone --single-branch --branch "$BRANCH" \
+          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" _update_workflows_repo
+
+        cd _update_workflows_repo
+
+        git config user.name "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        WORKFLOWS_DIR=".github/workflows"
+
+        # Build the Artifactory secret reference strings character-by-character
+        # to avoid triggering the Actions template parser during YAML loading.
+        D='$' O='{' C='}'
+        ARTIFACTORY_USERNAME_VALUE="${D}${O}${O} secrets.ARTIFACTORY_USERNAME || secrets.ARTIFACTORY_RO_USERNAME ${C}${C}"
+        ARTIFACTORY_PASSWORD_VALUE="${D}${O}${O} secrets.ARTIFACTORY_PASSWORD || secrets.ARTIFACTORY_RO_PASSWORD ${C}${C}"
+
+        export UPDATE_BRANCH="$BRANCH"
+        export ARTIFACTORY_USERNAME_VALUE
+        export ARTIFACTORY_PASSWORD_VALUE
+
+        # -----------------------------------------------------------------------
+        # ci.yml / ci.yaml
+        # -----------------------------------------------------------------------
+        CI_FILE=""
+        if [[ -f "${WORKFLOWS_DIR}/ci.yml" ]]; then
+          CI_FILE="${WORKFLOWS_DIR}/ci.yml"
+        elif [[ -f "${WORKFLOWS_DIR}/ci.yaml" ]]; then
+          CI_FILE="${WORKFLOWS_DIR}/ci.yaml"
+        fi
+
+        if [[ -n "$CI_FILE" ]]; then
+          echo "Updating ${CI_FILE}..."
+
+          # on.push.branches — replace entire list with just this branch
+          yq e '.on.push.branches = [env(UPDATE_BRANCH)]' -i "$CI_FILE"
+
+          # on.workflow_dispatch.inputs.branches.default — update only if present
+          WD_DEFAULT=$(yq e '.on.workflow_dispatch.inputs.branches.default' "$CI_FILE")
+          if [[ "$WD_DEFAULT" != "null" ]]; then
+            yq e '.on.workflow_dispatch.inputs.branches.default = env(UPDATE_BRANCH)' -i "$CI_FILE"
+          fi
+
+          # jobs.deploy.with.runs_on — add/overwrite
+          yq e '.jobs.deploy.with.runs_on = "ubuntu22-2-8"' -i "$CI_FILE"
+
+          # permissions.actions — set to write if not already present
+          ACTIONS_PERM=$(yq e '.permissions.actions // "null"' "$CI_FILE")
+          if [[ "$ACTIONS_PERM" != "write" ]]; then
+            yq e '.permissions.actions = "write"' -i "$CI_FILE"
+          fi
+
+          # permissions.contents — set to read if not already present
+          CONTENTS_PERM=$(yq e '.permissions.contents // "null"' "$CI_FILE")
+          if [[ "$CONTENTS_PERM" != "read" ]]; then
+            yq e '.permissions.contents = "read"' -i "$CI_FILE"
+          fi
+
+          echo "  Done."
+        else
+          echo "::warning::update-oss-workflows-to-commercial: No ci.yml or ci.yaml found in ${WORKFLOWS_DIR} on branch '${BRANCH}' — CI workflow was not updated. Add a ci.yml to the branch and re-run if needed."
+          echo "### :warning: CI workflow not updated" >> "$GITHUB_STEP_SUMMARY"
+          echo "No \`ci.yml\` or \`ci.yaml\` was found in \`.github/workflows\` on branch \`${BRANCH}\`. The CI workflow could not be updated for the commercial repo. Add the file and re-run the action if needed." >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        # -----------------------------------------------------------------------
+        # pr.yml / pr.yaml
+        # -----------------------------------------------------------------------
+        PR_FILE=""
+        if [[ -f "${WORKFLOWS_DIR}/pr.yml" ]]; then
+          PR_FILE="${WORKFLOWS_DIR}/pr.yml"
+        elif [[ -f "${WORKFLOWS_DIR}/pr.yaml" ]]; then
+          PR_FILE="${WORKFLOWS_DIR}/pr.yaml"
+        fi
+
+        if [[ -n "$PR_FILE" ]]; then
+          echo "Updating ${PR_FILE}..."
+
+          # on.pull_request.branches — replace entire list with just this branch
+          yq e '.on.pull_request.branches = [env(UPDATE_BRANCH)]' -i "$PR_FILE"
+
+          # jobs.build.secrets — add Artifactory credentials
+          yq e '.jobs.build.secrets.ARTIFACTORY_USERNAME = strenv(ARTIFACTORY_USERNAME_VALUE)' -i "$PR_FILE"
+          yq e '.jobs.build.secrets.ARTIFACTORY_PASSWORD = strenv(ARTIFACTORY_PASSWORD_VALUE)' -i "$PR_FILE"
+
+          echo "  Done."
+        else
+          echo "::warning::update-oss-workflows-to-commercial: No pr.yml or pr.yaml found in ${WORKFLOWS_DIR} on branch '${BRANCH}' — PR workflow was not updated. Add a pr.yml to the branch and re-run if needed."
+          echo "### :warning: PR workflow not updated" >> "$GITHUB_STEP_SUMMARY"
+          echo "No \`pr.yml\` or \`pr.yaml\` was found in \`.github/workflows\` on branch \`${BRANCH}\`. The PR workflow could not be updated for the commercial repo. Add the file and re-run the action if needed." >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        # -----------------------------------------------------------------------
+        # Commit and push if anything changed
+        # -----------------------------------------------------------------------
+        git add .
+
+        if git diff --cached --quiet; then
+          echo "No workflow changes to commit."
+          exit 0
+        fi
+
+        git commit -m "${{ inputs.commit-message }}"
+        git push origin "$BRANCH"
+
+        echo ""
+        echo "Workflow updates committed to '${BRANCH}'."
+
+branding:
+  icon: 'settings'
+  color: 'orange'
