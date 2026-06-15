@@ -80,13 +80,25 @@ async function run() {
       core.info(`Found ${pomFiles.length} pom.xml file(s)`);
       const rootPom = path.join(directory, 'pom.xml');
 
+      // Capture the current root version before any files are modified so that
+      // non-root poms with a matching explicit <version> can be detected reliably.
+      let currentRootVersion = null;
+      if (fs.existsSync(rootPom)) {
+        const rootParser = new XMLParser({ ignoreAttributes: false });
+        const rootParsed = rootParser.parse(fs.readFileSync(rootPom, 'utf-8'));
+        currentRootVersion = rootParsed?.project?.version
+          ? String(rootParsed.project.version)
+          : null;
+      }
+
       for (const file of pomFiles) {
         const isRoot = path.resolve(file) === path.resolve(rootPom);
         const { changed, updatedProperties } = updatePomFile(
           file,
           isRoot,
           projectVersion,
-          versions
+          versions,
+          currentRootVersion
         );
         if (changed) {
           core.info(`Updated ${path.relative(directory, file)}: ${updatedProperties.join(', ')}`);
@@ -254,6 +266,11 @@ function detectProjectName(directory) {
  * For the root pom:
  *   - Updates the project <version> (skipping the <parent> block)
  *
+ * For non-root poms whose own <version> matches currentRootVersion:
+ *   - Also updates the project <version> (e.g. BOM / dependencies modules that
+ *     carry an explicit <version> equal to the root project version, such as
+ *     spring-cloud-circuitbreaker-dependencies)
+ *
  * For all pom files (root and child modules):
  *   - Updates <parent><version> when the parent artifactId is in the versions map
  *   - Updates <properties> entries ending in .version that match the versions map
@@ -264,8 +281,10 @@ function detectProjectName(directory) {
  * @param {boolean} isRoot - true when this is the root pom.xml of the project
  * @param {string} projectVersion
  * @param {Record<string, string>} versions
+ * @param {string|null} currentRootVersion - the root pom's version before any edits;
+ *   non-root poms whose own <version> equals this value will also have it updated
  */
-function updatePomFile(filePath, isRoot, projectVersion, versions) {
+function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVersion = null) {
   const content = fs.readFileSync(filePath, 'utf-8');
   let updated = content;
   const updatedProperties = [];
@@ -278,11 +297,19 @@ function updatePomFile(filePath, isRoot, projectVersion, versions) {
     return { changed: false, updatedProperties: [] };
   }
 
-  // 1. Update the project's own <version> in the root pom only.
-  //    We skip the <parent> block to avoid accidentally updating the inherited parent version.
-  if (isRoot && project.version) {
+  // 1. Update the project's own <version>, skipping the <parent> block.
+  //    - Always in the root pom.
+  //    - In non-root poms whose explicit <version> matches currentRootVersion
+  //      (e.g. spring-cloud-circuitbreaker-dependencies carries its own <version>
+  //      equal to the project version even though it is not the root pom).
+  const ownVersion = project.version ? String(project.version) : null;
+  const shouldUpdateOwnVersion =
+    ownVersion != null &&
+    (isRoot || (currentRootVersion != null && ownVersion === currentRootVersion));
+
+  if (shouldUpdateOwnVersion) {
     const prev = updated;
-    updated = replaceProjectVersion(updated, String(project.version), projectVersion);
+    updated = replaceProjectVersion(updated, ownVersion, projectVersion);
     if (updated !== prev) {
       updatedProperties.push(`version: ${projectVersion}`);
     }

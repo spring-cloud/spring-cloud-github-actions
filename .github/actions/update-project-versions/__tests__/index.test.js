@@ -316,6 +316,31 @@ describe('updatePomFile', () => {
     expect(written).toContain('<spring-boot.version>3.2.3</spring-boot.version>');
     expect(written).toContain('<spring-cloud-commons.version>4.1.1</spring-cloud-commons.version>');
   });
+
+  it('updates own <version> in a non-root BOM pom when it matches currentRootVersion', () => {
+    const src = fixturePath('maven-bom', 'pom.xml');
+    const dest = path.join(tmpDir, 'pom.xml');
+    fs.copyFileSync(src, dest);
+
+    const { changed, updatedProperties } = updatePomFile(dest, false, '4.1.1', versions, '4.1.0');
+
+    const written = fs.readFileSync(dest, 'utf-8');
+    expect(changed).toBe(true);
+    expect(written).toMatch(/<artifactId>spring-cloud-foo-dependencies<\/artifactId>\s*<version>4\.1\.1<\/version>/);
+    expect(updatedProperties).toContain('version: 4.1.1');
+    expect(written).toContain('<spring-boot.version>3.2.3</spring-boot.version>');
+  });
+
+  it('does not update own <version> in a non-root BOM pom when currentRootVersion is not provided', () => {
+    const src = fixturePath('maven-bom', 'pom.xml');
+    const dest = path.join(tmpDir, 'pom.xml');
+    fs.copyFileSync(src, dest);
+
+    updatePomFile(dest, false, '4.1.1', versions);
+
+    const written = fs.readFileSync(dest, 'utf-8');
+    expect(written).toContain('<version>4.1.0</version>');
+  });
 });
 
 // ── findFiles ──────────────────────────────────────────────────────────────────
