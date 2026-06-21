@@ -159,7 +159,7 @@ jobs:
         run: |
           # Run Maven deploy for the designated JDK version (always includes docs profile)
           echo "Building with docs profile and deploying artifacts"
-          ./mvnw clean deploy -Pdocs,deploy,spring -B -U
+          ./mvnw clean deploy -Pdocs,deploy,spring -B -U -X
 
       - name: Custom build command
         if: ${{ inputs.custom_build_command != '' }}
