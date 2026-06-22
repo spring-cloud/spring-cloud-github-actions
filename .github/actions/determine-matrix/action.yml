@@ -45,9 +45,18 @@ runs:
         ref: ${{ inputs.config-ref }}
         path: github-actions-config
 
+    - name: Check if commercial repository
+      id: is-commercial
+      uses: spring-cloud/spring-cloud-github-actions/.github/actions/is-commercial-repo@main
+      with:
+        repository: ${{ inputs.repository }}
+
     - name: Determine branches and JDK versions
       id: determine-matrix
       shell: bash
+      env:
+        IS_COMMERCIAL: ${{ steps.is-commercial.outputs.commercial }}
+        BASE_REPO_NAME: ${{ steps.is-commercial.outputs.base-repo-name }}
       run: |
         echo "=== Workflow Debug Information ==="
         echo "Event name: ${{ inputs.event-name }}"
@@ -56,17 +65,8 @@ runs:
         echo "Branch input: ${{ inputs.branches }}"
         echo ""
 
-        # Extract repository name (without org)
-        FULL_REPO="${{ inputs.repository }}"
-        REPO_NAME="${FULL_REPO#*/}"
-        echo "Repository name: $REPO_NAME"
-
-        # Check if this is a commercial repository
-        IS_COMMERCIAL=false
-        BASE_REPO_NAME="$REPO_NAME"
-        if [[ "$REPO_NAME" == *"-commercial" ]]; then
-          IS_COMMERCIAL=true
-          BASE_REPO_NAME="${REPO_NAME%-commercial}"
+        echo "Repository name: $BASE_REPO_NAME"
+        if [[ "$IS_COMMERCIAL" == "true" ]]; then
           echo "Commercial repository detected, base name: $BASE_REPO_NAME"
         fi
 

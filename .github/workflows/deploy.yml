@@ -70,6 +70,10 @@ jobs:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
 
     steps:
+      - name: Check if commercial repository
+        id: is-commercial
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/is-commercial-repo@main
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -161,8 +165,8 @@ jobs:
         env:
           # Projects may need these to pull/deploy artifacts
           # For example spring cloud contract uses Gradle and its docker/spring-cloud-contract-docker/project/build.gradle needs the credentials 
-          ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+          ARTIFACTORY_USERNAME: ${{ steps.is-commercial.outputs.commercial == 'true' && secrets.COMMERCIAL_ARTIFACTORY_USERNAME || secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ steps.is-commercial.outputs.commercial == 'true' && secrets.COMMERCIAL_ARTIFACTORY_PASSWORD || secrets.ARTIFACTORY_PASSWORD }}
 
         run: |
           # Run Maven deploy for the designated JDK version (always includes docs profile)

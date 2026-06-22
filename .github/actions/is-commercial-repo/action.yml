@@ -1,0 +1,38 @@
+name: Is Commercial Repo
+description: Determines if a repository is a commercial repository (name ends with -commercial)
+author: Spring Cloud Team
+
+inputs:
+  repository:
+    description: 'Repository in owner/repo format'
+    required: false
+    default: ${{ github.repository }}
+
+outputs:
+  commercial:
+    description: 'true if the repository name ends with -commercial, false otherwise'
+    value: ${{ steps.check.outputs.commercial }}
+  base-repo-name:
+    description: 'Repository name (without org prefix) with the -commercial suffix removed'
+    value: ${{ steps.check.outputs.base-repo-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check if commercial repository
+      id: check
+      shell: bash
+      run: |
+        REPO_NAME="${{ inputs.repository }}"
+        REPO_NAME="${REPO_NAME#*/}"
+        if [[ "$REPO_NAME" == *"-commercial" ]]; then
+          echo "commercial=true" >> $GITHUB_OUTPUT
+          echo "base-repo-name=${REPO_NAME%-commercial}" >> $GITHUB_OUTPUT
+        else
+          echo "commercial=false" >> $GITHUB_OUTPUT
+          echo "base-repo-name=$REPO_NAME" >> $GITHUB_OUTPUT
+        fi
+
+branding:
+  icon: 'shopping-bag'
+  color: 'green'
