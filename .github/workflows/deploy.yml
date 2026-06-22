@@ -120,6 +120,14 @@ jobs:
       - name: Verify Maven installation
         run: ./mvnw --version
 
+      - name: Set Maven flags
+        run: |
+          MAVEN_FLAGS=""
+          if [[ "${{ runner.debug }}" == "1" ]]; then
+            MAVEN_FLAGS="-X"
+          fi
+          echo "MAVEN_FLAGS=$MAVEN_FLAGS" >> $GITHUB_ENV
+
       - name: Set build configuration
         run: |
           # Determine if docs profile should be included and if artifacts should be deployed
@@ -146,7 +154,7 @@ jobs:
         run: |
           # Run Maven install for non-deploying JDK versions (no docs profile needed)
           echo "Building without deployment"
-          ./mvnw clean install -Pspring -B -U
+          ./mvnw clean install -Pspring -B -U $MAVEN_FLAGS
 
       - name: Build and deploy
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
@@ -159,7 +167,7 @@ jobs:
         run: |
           # Run Maven deploy for the designated JDK version (always includes docs profile)
           echo "Building with docs profile and deploying artifacts"
-          ./mvnw clean deploy -Pdocs,deploy,spring -B -U -X
+          ./mvnw clean deploy -Pdocs,deploy,spring -B -U $MAVEN_FLAGS
 
       - name: Custom build command
         if: ${{ inputs.custom_build_command != '' }}

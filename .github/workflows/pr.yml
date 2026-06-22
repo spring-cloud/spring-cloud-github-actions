@@ -35,9 +35,16 @@ jobs:
           RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
           RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
         uses: spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@main
+      - name: Set Maven flags
+        run: |
+          MAVEN_FLAGS=""
+          if [[ "${{ runner.debug }}" == "1" ]]; then
+            MAVEN_FLAGS="-X"
+          fi
+          echo "MAVEN_FLAGS=$MAVEN_FLAGS" >> $GITHUB_ENV
       - name: Build with Maven
         if: ${{ inputs.custom_build_command == '' }}
-        run: ./mvnw -s .settings.xml clean install -B -U -Pspring
+        run: ./mvnw -s .settings.xml clean install -B -U -Pspring ${{ env.MAVEN_FLAGS }}
       - name: Custom build command
         if: ${{ inputs.custom_build_command != '' }}
         env:
