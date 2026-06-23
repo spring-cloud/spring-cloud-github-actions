@@ -1,0 +1,6 @@
+name: Retire Branch
+
+on:
+  workflow_dispatch:
+
+jobs:
