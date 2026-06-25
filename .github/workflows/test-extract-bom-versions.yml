@@ -1,0 +1,112 @@
+name: Test - Extract BOM Versions
+
+on:
+  push:
+    paths:
+      - '.github/actions/extract-bom-versions/**'
+      - '.github/workflows/test-extract-bom-versions.yml'
+  pull_request:
+    paths:
+      - '.github/actions/extract-bom-versions/**'
+      - '.github/workflows/test-extract-bom-versions.yml'
+
+jobs:
+  # ── Unit tests ─────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/extract-bom-versions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/actions/extract-bom-versions/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run unit tests
+        run: npm test
+
+  # ── Integration test (OSS) ──────────────────────────────────────────────────
+  # Fetches the real public Spring Cloud BOM and verifies known versions are
+  # correctly extracted by the action.
+  integration-test-oss:
+    name: Integration Test (OSS BOM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract versions from OSS BOM
+        id: extract
+        uses: ./.github/actions/extract-bom-versions
+
+      - name: Verify versions JSON is valid
+        run: |
+          echo "Versions JSON: ${{ steps.extract.outputs.versions }}"
+          echo '${{ steps.extract.outputs.versions }}' | jq .
+
+      - name: Verify spring-boot version is present in output
+        run: |
+          SPRING_BOOT=$(echo '${{ steps.extract.outputs.versions }}' | jq -r '.["spring-boot"]')
+          echo "spring-boot version: $SPRING_BOOT"
+          if [[ -z "$SPRING_BOOT" || "$SPRING_BOOT" == "null" ]]; then
+            echo "ERROR: spring-boot version was not extracted"
+            exit 1
+          fi
+          echo "✅ spring-boot version extracted successfully: $SPRING_BOOT"
+
+      - name: Verify SPRING_BOOT_VERSION env var is exported
+        run: |
+          if [[ -z "$SPRING_BOOT_VERSION" ]]; then
+            echo "ERROR: SPRING_BOOT_VERSION environment variable was not exported"
+            exit 1
+          fi
+          echo "✅ SPRING_BOOT_VERSION=$SPRING_BOOT_VERSION"
+
+      - name: Verify RELEASE_TRAIN_VERSION env var is exported
+        run: |
+          if [[ -z "$RELEASE_TRAIN_VERSION" ]]; then
+            echo "ERROR: RELEASE_TRAIN_VERSION environment variable was not exported"
+            exit 1
+          fi
+          echo "✅ RELEASE_TRAIN_VERSION=$RELEASE_TRAIN_VERSION"
+
+  # ── Dist is up to date ──────────────────────────────────────────────────────
+  # Ensures dist/index.js reflects the current source so nobody forgets to
+  # run `npm run build` before committing.
+  dist-up-to-date:
+    name: Verify dist is up to date
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/extract-bom-versions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/actions/extract-bom-versions/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Rebuild dist
+        run: npm run build
+
+      - name: Fail if dist/index.js has uncommitted changes
+        run: |
+          if git diff --quiet dist/index.js; then
+            echo "✅ dist/index.js is up to date"
+          else
+            echo "❌ dist/index.js is out of date — run 'npm run build' and commit the result"
+            git diff dist/index.js
+            exit 1
+          fi
