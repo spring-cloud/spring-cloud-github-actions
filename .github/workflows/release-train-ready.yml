@@ -1,0 +1,62 @@
+name: Release Train Ready
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config)'
+        required: true
+        type: string
+      project-version:
+        description: 'Project version (e.g. 4.2.0)'
+        required: true
+        type: string
+      spring-cloud-release-train-version:
+        description: 'Release train version matching the jenkins-releaser-config properties file (e.g. 2025.0.0)'
+        required: true
+        type: string
+      spring-release-train-version:
+        description: 'Release train version to mark this project ready in (e.g. 2025.0.0)'
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config)'
+        required: true
+        type: string
+      project-version:
+        description: 'Project version (e.g. 4.2.0)'
+        required: true
+        type: string
+      spring-cloud-release-train-version:
+        description: 'Release train version matching the jenkins-releaser-config properties file (e.g. 2025.0.0)'
+        required: true
+        type: string
+      spring-release-train-version:
+        description: 'Release train version to mark this project ready in (e.g. 2025.0.0)'
+        required: true
+        type: string
+    secrets:
+      GH_ACTIONS_REPO_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-train-ready:
+    name: Release Train Ready - ${{ inputs.project }} ${{ inputs.project-version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mark project ready in release train
+        uses: ./.github/actions/spring-release-train-project-ready
+        with:
+          project: ${{ inputs.project }}
+          project-version: ${{ inputs.project-version }}
+          spring-cloud-release-train-version: ${{ inputs.spring-cloud-release-train-version }}
+          spring-release-train-version: ${{ inputs.spring-release-train-version }}
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
