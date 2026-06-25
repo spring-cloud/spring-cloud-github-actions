@@ -52,7 +52,7 @@ async function run() {
  */
 function getBomUrl(commercial, ref) {
   const repo = commercial ? COMMERCIAL_BOM_REPO : OSS_BOM_REPO;
-  return `https://raw.githubusercontent.com/${repo}/${ref}/pom.xml`;
+  return `https://raw.githubusercontent.com/${repo}/${ref}/spring-cloud-dependencies/pom.xml`;
 }
 
 /**

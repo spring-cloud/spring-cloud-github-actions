@@ -5,7 +5,7 @@ const { getBomUrl, fetchBomXml, extractVersions, nameToEnvVar } = require('../sr
 const OSS_REPO = 'spring-cloud/spring-cloud-release';
 const COMMERCIAL_REPO = 'spring-cloud/spring-cloud-release-commercial';
 const bomUrl = (repo, ref) =>
-  `https://raw.githubusercontent.com/${repo}/${ref}/pom.xml`;
+  `https://raw.githubusercontent.com/${repo}/${ref}/spring-cloud-dependencies/pom.xml`;
 
 const fixturePath = (name) => path.join(__dirname, 'fixtures', name);
 const loadFixture = (name) => fs.readFileSync(fixturePath(name), 'utf-8');
