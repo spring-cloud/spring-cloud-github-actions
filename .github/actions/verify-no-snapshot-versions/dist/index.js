@@ -28228,15 +28228,20 @@ const { XMLParser } = __nccwpck_require__(9741);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
 
-const OSS_RELEASE_REPO = 'spring-cloud/spring-cloud-release';
-const COMMERCIAL_RELEASE_REPO = 'spring-cloud/spring-cloud-release-commercial';
-const RELEASER_CONFIG_BRANCH = 'jenkins-releaser-config';
+/**
+ * Matches pre-release version suffixes that must not appear in a release build:
+ *   -SNAPSHOT      (e.g. 4.1.0-SNAPSHOT)
+ *   -RC<N>         (e.g. 3.2.0-RC1)
+ *   -M<N>          (e.g. 2023.0.0-M1)
+ */
+const PRE_RELEASE_PATTERN = /-SNAPSHOT$|-RC\d+$|-M\d+$/i;
+
+function isPreRelease(version) {
+  return PRE_RELEASE_PATTERN.test(String(version).trim());
+}
 
 async function run() {
   try {
-    const releaseTrainVersion = core.getInput('release-train-version');
-    const commercial = core.getInput('commercial') === 'true';
-    const token = core.getInput('token');
     const directory = path.resolve(core.getInput('directory') || '.');
 
     if (!fs.existsSync(directory)) {
@@ -28244,600 +28249,317 @@ async function run() {
       return;
     }
 
-    let versions;
-    let projectVersion;
+    const excludePatterns = (core.getInput('exclude-patterns') || '')
+      .split('\n')
+      .map(s => s.trim())
+      .filter(s => s.length > 0)
+      .map(s => new RegExp(s));
 
-    const substitutionsInput = core.getInput('project-version-substitutions');
-    let substitutions = {};
-    if (substitutionsInput) {
-      try {
-        substitutions = JSON.parse(substitutionsInput);
-      } catch {
-        core.setFailed('Invalid JSON supplied for the project-version-substitutions input');
-        return;
+    const allViolations = [];
+
+    const pomFiles = findFiles(directory, 'pom.xml', excludePatterns);
+    for (const file of pomFiles) {
+      const fileViolations = checkPomFile(file);
+      for (const v of fileViolations) {
+        allViolations.push({ file: path.relative(directory, file), ...v });
       }
     }
 
-    if (releaseTrainVersion) {
-      // ── Fetch versions from the jenkins-releaser-config properties file ──────
-      const url = getReleaserConfigUrl(commercial, releaseTrainVersion);
-      core.info(`Fetching releaser config from ${url}`);
-      const content = await fetchReleaserConfig(url, token);
-      versions = parseReleaserConfig(content, substitutions);
-
-      // Auto-detect the project name from the root pom.xml <artifactId>
-      const projectName = detectProjectName(directory);
-      core.info(`Detected project name: ${projectName}`);
-
-      projectVersion = versions[projectName];
-      if (!projectVersion) {
-        core.setFailed(
-          `Project '${projectName}' was not found in the releaser config for release train ${releaseTrainVersion}. ` +
-          `Ensure the root pom.xml artifactId matches a key in the properties file.`
-        );
-        return;
-      }
-      core.info(`Project version: ${projectVersion}`);
-    } else {
-      // ── Use the explicitly supplied versions JSON and project-version ─────────
-      const versionsInput = core.getInput('versions');
-      if (!versionsInput) {
-        core.setFailed('Either release-train-version or versions must be provided');
-        return;
-      }
-      try {
-        versions = JSON.parse(versionsInput);
-      } catch {
-        core.setFailed('Invalid JSON supplied for the versions input');
-        return;
-      }
-
-      projectVersion = core.getInput('project-version');
-      if (!projectVersion) {
-        core.setFailed('Either release-train-version or project-version must be provided');
-        return;
+    const gradlePropsFiles = findFiles(directory, 'gradle.properties', excludePatterns);
+    for (const file of gradlePropsFiles) {
+      const fileViolations = checkGradlePropertiesFile(file);
+      for (const v of fileViolations) {
+        allViolations.push({ file: path.relative(directory, file), ...v });
       }
     }
 
-    // ── Maven ───────────────────────────────────────────────────────────────
-    const pomFiles = findFiles(directory, 'pom.xml');
-    if (pomFiles.length > 0) {
-      core.info(`Found ${pomFiles.length} pom.xml file(s)`);
-      const rootPom = path.join(directory, 'pom.xml');
-
-      // Capture the current root version before any files are modified so that
-      // non-root poms with a matching explicit <version> can be detected reliably.
-      let currentRootVersion = null;
-      if (fs.existsSync(rootPom)) {
-        const rootParser = new XMLParser({ ignoreAttributes: false });
-        const rootParsed = rootParser.parse(fs.readFileSync(rootPom, 'utf-8'));
-        currentRootVersion = rootParsed?.project?.version
-          ? String(rootParsed.project.version)
-          : null;
-      }
-
-      for (const file of pomFiles) {
-        const isRoot = path.resolve(file) === path.resolve(rootPom);
-        const { changed, updatedProperties } = updatePomFile(
-          file,
-          isRoot,
-          projectVersion,
-          versions,
-          currentRootVersion
-        );
-        if (changed) {
-          core.info(`Updated ${path.relative(directory, file)}: ${updatedProperties.join(', ')}`);
-        }
-      }
-    }
-
-    // ── Gradle ──────────────────────────────────────────────────────────────
-    const gradlePropsFiles = findFiles(directory, 'gradle.properties');
-    if (gradlePropsFiles.length > 0) {
-      core.info(`Found ${gradlePropsFiles.length} gradle.properties file(s)`);
-      for (const file of gradlePropsFiles) {
-        const { changed, updatedProperties } = updateGradlePropertiesFile(
-          file,
-          projectVersion,
-          versions
-        );
-        if (changed) {
-          core.info(`Updated ${path.relative(directory, file)}: ${updatedProperties.join(', ')}`);
-        }
-      }
-    }
-
-    // ── build.gradle / build.gradle.kts ────────────────────────────────────
-    // Only the project version declaration is updated (version = '...' / version = "...").
-    // Dependency versions are managed exclusively via gradle.properties in Spring Cloud.
     const buildGradleFiles = [
-      ...findFiles(directory, 'build.gradle'),
-      ...findFiles(directory, 'build.gradle.kts'),
+      ...findFiles(directory, 'build.gradle', excludePatterns),
+      ...findFiles(directory, 'build.gradle.kts', excludePatterns),
     ];
-    if (buildGradleFiles.length > 0) {
-      core.info(`Found ${buildGradleFiles.length} build.gradle file(s)`);
-      for (const file of buildGradleFiles) {
-        const { changed } = updateBuildGradleVersion(file, projectVersion);
-        if (changed) {
-          core.info(`Updated ${path.relative(directory, file)}: version`);
-        } else {
-          core.info(`No changes to ${path.relative(directory, file)}: version`);
-        }
+    for (const file of buildGradleFiles) {
+      const fileViolations = checkBuildGradleFile(file);
+      for (const v of fileViolations) {
+        allViolations.push({ file: path.relative(directory, file), ...v });
       }
     }
 
-    const totalFiles = pomFiles.length + gradlePropsFiles.length + buildGradleFiles.length;
-    if (totalFiles === 0) {
-      core.warning(`No pom.xml, gradle.properties, or build.gradle files found under ${directory}`);
+    core.setOutput('violations', JSON.stringify(allViolations));
+
+    if (allViolations.length === 0) {
+      core.info('All versions are release versions. No pre-release versions found.');
+      return;
     }
+
+    core.error(`Found ${allViolations.length} pre-release version(s):`);
+    for (const v of allViolations) {
+      core.error(`  ${v.file}: ${v.location} = ${v.version}`);
+    }
+    core.setFailed(
+      `${allViolations.length} pre-release version(s) found. All dependencies must use release versions.`
+    );
   } catch (error) {
     core.setFailed(`Action failed: ${error.message}`);
   }
 }
 
-// ── Releaser config ─────────────────────────────────────────────────────────
-
-/**
- * Converts a release train version string to the properties filename used in the
- * jenkins-releaser-config branch of spring-cloud-release.
- * e.g. "2025.1.0" → "2025_1_0.properties"
- *
- * Exported for unit testing.
- */
-function releaseTrainVersionToFileName(version) {
-  return version.replace(/\./g, '_') + '.properties';
-}
-
-/**
- * Builds the raw GitHub URL for the releaser config properties file.
- *
- * Exported for unit testing.
- */
-function getReleaserConfigUrl(commercial, version) {
-  const repo = commercial ? COMMERCIAL_RELEASE_REPO : OSS_RELEASE_REPO;
-  const fileName = releaseTrainVersionToFileName(version);
-  return `https://raw.githubusercontent.com/${repo}/${RELEASER_CONFIG_BRANCH}/${fileName}`;
-}
-
-/**
- * Fetches the releaser config properties file from GitHub.
- * Passes the token as a Bearer header so that private (commercial) repos are accessible.
- *
- * Exported for unit testing.
- */
-async function fetchReleaserConfig(url, token) {
-  const headers = { Accept: 'text/plain' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const response = await fetch(url, { headers });
-  if (!response.ok) {
-    const hint =
-      response.status === 401 || response.status === 403
-        ? ' — ensure the token has read access to the repository'
-        : '';
-    throw new Error(
-      `Failed to fetch releaser config (HTTP ${response.status}: ${response.statusText})${hint}`
-    );
-  }
-  return response.text();
-}
-
-/**
- * Parses a jenkins-releaser-config properties file into a versions map.
- *
- * Only lines matching `releaser.fixed-versions[project-name]=version` are read;
- * all other lines (blank lines, comments, unrelated properties) are ignored.
- *
- * Example input line:
- *   releaser.fixed-versions[spring-boot]=3.2.3
- *
- * Exported for unit testing.
- *
- * @param {string} content - raw text of the properties file
- * @returns {Record<string, string>} e.g. { "spring-boot": "3.2.3", ... }
- */
-function parseReleaserConfig(content, substitutions = {}) {
-  const versions = {};
-  for (const line of content.split('\n')) {
-    const match = line.match(/^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/);
-    if (match) {
-      const projectName = match[1].trim();
-      const version = match[2].trim();
-      versions[projectName] = version;
-    }
-  }
-  for (const [key, value] of Object.entries(substitutions)) {
-    if (versions[value] !== undefined) {
-      versions[key] = versions[value];
-    }
-  }
-  return versions;
-}
-
-/**
- * Reads the root pom.xml in the given directory and returns its <artifactId>
- * to use as the project name when looking up the project version in the
- * releaser config.
- *
- * Exported for unit testing.
- *
- * @param {string} directory - root directory of the project
- * @returns {string} the artifactId of the root pom
- */
-function detectProjectName(directory) {
-  const rootPomPath = path.join(directory, 'pom.xml');
-  if (!fs.existsSync(rootPomPath)) {
-    throw new Error(
-      `No root pom.xml found in ${directory} — cannot auto-detect project name. ` +
-      `Supply the project-version input explicitly if this project does not use Maven.`
-    );
-  }
-  const content = fs.readFileSync(rootPomPath, 'utf-8');
-  const parser = new XMLParser({ ignoreAttributes: false });
-  const parsed = parser.parse(content);
-  const artifactId = parsed?.project?.artifactId;
-  if (!artifactId) {
-    throw new Error(
-      'Could not auto-detect project name: no <artifactId> found in root pom.xml'
-    );
-  }
-  return artifactIdToProjectName(String(artifactId));
-}
-
 // ── pom.xml ────────────────────────────────────────────────────────────────
 
 /**
- * Updates version entries in a pom.xml file.
- *
- * For the root pom:
- *   - Updates the project <version> (skipping the <parent> block)
- *
- * For non-root poms whose own <version> matches currentRootVersion:
- *   - Also updates the project <version> (e.g. BOM / dependencies modules that
- *     carry an explicit <version> equal to the root project version, such as
- *     spring-cloud-circuitbreaker-dependencies)
- *
- * For all pom files (root and child modules):
- *   - Updates <parent><version> when the parent artifactId is in the versions map
- *   - Updates <properties> entries ending in .version that match the versions map
+ * Checks a pom.xml file for pre-release versions in:
+ *   - The project's own <version>
+ *   - The <parent><version>
+ *   - All <properties> entries ending in .version
+ *   - All <dependency><version> entries (direct and dependency management)
+ *   - All <plugin><version> entries (build and plugin management)
  *
  * Exported for unit testing.
  *
  * @param {string} filePath
- * @param {boolean} isRoot - true when this is the root pom.xml of the project
- * @param {string} projectVersion
- * @param {Record<string, string>} versions
- * @param {string|null} currentRootVersion - the root pom's version before any edits;
- *   non-root poms whose own <version> equals this value will also have it updated
+ * @returns {{ location: string, version: string }[]}
  */
-function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVersion = null) {
+function checkPomFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf-8');
-  let updated = content;
-  const updatedProperties = [];
+  return checkPomContent(content);
+}
 
-  const parser = new XMLParser({ ignoreAttributes: false });
-  const parsed = parser.parse(content);
+/**
+ * Scans raw POM XML for elements annotated with <!-- @releaser:version-check-off -->
+ * on the same line and returns two sets:
+ *
+ *   excludedPropertyKeys  – property tag names inside <properties> (e.g. "maven-failsafe-plugin.version")
+ *   excludedVersionValues – bare version strings inside <version> tags
+ *
+ * fast-xml-parser strips comments before we can inspect them, so this pre-scan
+ * runs on the raw string.
+ *
+ * Exported for unit testing.
+ *
+ * @param {string} content - raw XML content of the pom.xml
+ * @returns {{ excludedPropertyKeys: Set<string>, excludedVersionValues: Set<string> }}
+ */
+function extractVersionCheckOffAnnotations(content) {
+  const excludedPropertyKeys = new Set();
+  const excludedVersionValues = new Set();
+  // Matches a single-line element: <tagName>value</tagName> ... <!-- @releaser:version-check-off -->
+  const re = /<([a-zA-Z][a-zA-Z0-9.\-_]*)>([^<\n]*)<\/\1>[^\n]*<!--\s*@releaser:version-check-off\s*-->/g;
+  for (const match of content.matchAll(re)) {
+    const [, tagName, value] = match;
+    if (tagName === 'version') {
+      excludedVersionValues.add(value.trim());
+    } else {
+      excludedPropertyKeys.add(tagName);
+    }
+  }
+  return { excludedPropertyKeys, excludedVersionValues };
+}
+
+/**
+ * Core logic for checking pom.xml content.
+ * Operates on a string so it can be unit tested without touching the filesystem.
+ *
+ * Exported for unit testing.
+ *
+ * @param {string} content - raw XML content of the pom.xml
+ * @returns {{ location: string, version: string }[]}
+ */
+function checkPomContent(content) {
+  const { excludedPropertyKeys, excludedVersionValues } = extractVersionCheckOffAnnotations(content);
+
+  const parser = new XMLParser({ ignoreAttributes: false, isArray: (name) => name === 'dependency' || name === 'plugin' });
+  let parsed;
+  try {
+    parsed = parser.parse(content);
+  } catch {
+    return [];
+  }
+
   const project = parsed?.project;
+  if (!project) return [];
 
-  if (!project) {
-    return { changed: false, updatedProperties: [] };
+  const violations = [];
+
+  if (project.version && !excludedVersionValues.has(String(project.version).trim()) && isPreRelease(project.version)) {
+    violations.push({ location: '<version>', version: String(project.version) });
   }
 
-  // 1. Update the project's own <version>, skipping the <parent> block.
-  //    - Always in the root pom.
-  //    - In non-root poms whose explicit <version> matches currentRootVersion
-  //      (e.g. spring-cloud-circuitbreaker-dependencies carries its own <version>
-  //      equal to the project version even though it is not the root pom).
-  const ownVersion = project.version ? String(project.version) : null;
-  const shouldUpdateOwnVersion =
-    ownVersion != null &&
-    (isRoot || (currentRootVersion != null && ownVersion === currentRootVersion));
+  if (project.parent?.version && !excludedVersionValues.has(String(project.parent.version).trim()) && isPreRelease(project.parent.version)) {
+    violations.push({ location: '<parent><version>', version: String(project.parent.version) });
+  }
 
-  if (shouldUpdateOwnVersion) {
-    const prev = updated;
-    updated = replaceProjectVersion(updated, ownVersion, projectVersion);
-    if (updated !== prev) {
-      updatedProperties.push(`version: ${projectVersion}`);
+  const properties = project.properties ?? {};
+  for (const [key, value] of Object.entries(properties)) {
+    if (excludedPropertyKeys.has(key)) continue;
+    if (key.endsWith('.version') && isPreRelease(value)) {
+      violations.push({ location: `<properties><${key}>`, version: String(value) });
     }
   }
 
-  // 2. Update <parent><version> when the parent artifactId is tracked in the versions map.
-  //    In multi-module projects each child pom has a <parent> pointing back to the root
-  //    (or to a Spring Cloud parent), and that parent version must stay consistent.
-  const parentArtifactId = project?.parent?.artifactId;
-  if (parentArtifactId) {
-    const parentName = artifactIdToProjectName(parentArtifactId);
-
-    // Check the exact artifact ID first (handles substitution keys like
-    // spring-cloud-dependencies-parent that are already in the versions map),
-    // then the stripped name (handles patterns like spring-cloud-build-dependencies
-    // → spring-cloud-build). Fall back to projectVersion only when the parent is
-    // the root project of this repo.
-    const resolvedParentVersion =
-      versions[parentArtifactId] !== undefined
-        ? versions[parentArtifactId]
-        : versions[parentName] !== undefined
-        ? versions[parentName]
-        : isChildOfRoot(project, versions, projectVersion)
-        ? projectVersion
-        : null;
-
-    if (resolvedParentVersion && project.parent?.version) {
-      const prev = updated;
-      updated = replaceParentVersion(updated, String(project.parent.version), resolvedParentVersion);
-      if (updated !== prev) {
-        updatedProperties.push(`parent.version: ${resolvedParentVersion}`);
-      }
-    }
-  }
-
-  // 3. Update <properties> entries ending in .version that match the versions map.
-  //    This applies to ALL pom files — root and child modules alike.
-  const properties = project?.properties ?? {};
-  for (const [key, currentValue] of Object.entries(properties)) {
-    if (!key.endsWith('.version')) continue;
-    const projectName = key.slice(0, -'.version'.length);
-    const targetVersion = versions[projectName];
-    if (targetVersion && String(currentValue) !== targetVersion) {
-      const prev = updated;
-      updated = replacePropertyValue(updated, key, targetVersion);
-      if (updated !== prev) {
-        updatedProperties.push(`${key}: ${targetVersion}`);
-      }
-    }
-  }
-
-  const changed = updated !== content;
-  if (changed) {
-    fs.writeFileSync(filePath, updated, 'utf-8');
-  }
-  return { changed, updatedProperties };
-}
-
-/**
- * Replaces the project's own <version> tag, carefully skipping the <parent> block
- * so that the parent's version is not touched.
- *
- * Exported for unit testing.
- */
-function replaceProjectVersion(xml, oldVersion, newVersion) {
-  if (oldVersion === newVersion) return xml;
-
-  const parentBlockRegex = /<parent>[\s\S]*?<\/parent>/;
-  const parentMatch = xml.match(parentBlockRegex);
-
-  const versionRegex = new RegExp(
-    `(<version>\\s*)${escapeRegex(oldVersion)}(\\s*<\\/version>)`
+  checkDependencyVersions(project.dependencies?.dependency, '<dependencies>', violations, excludedVersionValues);
+  checkDependencyVersions(
+    project.dependencyManagement?.dependencies?.dependency,
+    '<dependencyManagement><dependencies>',
+    violations,
+    excludedVersionValues
+  );
+  checkPluginVersions(project.build?.plugins?.plugin, '<build><plugins>', violations, excludedVersionValues);
+  checkPluginVersions(
+    project.build?.pluginManagement?.plugins?.plugin,
+    '<build><pluginManagement><plugins>',
+    violations,
+    excludedVersionValues
   );
 
-  if (!parentMatch) {
-    return xml.replace(versionRegex, `$1${newVersion}$2`);
+  return violations;
+}
+
+function checkDependencyVersions(dependencies, context, violations, excludedVersionValues = new Set()) {
+  if (!dependencies) return;
+  const list = Array.isArray(dependencies) ? dependencies : [dependencies];
+  for (const dep of list) {
+    if (dep?.version && !excludedVersionValues.has(String(dep.version).trim()) && isPreRelease(dep.version)) {
+      const coords = [dep.groupId, dep.artifactId].filter(Boolean).join(':');
+      violations.push({
+        location: `${context}<dependency>[${coords}]<version>`,
+        version: String(dep.version),
+      });
+    }
   }
-
-  // Temporarily replace the parent block so our version regex cannot match inside it
-  const placeholder = '\x00PARENT\x00';
-  const withPlaceholder = xml.replace(parentBlockRegex, placeholder);
-  const updated = withPlaceholder.replace(versionRegex, `$1${newVersion}$2`);
-  return updated.replace(placeholder, parentMatch[0]);
 }
 
-/**
- * Replaces the <version> tag specifically inside the <parent> block.
- *
- * Exported for unit testing.
- */
-function replaceParentVersion(xml, oldVersion, newVersion) {
-  if (oldVersion === newVersion) return xml;
-  return xml.replace(
-    /(<parent>[\s\S]*?<version>)([\s\S]*?)(<\/version>[\s\S]*?<\/parent>)/,
-    (match, before, _currentVer, after) => `${before}${newVersion}${after}`
-  );
-}
-
-/**
- * Replaces the value of a named <properties> entry in the pom.xml.
- * Uses string replacement to preserve XML formatting.
- *
- * Exported for unit testing.
- */
-function replacePropertyValue(xml, propertyName, newVersion) {
-  const escapedName = escapeRegex(propertyName);
-  const regex = new RegExp(`(<${escapedName}>\\s*)([^<]*)(\\s*<\\/${escapedName}>)`);
-  return xml.replace(regex, `$1${newVersion}$3`);
+function checkPluginVersions(plugins, context, violations, excludedVersionValues = new Set()) {
+  if (!plugins) return;
+  const list = Array.isArray(plugins) ? plugins : [plugins];
+  for (const plugin of list) {
+    if (plugin?.version && !excludedVersionValues.has(String(plugin.version).trim()) && isPreRelease(plugin.version)) {
+      const coords = [plugin.groupId, plugin.artifactId].filter(Boolean).join(':');
+      violations.push({
+        location: `${context}<plugin>[${coords}]<version>`,
+        version: String(plugin.version),
+      });
+    }
+  }
 }
 
 // ── gradle.properties ──────────────────────────────────────────────────────
 
 /**
- * Updates version entries in a gradle.properties file.
+ * Checks a gradle.properties file for pre-release versions.
  *
- * Rules (matching spring-cloud-release-tools behaviour):
- *   - Bare `version=` key → updated to projectVersion
- *   - `{prefix}Version=` keys → prefix converted camelCase→kebab-case, looked up in versions map
+ * Inspects:
+ *   - The bare `version` key (project version)
+ *   - Any key ending in `Version` (e.g. springBootVersion, springCloudCommonsVersion)
  *
  * Exported for unit testing.
  *
  * @param {string} filePath
- * @param {string} projectVersion
- * @param {Record<string, string>} versions
+ * @returns {{ location: string, version: string }[]}
  */
-function updateGradlePropertiesFile(filePath, projectVersion, versions) {
+function checkGradlePropertiesFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf-8');
-  const { updated, updatedProperties } = updateGradlePropertiesContent(
-    content,
-    projectVersion,
-    versions
-  );
-  const changed = updated !== content;
-  if (changed) {
-    fs.writeFileSync(filePath, updated, 'utf-8');
-  }
-  return { changed, updatedProperties };
+  return checkGradlePropertiesContent(content);
 }
 
 /**
- * Core logic for updating gradle.properties content.
+ * Core logic for checking gradle.properties content.
  * Operates on a string so it can be unit tested without touching the filesystem.
  *
  * Exported for unit testing.
+ *
+ * @param {string} content - raw text of the gradle.properties file
+ * @returns {{ location: string, version: string }[]}
  */
-function updateGradlePropertiesContent(content, projectVersion, versions) {
-  const lines = content.split('\n');
-  const updatedProperties = [];
-
-  const updatedLines = lines.map((line) => {
-    // Match: key=value  or  key = value  (ignore comment lines)
+function checkGradlePropertiesContent(content) {
+  const violations = [];
+  for (const line of content.split('\n')) {
     const match = line.match(/^([a-zA-Z][a-zA-Z0-9.]*)(\s*=\s*)(.+)$/);
-    if (!match) return line;
+    if (!match) continue;
 
-    const [, key, separator, currentValue] = match;
+    const [, key, , rawValue] = match;
+    const value = rawValue.trim();
 
-    // Bare `version` key → project's own version
-    if (key === 'version') {
-      if (currentValue.trim() !== projectVersion) {
-        updatedProperties.push(`version: ${projectVersion}`);
-        return `${key}${separator}${projectVersion}`;
-      }
-      return line;
+    if ((key === 'version' || /Version$/.test(key)) && isPreRelease(value)) {
+      violations.push({ location: key, version: value });
     }
-
-    // `{prefix}Version` keys → camelCase prefix → kebab-case lookup
-    if (/^[a-zA-Z0-9]+Version$/.test(key)) {
-      const projectName = camelToKebab(key.slice(0, -'Version'.length));
-      const targetVersion = versions[projectName];
-      if (targetVersion && currentValue.trim() !== targetVersion) {
-        updatedProperties.push(`${key}: ${targetVersion}`);
-        return `${key}${separator}${targetVersion}`;
-      }
-    }
-
-    return line;
-  });
-
-  return { updated: updatedLines.join('\n'), updatedProperties };
+  }
+  return violations;
 }
 
 // ── build.gradle / build.gradle.kts ───────────────────────────────────────
 
 /**
- * Updates the project version declaration in a build.gradle or build.gradle.kts file.
- * Handles both single-quoted and double-quoted versions:
- *   version = '4.1.0'
- *   version = "4.1.0"
+ * Checks a build.gradle or build.gradle.kts file for a pre-release project version.
  *
- * Only the project-level version line is updated; dependency version properties
- * are managed via gradle.properties in Spring Cloud projects.
+ * Inspects the `version = '...'` or `version = "..."` declaration.
  *
  * Exported for unit testing.
  *
  * @param {string} filePath
- * @param {string} projectVersion
+ * @returns {{ location: string, version: string }[]}
  */
-function updateBuildGradleVersion(filePath, projectVersion) {
+function checkBuildGradleFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf-8');
-  const { updated } = updateBuildGradleContent(content, projectVersion);
-  const changed = updated !== content;
-  if (changed) {
-    fs.writeFileSync(filePath, updated, 'utf-8');
-  }
-  return { changed };
+  return checkBuildGradleContent(content);
 }
 
 /**
- * Core logic for updating the version line in build.gradle content.
+ * Core logic for checking build.gradle content.
  * Operates on a string so it can be unit tested without touching the filesystem.
  *
  * Exported for unit testing.
+ *
+ * @param {string} content - raw text of the build.gradle file
+ * @returns {{ location: string, version: string }[]}
  */
-function updateBuildGradleContent(content, projectVersion) {
-  // Match: version = '...' or version = "..." at the start of a line (with optional spaces)
-  const updated = content.replace(
-    /^(version\s*=\s*)(['"])([^'"]+)(['"])/m,
-    (_, prefix, openQuote, _oldVersion, closeQuote) =>
-      `${prefix}${openQuote}${projectVersion}${closeQuote}`
-  );
-  return { updated };
+function checkBuildGradleContent(content) {
+  const violations = [];
+  const match = content.match(/^version\s*=\s*['"]([^'"]+)['"]/m);
+  if (match && isPreRelease(match[1])) {
+    violations.push({ location: 'version', version: match[1] });
+  }
+  return violations;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 
 /**
  * Recursively finds all files with the given filename under a directory,
- * skipping common build output and dependency directories.
+ * skipping common build output and dependency directories, and any file
+ * whose path matches one of the provided exclude patterns.
+ *
+ * @param {string} dir
+ * @param {string} filename
+ * @param {RegExp[]} excludePatterns - compiled regexes; matching paths are skipped
  *
  * Exported for unit testing.
  */
-function findFiles(dir, filename) {
+function findFiles(dir, filename, excludePatterns = []) {
   const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', 'build', '.gradle']);
   const results = [];
 
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
+    const normalizedPath = fullPath.replace(/\\/g, '/');
     if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) {
-        results.push(...findFiles(fullPath, filename));
+      if (!SKIP_DIRS.has(entry.name) && !excludePatterns.some(re => re.test(normalizedPath + '/'))) {
+        results.push(...findFiles(fullPath, filename, excludePatterns));
       }
     } else if (entry.isFile() && entry.name === filename) {
-      results.push(fullPath);
+      if (!excludePatterns.some(re => re.test(normalizedPath))) {
+        results.push(fullPath);
+      }
     }
   }
   return results;
 }
 
-/**
- * Converts a camelCase string to kebab-case.
- * e.g. springBoot → spring-boot, springCloudConfig → spring-cloud-config
- *
- * Exported for unit testing.
- */
-function camelToKebab(str) {
-  return str.replace(/([A-Z])/g, '-$1').toLowerCase();
-}
-
-/**
- * Converts a Maven artifactId to a project name by stripping common suffixes
- * (-dependencies, -parent, -build) that are used in BOMs but not in artifact names.
- * e.g. spring-cloud-build-dependencies → spring-cloud-build
- *
- * Exported for unit testing.
- */
-function artifactIdToProjectName(artifactId) {
-  return artifactId
-    .replace(/-dependencies$/, '')
-    .replace(/-parent$/, '');
-}
-
-/**
- * Returns true when a child pom's parent appears to be the root project of this repo
- * (i.e. not an external Spring Cloud parent) by checking that the parent artifactId
- * does NOT appear in the external versions map under either its exact name or its
- * stripped name (after removing -dependencies / -parent suffixes).
- */
-function isChildOfRoot(project, versions, projectVersion) {
-  const parentArtifactId = project?.parent?.artifactId;
-  if (!parentArtifactId) return false;
-  const parentName = artifactIdToProjectName(parentArtifactId);
-  return versions[parentArtifactId] === undefined && versions[parentName] === undefined;
-}
-
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 module.exports = {
-  releaseTrainVersionToFileName,
-  getReleaserConfigUrl,
-  fetchReleaserConfig,
-  parseReleaserConfig,
-  detectProjectName,
-  updatePomFile,
-  replaceProjectVersion,
-  replaceParentVersion,
-  replacePropertyValue,
-  updateGradlePropertiesContent,
-  updateBuildGradleContent,
+  isPreRelease,
+  extractVersionCheckOffAnnotations,
+  checkPomContent,
+  checkGradlePropertiesContent,
+  checkBuildGradleContent,
   findFiles,
-  camelToKebab,
-  artifactIdToProjectName,
 };
 
 if (require.main === require.cache[eval('__filename')]) {

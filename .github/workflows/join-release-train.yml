@@ -1,0 +1,320 @@
+name: Join Release Train
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config or spring-cloud-config-commercial)'
+        required: true
+        type: string
+      branch:
+        description: 'Source branch to create the release branch from (e.g. main, 4.2.x)'
+        required: true
+        type: string
+      release-train:
+        description: 'Spring release train to join (e.g. 2026.09)'
+        required: true
+        type: string
+      token:
+        description: 'GitHub token with access to the project repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_call:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config or spring-cloud-config-commercial)'
+        required: true
+        type: string
+      branch:
+        description: 'Source branch to create the release branch from (e.g. main, 4.2.x)'
+        required: true
+        type: string
+      release-train:
+        description: 'Spring release train to join (e.g. 2025.09)'
+        required: true
+        type: string
+    secrets:
+      token:
+        description: 'GitHub token with access to the project repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  join-release-train:
+    name: Join Release Train - ${{ inputs.project }} (${{ inputs.branch }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout spring-cloud-github-actions
+        uses: actions/checkout@v4
+        with:
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Determine release version and commercial project
+        id: setup
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          echo "Reading pom.xml from spring-cloud/${{ inputs.project }} at ${{ inputs.branch }}..."
+          pom=$(gh api "repos/spring-cloud/${{ inputs.project }}/contents/pom.xml?ref=${{ inputs.branch }}" \
+            --jq '.content' | tr -d '\n' | base64 -d)
+
+          echo "$pom" > /tmp/pom.xml
+          version=$(node -e "
+          const fs = require('fs');
+          const data = fs.readFileSync('/tmp/pom.xml', 'utf8');
+          const noParent = data.replace(/<parent>[\s\S]*?<\/parent>/g, '');
+          const m = noParent.match(/<version>([^<]+)<\/version>/);
+          if (!m) { process.stderr.write('No <version> found in pom.xml\n'); process.exit(1); }
+          process.stdout.write(m[1].replace(/-SNAPSHOT\$/, '') + '\n');
+          ")
+          echo "release-version=$version" >> $GITHUB_OUTPUT
+          echo "Release version: $version"
+
+          project="${{ inputs.project }}"
+          if [[ "$project" == *-commercial ]]; then
+            commercial_project="$project"
+            deployment_destination="Spring Enterprise"
+          else
+            commercial_project="${project}-commercial"
+            deployment_destination="Maven Central"
+          fi
+          echo "commercial-project=$commercial_project" >> $GITHUB_OUTPUT
+          echo "deployment-destination=$deployment_destination" >> $GITHUB_OUTPUT
+          echo "Commercial project: $commercial_project"
+          echo "Deployment destination: $deployment_destination"
+
+      - name: Check tag and release do not already exist
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          version="${{ steps.setup.outputs.release-version }}"
+          tag="v${version}"
+          commercial_project="${{ steps.setup.outputs.commercial-project }}"
+          project="${{ inputs.project }}"
+
+          if [[ "$project" == *-commercial ]]; then
+            oss_project="${project%-commercial}"
+          else
+            oss_project="$project"
+          fi
+
+          failed=false
+
+          for repo in "spring-cloud/${oss_project}" "spring-cloud/${commercial_project}"; do
+            echo "Checking ${repo} for existing tag/release ${tag}..."
+
+            if gh api "repos/${repo}/git/refs/tags/${tag}" --silent 2>/dev/null; then
+              echo "ERROR: Tag '${tag}' already exists in ${repo}"
+              failed=true
+            else
+              echo "  Tag '${tag}' not found in ${repo} ✓"
+            fi
+
+            if gh api "repos/${repo}/releases/tags/${tag}" --silent 2>/dev/null; then
+              echo "ERROR: Release '${tag}' already exists in ${repo}"
+              failed=true
+            else
+              echo "  Release '${tag}' not found in ${repo} ✓"
+            fi
+          done
+
+          if [[ "$failed" == "true" ]]; then
+            echo "Aborting: ${tag} already exists — version ${version} has already been released."
+            exit 1
+          fi
+
+          echo "Check passed: ${tag} does not exist in any repo."
+
+      - name: Create milestone in source repo if missing
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          version="${{ steps.setup.outputs.release-version }}"
+          repo="spring-cloud/${{ inputs.project }}"
+          echo "Checking for milestone '${version}' in ${repo}..."
+          milestone_number=$(gh api "repos/${repo}/milestones?per_page=100" | \
+            jq -r --arg title "$version" '.[] | select(.title == $title) | .number')
+          if [[ -n "$milestone_number" ]]; then
+            echo "Milestone '${version}' already exists in ${repo} (#${milestone_number})."
+          else
+            echo "Milestone '${version}' not found — creating..."
+            gh api "repos/${repo}/milestones" \
+              --method POST \
+              --field title="$version"
+            echo "Milestone '${version}' created in ${repo}."
+          fi
+
+      - name: Create release branch in commercial repo
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          commercial_project="${{ steps.setup.outputs.commercial-project }}"
+          release_branch="release/${{ steps.setup.outputs.release-version }}"
+          token="${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}"
+          project="${{ inputs.project }}"
+
+          if [[ "$project" == *-commercial ]]; then
+            # Source is already a commercial repo — use its branch SHA via the API
+            echo "Creating ${release_branch} in spring-cloud/${commercial_project} from ${project}@${{ inputs.branch }}..."
+            source_sha=$(gh api "repos/spring-cloud/${commercial_project}/git/ref/heads/${{ inputs.branch }}" \
+              --jq '.object.sha')
+            gh api "repos/spring-cloud/${commercial_project}/git/refs" \
+              --method POST \
+              --field ref="refs/heads/${release_branch}" \
+              --field sha="${source_sha}"
+          else
+            # Source is an OSS repo — clone it and push to the commercial repo
+            echo "Creating ${release_branch} in spring-cloud/${commercial_project} from OSS ${project}@${{ inputs.branch }}..."
+            git clone --depth 1 --branch "${{ inputs.branch }}" \
+              "https://x-access-token:${token}@github.com/spring-cloud/${project}.git" source-repo
+            cd source-repo
+            git remote add commercial \
+              "https://x-access-token:${token}@github.com/spring-cloud/${commercial_project}.git"
+            git push commercial "HEAD:refs/heads/${release_branch}"
+            cd ..
+            rm -rf source-repo
+          fi
+          echo "Branch ${release_branch} created successfully."
+
+      - name: Update CI and PR workflows for release branch
+        uses: ./.github/actions/update-oss-workflows-to-commercial
+        with:
+          repository: spring-cloud/${{ steps.setup.outputs.commercial-project }}
+          branch: release/${{ steps.setup.outputs.release-version }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update projects.json for release branch
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECT: ${{ inputs.project }}
+          SOURCE_BRANCH: ${{ inputs.branch }}
+          RELEASE_BRANCH: release/${{ steps.setup.outputs.release-version }}
+          RELEASE_TRAIN: ${{ inputs.release-train }}
+        run: |
+          cat > /tmp/update_projects.js << 'JSEOF'
+          const fs = require('fs');
+
+          const project       = process.env.PROJECT;
+          const sourceBranch  = process.env.SOURCE_BRANCH;
+          const releaseBranch = process.env.RELEASE_BRANCH;
+
+          const config = JSON.parse(fs.readFileSync('/tmp/projects_original.json', 'utf8'));
+
+          const isCommercial = project.endsWith('-commercial');
+          const baseProject  = isCommercial ? project.slice(0, -'-commercial'.length) : project;
+          const srcType      = isCommercial ? 'commercial' : 'oss';
+
+          // Mirror the JDK lookup chain used by determine-matrix
+          const defaults  = config.defaults || {};
+          const projCfg   = ((config[baseProject] || {})[srcType]) || {};
+          const jdkmap    = projCfg.jdkVersions || {};
+          let jdks;
+          if (jdkmap[sourceBranch]) {
+            jdks = jdkmap[sourceBranch];
+          } else if (jdkmap['default']) {
+            jdks = jdkmap['default'];
+          } else {
+            const defJdkmap = ((defaults[srcType] || {}).jdkVersions) || {};
+            jdks = defJdkmap[sourceBranch] || defJdkmap['default'] || ['17', '21'];
+          }
+          console.log(`JDKs for ${sourceBranch} in ${baseProject}/${srcType}: ${JSON.stringify(jdks)}`);
+
+          if (!config[baseProject]) config[baseProject] = {};
+          if (!config[baseProject].commercial) {
+            config[baseProject].commercial = { branches: { scheduled: [], default: [] }, jdkVersions: {} };
+          }
+
+          const commercial = config[baseProject].commercial;
+          if (!commercial.branches) commercial.branches = { scheduled: [], default: [] };
+          if (!commercial.jdkVersions) commercial.jdkVersions = {};
+
+          let changed = false;
+
+          const scheduled = commercial.branches.scheduled || (commercial.branches.scheduled = []);
+          if (!scheduled.includes(releaseBranch)) {
+            scheduled.unshift(releaseBranch);
+            changed = true;
+            console.log(`Added ${releaseBranch} to ${baseProject}.commercial.branches.scheduled`);
+          } else {
+            console.log(`${releaseBranch} already in branches.scheduled — skipping`);
+          }
+
+          if (!(releaseBranch in commercial.jdkVersions)) {
+            commercial.jdkVersions[releaseBranch] = jdks;
+            changed = true;
+            console.log(`Set ${baseProject}.commercial.jdkVersions[${releaseBranch}] = ${JSON.stringify(jdks)}`);
+          } else {
+            console.log(`jdkVersions[${releaseBranch}] already exists — skipping`);
+          }
+
+          if (!changed) {
+            console.log('No changes needed to projects.json.');
+            process.exit(0);
+          }
+
+          let raw = JSON.stringify(config, null, 2);
+          raw = raw.replace(/\[[\s\S]*?\]/g, m => {
+            try {
+              const arr = JSON.parse(m);
+              if (Array.isArray(arr) && arr.every(x => typeof x === 'string')) {
+                return '[' + arr.map(x => JSON.stringify(x)).join(', ') + ']';
+              }
+            } catch {}
+            return m;
+          });
+
+          fs.writeFileSync('/tmp/projects_updated.json', raw + '\n', 'utf8');
+          console.log('projects.json written.');
+          JSEOF
+
+          # Fetch current projects.json and its blob SHA from main
+          file_response=$(gh api "repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json?ref=main")
+          current_sha=$(echo "$file_response" | jq -r '.sha')
+          echo "$file_response" | jq -r '.content' | tr -d '\n' | base64 -d > /tmp/projects_original.json
+          cp /tmp/projects_original.json /tmp/projects_updated.json
+
+          node /tmp/update_projects.js
+
+          if diff -q /tmp/projects_original.json /tmp/projects_updated.json > /dev/null 2>&1; then
+            echo "No changes to projects.json — nothing to push."
+          else
+            new_content_b64=$(base64 -w 0 /tmp/projects_updated.json)
+            jq -n \
+              --arg message "Adding ${RELEASE_BRANCH} for ${PROJECT} as part of joining ${RELEASE_TRAIN}" \
+              --arg content "$new_content_b64" \
+              --arg sha "$current_sha" \
+              '{message: $message, content: $content, sha: $sha, branch: "main"}' | \
+            gh api "repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json" \
+              --method PUT \
+              --input -
+            echo "projects.json updated on main."
+          fi
+
+      - name: Trigger release-train-join workflow and wait
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          commercial_project="${{ steps.setup.outputs.commercial-project }}"
+          release_branch="release/${{ steps.setup.outputs.release-version }}"
+          deployment_destination="${{ steps.setup.outputs.deployment-destination }}"
+
+          run_url=$(gh workflow run release-train-join.yml \
+            --repo "spring-cloud/${commercial_project}" \
+            --ref "${release_branch}" \
+            --field "deployment-destination=${deployment_destination}" \
+            --field "release-train=${{ inputs.release-train }}" \
+            --field "release-train-repository=spring-io/release-train")
+          echo "Dispatched workflow run. Waiting for $run_url to complete."
+          run_id=${run_url##*/}
+          watch_exit_code=0
+          gh run watch $run_id --repo "spring-cloud/${commercial_project}" --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
+          if [[ $watch_exit_code -eq 0 ]]; then
+            echo "Workflow run succeeded."
+          else
+            echo "Workflow run failed."
+          fi
+          exit $watch_exit_code

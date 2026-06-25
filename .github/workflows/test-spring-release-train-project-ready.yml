@@ -1,0 +1,68 @@
+name: Test - Spring Release Train Project Ready
+
+on:
+  push:
+    paths:
+      - '.github/actions/spring-release-train-project-ready/**'
+      - '.github/workflows/test-spring-release-train-project-ready.yml'
+  pull_request:
+    paths:
+      - '.github/actions/spring-release-train-project-ready/**'
+      - '.github/workflows/test-spring-release-train-project-ready.yml'
+
+jobs:
+  # ── Validate action.yml structure ───────────────────────────────────────────
+  validate-action-yaml:
+    name: Validate action.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify action.yml is valid YAML and has required fields
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const content = fs.readFileSync('.github/actions/spring-release-train-project-ready/action.yml', 'utf8');
+
+          let failed = false;
+
+          const requiredInputs = [
+            'project',
+            'project-version',
+            'spring-cloud-release-train-version',
+            'spring-release-train-version',
+            'token'
+          ];
+          for (const input of requiredInputs) {
+            if (!new RegExp(`^  ${input}:`, 'm').test(content)) {
+              console.log(`❌ Missing required input: ${input}`);
+              failed = true;
+            }
+          }
+
+          if (!/using:\s+['"]?composite['"]?/.test(content)) {
+            console.log('❌ Action must use composite runner');
+            failed = true;
+          }
+
+          const stepNames = [...content.matchAll(/^\s+- name:\s+(.+)$/gm)].map(m => m[1].trim());
+          console.log('Steps found:');
+          stepNames.forEach(n => console.log(`  - ${n}`));
+
+          const expectedSteps = [
+            'Checkout project release branch',
+            'Update project versions',
+            'Verify no snapshot versions',
+            'Commit and push release version changes',
+            'Trigger release-train-ready workflow',
+          ];
+          for (const expected of expectedSteps) {
+            if (!stepNames.includes(expected)) {
+              console.log(`❌ Missing expected step: ${expected}`);
+              failed = true;
+            }
+          }
+
+          if (failed) process.exit(1);
+          console.log('✅ action.yml is valid and contains all required inputs and steps');
+          JSEOF

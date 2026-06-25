@@ -1,0 +1,248 @@
+name: 'Spring Release Train Project Ready'
+description: >
+  Checks out a Spring Cloud project release branch, updates dependency versions from the
+  release train, verifies no pre-release versions remain, commits and pushes the changes,
+  then triggers the project's release-train-ready.yml workflow and waits for it to complete.
+author: 'Spring Cloud Team'
+
+inputs:
+  project:
+    description: >
+      The spring-cloud GitHub project name (e.g. spring-cloud-config or
+      spring-cloud-config-commercial). The action checks out
+      spring-cloud/<project> at branch release/<project-version>.
+    required: true
+  project-version:
+    description: >
+      The version of the project being released (e.g. 4.2.0). Used to
+      identify the release/<project-version> branch to check out.
+    required: true
+  spring-cloud-release-train-version:
+    description: >
+      The Spring Cloud release train version that matches the properties file
+      in the jenkins-releaser-config branch of spring-cloud-release
+      (e.g. 2025.0.0). Passed to update-project-versions to resolve
+      dependency versions.
+    required: true
+  spring-release-train-version:
+    description: >
+      The Spring release train version to mark this project as ready in
+      (e.g. 2026.07). Passed as the release-train input to the
+      release-train-ready.yml workflow on the project.
+    required: true
+  token:
+    description: >
+      GitHub token used for checking out the project, pushing commits, and
+      dispatching the workflow. The calling workflow should pass the
+      secrets.GH_ACTIONS_REPO_TOKEN secret here.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate version against jenkins-releaser-config
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        project="${{ inputs.project }}"
+        project_version="${{ inputs.project-version }}"
+        release_train_version="${{ inputs.spring-cloud-release-train-version }}"
+
+        if [[ "$project" == *-commercial ]]; then
+          base_project="${project%-commercial}"
+          release_repo="spring-cloud/spring-cloud-release-commercial"
+        else
+          base_project="$project"
+          release_repo="spring-cloud/spring-cloud-release"
+        fi
+
+        filename="${release_train_version//./_}.properties"
+        echo "Fetching ${filename} from ${release_repo}@jenkins-releaser-config..."
+
+        content=$(gh api "repos/${release_repo}/contents/${filename}?ref=jenkins-releaser-config" \
+          --jq '.content' | tr -d '\n' | base64 -d)
+
+        config_version=$(echo "$content" | \
+          grep "^releaser\.fixed-versions\[${base_project}\]=" | \
+          cut -d'=' -f2 | tr -d '[:space:]')
+
+        if [[ -z "$config_version" ]]; then
+          echo "ERROR: '${base_project}' not found in ${filename} on ${release_repo}@jenkins-releaser-config"
+          exit 1
+        fi
+
+        echo "Version in jenkins-releaser-config: ${config_version}"
+        echo "Version in branch name:             ${project_version}"
+
+        if [[ "$config_version" != "$project_version" ]]; then
+          echo "ERROR: Version mismatch!"
+          echo "  Branch name expects:     release/${project_version}"
+          echo "  jenkins-releaser-config: ${config_version}"
+          echo "  Check that spring-cloud-release-train-version is correct."
+          exit 1
+        fi
+
+        echo "Version check passed: ${base_project} = ${project_version}"
+
+    - name: Checkout project release branch
+      uses: actions/checkout@v4
+      with:
+        repository: spring-cloud/${{ inputs.project }}
+        ref: release/${{ inputs.project-version }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.project }}
+
+    - name: Update project versions
+      uses: ./.github/actions/update-project-versions
+      with:
+        release-train-version: ${{ inputs.spring-cloud-release-train-version }}
+        commercial: ${{ endsWith(inputs.project, '-commercial') }}
+        token: ${{ inputs.token }}
+        directory: ${{ inputs.project }}
+        project-version-substitutions: '{"spring-cloud-dependencies-parent":"spring-cloud-build","spring-boot-starter-parent":"spring-boot","spring-cloud-starter-build":"spring-cloud-release","spring-cloud":"spring-cloud-release","verifier":"spring-cloud-contract","springBoot":"spring-boot"}'
+
+    - name: Delete CI and PR workflows from release branch
+      shell: bash
+      working-directory: ${{ inputs.project }}
+      run: |
+        for workflow in "ci.yml" "ci.yaml" "pr.yml" "pr.yaml"; do
+          if [[ -f ".github/workflows/${workflow}" ]]; then
+            git rm ".github/workflows/${workflow}"
+            echo "Staged .github/workflows/${workflow} for deletion."
+          else
+            echo ".github/workflows/${workflow} not found — skipping."
+          fi
+        done
+
+    - name: Verify no snapshot versions
+      uses: ./.github/actions/verify-no-snapshot-versions
+      with:
+        directory: ${{ inputs.project }}
+
+    - name: Commit and push changes
+      shell: bash
+      working-directory: ${{ inputs.project }}
+      run: |
+        git config user.name "spring-builds"
+        git config user.email "spring-builds@users.noreply.github.com"
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No changes to commit."
+        else
+          git commit -m "Updating to release versions and removing CI/PR workflows"
+          git push
+          echo "Committed and pushed changes."
+        fi
+
+    - name: Trigger release-train-ready workflow
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        run_url=$(gh workflow run release-train-ready.yml \
+          --repo spring-cloud/${{ inputs.project }} \
+          --ref release/${{ inputs.project-version }} \
+          --field release-train=${{ inputs.spring-release-train-version }} \
+          --field release-train-repository=spring-io/release-train)
+        echo "Dispatched workflow run. Waiting for $run_url to complete."
+        run_id=${run_url##*/}
+        watch_exit_code=0
+        gh run watch $run_id --repo spring-cloud/${{ inputs.project }} --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
+        if [[ $watch_exit_code -eq 0 ]]; then
+          echo "Workflow run succeeded."
+        else
+          echo "Workflow run failed."
+        fi
+        exit $watch_exit_code
+
+    - name: Remove release branch from projects.json
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PROJECT: ${{ inputs.project }}
+        RELEASE_BRANCH: release/${{ inputs.project-version }}
+      run: |
+        cat > /tmp/remove_from_projects.js << 'JSEOF'
+        const fs = require('fs');
+
+        const project       = process.env.PROJECT;
+        const releaseBranch = process.env.RELEASE_BRANCH;
+
+        const config = JSON.parse(fs.readFileSync('/tmp/projects_original.json', 'utf8'));
+
+        const isCommercial = project.endsWith('-commercial');
+        const baseProject  = isCommercial ? project.slice(0, -'-commercial'.length) : project;
+
+        if (!config[baseProject] || !config[baseProject].commercial) {
+          console.log(`No commercial entry found for ${baseProject} in projects.json — nothing to remove.`);
+          process.exit(0);
+        }
+
+        const commercial = config[baseProject].commercial;
+        let changed = false;
+
+        const scheduled = (commercial.branches || {}).scheduled || [];
+        const idx = scheduled.indexOf(releaseBranch);
+        if (idx !== -1) {
+          scheduled.splice(idx, 1);
+          changed = true;
+          console.log(`Removed ${releaseBranch} from ${baseProject}.commercial.branches.scheduled`);
+        } else {
+          console.log(`${releaseBranch} not in branches.scheduled — skipping`);
+        }
+
+        const versionMap = commercial.jdkVersions || {};
+        if (releaseBranch in versionMap) {
+          delete versionMap[releaseBranch];
+          changed = true;
+          console.log(`Removed ${baseProject}.commercial.jdkVersions[${releaseBranch}]`);
+        } else {
+          console.log(`jdkVersions[${releaseBranch}] not found — skipping`);
+        }
+
+        if (!changed) {
+          console.log('No changes needed to projects.json.');
+          process.exit(0);
+        }
+
+        let raw = JSON.stringify(config, null, 2);
+        raw = raw.replace(/\[[\s\S]*?\]/g, m => {
+          try {
+            const arr = JSON.parse(m);
+            if (Array.isArray(arr) && arr.every(x => typeof x === 'string')) {
+              return '[' + arr.map(x => JSON.stringify(x)).join(', ') + ']';
+            }
+          } catch {}
+          return m;
+        });
+
+        fs.writeFileSync('/tmp/projects_updated.json', raw + '\n', 'utf8');
+        console.log('projects.json written.');
+        JSEOF
+
+        file_response=$(gh api "repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json?ref=main")
+        current_sha=$(echo "$file_response" | jq -r '.sha')
+        echo "$file_response" | jq -r '.content' | tr -d '\n' | base64 -d > /tmp/projects_original.json
+        cp /tmp/projects_original.json /tmp/projects_updated.json
+
+        node /tmp/remove_from_projects.js
+
+        if diff -q /tmp/projects_original.json /tmp/projects_updated.json > /dev/null 2>&1; then
+          echo "No changes to projects.json — nothing to push."
+        else
+          new_content_b64=$(base64 -w 0 /tmp/projects_updated.json)
+          jq -n \
+            --arg message "Removing ${RELEASE_BRANCH} for ${PROJECT} after release is ready" \
+            --arg content "$new_content_b64" \
+            --arg sha "$current_sha" \
+            '{message: $message, content: $content, sha: $sha, branch: "main"}' | \
+          gh api "repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json" \
+            --method PUT \
+            --input -
+          echo "projects.json updated on main."
+        fi
+
+branding:
+  icon: 'check-square'
+  color: 'green'

@@ -1,0 +1,68 @@
+name: Release Train Ready
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config)'
+        required: true
+        type: string
+      project-version:
+        description: 'Project version (e.g. 4.2.0)'
+        required: true
+        type: string
+      spring-cloud-release-train-version:
+        description: 'Release train version matching the jenkins-releaser-config properties file (e.g. 2025.0.0)'
+        required: true
+        type: string
+      spring-release-train-version:
+        description: 'Release train version to mark this project ready in (e.g. 2025.0.0)'
+        required: true
+        type: string
+      token:
+        description: 'GitHub token with access to the project repo. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_call:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config)'
+        required: true
+        type: string
+      project-version:
+        description: 'Project version (e.g. 4.2.0)'
+        required: true
+        type: string
+      spring-cloud-release-train-version:
+        description: 'Spring Cloud release train version matching the jenkins-releaser-config properties file (e.g. 2025.0.0)'
+        required: true
+        type: string
+      spring-release-train-version:
+        description: 'Spring release train version to mark this project ready in (e.g. 2026.1)'
+        required: true
+        type: string
+    secrets:
+      token:
+        description: 'GitHub token with access to the project repo. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-train-ready:
+    name: Release Train Ready - ${{ inputs.project }} ${{ inputs.project-version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update versions, verify, commit, push, and trigger release-train-ready
+        uses: ./.github/actions/spring-release-train-project-ready
+        with:
+          project: ${{ inputs.project }}
+          project-version: ${{ inputs.project-version }}
+          spring-cloud-release-train-version: ${{ inputs.spring-cloud-release-train-version }}
+          spring-release-train-version: ${{ inputs.spring-release-train-version }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}

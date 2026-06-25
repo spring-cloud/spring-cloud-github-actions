@@ -341,6 +341,61 @@ describe('updatePomFile', () => {
     const written = fs.readFileSync(dest, 'utf-8');
     expect(written).toContain('<version>4.1.0</version>');
   });
+
+  it('uses exact artifact ID to resolve parent version when it is in the versions map', () => {
+    // spring-cloud-dependencies-parent is in the versions map via substitution
+    // (as it would be in production). Its stripped name spring-cloud-dependencies is NOT.
+    // The parent version must be set to the spring-cloud-build version, not projectVersion.
+    const src = fixturePath('maven-bom', 'pom.xml');
+    const dest = path.join(tmpDir, 'pom.xml');
+    fs.copyFileSync(src, dest);
+
+    const versionsWithExternalParent = {
+      ...versions,
+      'spring-cloud-dependencies-parent': '4.2.0', // spring-cloud-build version via substitution
+    };
+
+    updatePomFile(dest, false, '4.1.1', versionsWithExternalParent, '4.1.0');
+
+    const written = fs.readFileSync(dest, 'utf-8');
+    const parentBlock = written.match(/<parent>[\s\S]*?<\/parent>/)[0];
+    // Parent version must be 4.2.0 (from versions map), not 4.1.1 (projectVersion)
+    expect(parentBlock).toContain('<version>4.2.0</version>');
+  });
+
+  it('uses spring-boot version for spring-boot-starter-parent when it is in the versions map', () => {
+    // Simulates a samples or IT pom whose parent is spring-boot-starter-parent.
+    // The stripped name spring-boot-starter is not in versions, but the exact artifact
+    // ID spring-boot-starter-parent is present via the substitution added in action.yml.
+    const pomContent = `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.2.1</version>
+    <relativePath/>
+  </parent>
+  <groupId>org.springframework.cloud</groupId>
+  <artifactId>spring-cloud-function-sample-basic</artifactId>
+  <version>4.1.0</version>
+</project>`;
+    const dest = path.join(tmpDir, 'pom.xml');
+    fs.writeFileSync(dest, pomContent);
+
+    const versionsWithBootParent = {
+      ...versions,
+      'spring-boot-starter-parent': '3.2.3', // spring-boot version added via substitution in action.yml
+    };
+
+    updatePomFile(dest, false, '4.1.1', versionsWithBootParent, '4.1.0');
+
+    const written = fs.readFileSync(dest, 'utf-8');
+    const parentBlock = written.match(/<parent>[\s\S]*?<\/parent>/)[0];
+    // Parent version must be 3.2.3 (spring-boot version), not 4.1.1 (projectVersion)
+    expect(parentBlock).toContain('<version>3.2.3</version>');
+  });
+
 });
 
 // ── findFiles ──────────────────────────────────────────────────────────────────

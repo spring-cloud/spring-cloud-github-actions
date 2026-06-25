@@ -1,0 +1,381 @@
+name: Run GitHub Actions Workflow Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      generator-version:
+        description: 'Version of github-actions-workflow-generator to use (e.g. 0.0.5). Defaults to latest release.'
+        required: false
+        type: string
+        default: ''
+      sha:
+        description: 'SHA to pin both release-train wrapper actions to. Defaults to the latest commit in this repo.'
+        required: false
+        type: string
+        default: ''
+      spring-release:
+        description: 'Spring release train version (e.g. 2026.1). When set, also processes release/[version] branches found in the spring-io/release-train README.adoc for that version.'
+        required: false
+        type: string
+        default: ''
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names to run against (e.g. spring-cloud-build,spring-cloud-config). When empty, all projects in projects.json are processed.'
+        required: false
+        type: string
+        default: ''
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      generator-version: ${{ steps.find-generator.outputs.version }}
+      generator-url: ${{ steps.find-generator.outputs.url }}
+      sha: ${{ steps.find-sha.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find generator version and download URL
+        id: find-generator
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          if [[ -n "${{ inputs.generator-version }}" ]]; then
+            version="${{ inputs.generator-version }}"
+            tag="v${version}"
+          else
+            response=$(gh api repos/spring-io/github-actions-workflow-generator/releases/latest)
+            tag=$(echo "$response" | jq -r '.tag_name')
+            version="${tag#v}"
+          fi
+          url="https://github.com/spring-io/github-actions-workflow-generator/releases/download/${tag}/github-actions-workflow-generator-${version}.jar"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "Generator version : ${version}"
+          echo "Download URL      : ${url}"
+
+      - name: Find action SHA
+        id: find-sha
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          if [[ -n "${{ inputs.sha }}" ]]; then
+            sha="${{ inputs.sha }}"
+          else
+            sha=$(gh api "repos/spring-cloud/spring-cloud-github-actions/commits" \
+              -X GET \
+              -f per_page=1 \
+              --jq '.[0].sha')
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "SHA : ${sha}"
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          SPRING_RELEASE: ${{ inputs.spring-release }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+        run: |
+          node - << 'JSEOF'
+          const { execFileSync } = require('child_process');
+          const fs = require('fs');
+
+          // Fetch projects.json from the main branch
+          const b64 = execFileSync('gh', [
+            'api', 'repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json',
+            '-X', 'GET', '-f', 'ref=main', '--jq', '.content'
+          ], { encoding: 'utf8' }).trim();
+          const projects = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+
+          const defaults = projects.defaults || {};
+
+          const projectsFilterRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const projectsFilter = projectsFilterRaw
+            ? new Set(projectsFilterRaw.split(',').map(p => p.trim()).filter(Boolean))
+            : new Set();
+
+          function getJdks(projectKey, typeKey, branch) {
+            const typeCfg = (projects[projectKey] || {})[typeKey] || {};
+            const jdkmap = typeCfg.jdkVersions || {};
+            if (jdkmap[branch]) return jdkmap[branch];
+            if (jdkmap['default']) return jdkmap['default'];
+            const defJdkmap = (defaults[typeKey] || {}).jdkVersions || {};
+            if (defJdkmap[branch]) return defJdkmap[branch];
+            return defJdkmap['default'] || ['17', '21', '25'];
+          }
+
+          function primaryJdk(jdks) {
+            return jdks.includes('8') ? '8' : '17';
+          }
+
+          const entries = [];
+          const seen = new Set();
+
+          function addEntry(repo, branch, typeKey, projectKey, jdkLookupBranch) {
+            const key = `${repo}@${branch}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            const jdks = getJdks(projectKey, typeKey, jdkLookupBranch || branch);
+            entries.push({ repo, branch, primary_jdk: primaryJdk(jdks) });
+          }
+
+          // Build entries from projects.json
+          for (const [projectKey, config] of Object.entries(projects)) {
+            if (projectKey === 'defaults') continue;
+            if (projectsFilter.size > 0 && !projectsFilter.has(projectKey)) continue;
+            for (const typeKey of ['oss', 'commercial']) {
+              const typeCfg = config[typeKey];
+              if (!typeCfg) continue;
+              const repo = typeKey === 'commercial'
+                ? `spring-cloud/${projectKey}-commercial`
+                : `spring-cloud/${projectKey}`;
+              for (const branch of (typeCfg.branches || {}).scheduled || []) {
+                addEntry(repo, branch, typeKey, projectKey);
+              }
+            }
+          }
+
+          // Optionally add release/[version] branches from the Spring release train README
+          const springRelease = (process.env.SPRING_RELEASE || '').trim();
+          if (springRelease) {
+            let readmeB64;
+            try {
+              readmeB64 = execFileSync('gh', [
+                'api', 'repos/spring-io/release-train/contents/README.adoc',
+                '-X', 'GET', '-f', `ref=${springRelease}`, '--jq', '.content'
+              ], { encoding: 'utf8' }).trim();
+            } catch (err) {
+              console.error(`Warning: could not fetch README.adoc for spring release ${springRelease}: ${err.message}`);
+            }
+            if (readmeB64) {
+              const content = Buffer.from(readmeB64, 'base64').toString('utf8');
+              let currentRepo = null;
+              let currentProjectKey = null;
+              for (const line of content.split('\n')) {
+                if (/^== /.test(line)) {
+                  if (!line.includes('Spring Cloud')) {
+                    currentRepo = null;
+                    currentProjectKey = null;
+                  }
+                  continue;
+                }
+                const releasingMatch = line.match(
+                  /\*\*Releasing from:\*\* https:\/\/github\.com\/spring-cloud\/([^\[]+)\[/
+                );
+                if (releasingMatch) {
+                  const repoName = releasingMatch[1].trim().replace(/\/$/, '');
+                  currentRepo = `spring-cloud/${repoName}`;
+                  currentProjectKey = repoName.replace(/-commercial$/, '');
+                  continue;
+                }
+                if (currentRepo) {
+                  const versionMatch = line.match(/=== .+ (\d+\.\d+(?:\.\d+(?:\.\d+)?)?)\s*$/);
+                  if (versionMatch) {
+                    const version = versionMatch[1];
+                    const parts = version.split('.');
+                    const parentBranch = parts.slice(0, -1).join('.') + '.x';
+                    if (projectsFilter.size > 0 && !projectsFilter.has(currentProjectKey)) continue;
+                    addEntry(currentRepo, `release/${version}`, 'commercial', currentProjectKey, parentBranch);
+                  }
+                }
+              }
+            }
+          }
+
+          const matrix = { include: entries };
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\n`);
+          console.log(`Matrix built: ${entries.length} entries`);
+          JSEOF
+
+  generate:
+    name: "Generate — ${{ matrix.repo }}@${{ matrix.branch }}"
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: liberica
+          java-version: '25'
+
+      - name: Download generator JAR
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          gh release download "v${{ needs.setup.outputs.generator-version }}" \
+            --repo spring-io/github-actions-workflow-generator \
+            --pattern "github-actions-workflow-generator-${{ needs.setup.outputs.generator-version }}.jar" \
+            --output generator.jar
+          echo "Downloaded github-actions-workflow-generator ${{ needs.setup.outputs.generator-version }}"
+
+      - name: Clone repository
+        env:
+          TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          git clone --depth 1 --branch "${{ matrix.branch }}" \
+            "https://x-access-token:${TOKEN}@github.com/${{ matrix.repo }}.git" repo
+          cd repo
+          git config user.email "spring-builds@users.noreply.github.com"
+          git config user.name "spring-builds"
+
+      - name: Update release-train wrapper actions
+        working-directory: repo
+        env:
+          SHA: ${{ needs.setup.outputs.sha }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const sha = process.env.SHA;
+
+          const ACTIONS = [
+            {
+              file: '.github/actions/release-train-build/action.yml',
+              name: 'Build Release',
+              ref:  'spring-cloud/spring-cloud-github-actions/.github/actions/release-train-build',
+              sha,
+            },
+            {
+              file: '.github/actions/release-train-test/action.yml',
+              name: 'Test Release',
+              ref:  'spring-cloud/spring-cloud-github-actions/.github/actions/release-train-test',
+              sha,
+            },
+          ];
+
+          for (const { file, name, ref, sha } of ACTIONS) {
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            if (fs.existsSync(file)) {
+              const original = fs.readFileSync(file, 'utf8');
+              const shaRe = new RegExp(`(${ref.replace(/\//g, '\\/')})@[0-9a-f]{40}`, 'g');
+              const updated = original.replace(shaRe, `$1@${sha}`);
+              if (updated === original) {
+                console.log(`  ${file}: SHA already up to date.`);
+              } else {
+                fs.writeFileSync(file, updated, 'utf8');
+                console.log(`  ${file}: updated SHA to ${sha}.`);
+              }
+            } else {
+              const content = `name: ${name}\nruns:\n  using: composite\n  steps:\n    - uses: ${ref}@${sha}\n`;
+              fs.writeFileSync(file, content, 'utf8');
+              console.log(`  ${file}: created.`);
+            }
+          }
+          JSEOF
+
+      - name: Run workflow generator
+        working-directory: repo
+        run: |
+          java -jar ../generator.jar \
+            "--workflow.generator.project.java.versions.primary=${{ matrix.primary_jdk }}" \
+            "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
+            "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD" \
+            "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
+            "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD"
+
+      - name: Commit and push changes
+        id: commit
+        working-directory: repo
+        run: |
+          git add .github/
+          if git diff --staged --quiet; then
+            echo "No changes to commit for ${{ matrix.repo }}@${{ matrix.branch }}."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Update generated GitHub Actions workflow files"
+            git push
+            echo "Changes pushed to ${{ matrix.repo }}@${{ matrix.branch }}."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record result
+        if: always()
+        id: record
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          CHANGED: ${{ steps.commit.outputs.changed }}
+        run: |
+          safe="${REPO//\//-}-${BRANCH//\//-}"
+          safe="${safe//./-}"
+          echo "safe-name=${safe}" >> "$GITHUB_OUTPUT"
+          echo '{"repo":"'"$REPO"'","branch":"'"$BRANCH"'","changed":'"${CHANGED:-false}"'}' \
+            > "result-${safe}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ steps.record.outputs.safe-name }}
+          path: result-${{ steps.record.outputs.safe-name }}.json
+
+  summary:
+    name: Summary
+    needs: generate
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const files = fs.readdirSync('results').filter(f => f.endsWith('.json'));
+          const results = files
+            .map(f => JSON.parse(fs.readFileSync(path.join('results', f), 'utf8')))
+            .sort((a, b) => {
+              if (a.changed !== b.changed) return a.changed ? -1 : 1;
+              return `${a.repo}@${a.branch}`.localeCompare(`${b.repo}@${b.branch}`);
+            });
+
+          const updated   = results.filter(r => r.changed);
+          const unchanged = results.filter(r => !r.changed);
+
+          let md = '## Workflow Generator Results\n\n';
+
+          if (updated.length > 0) {
+            md += `### Updated (${updated.length})\n\n`;
+            md += '| Repository | Branch |\n|---|---|\n';
+            for (const r of updated) {
+              md += `| \`${r.repo}\` | \`${r.branch}\` |\n`;
+            }
+            md += '\n';
+          } else {
+            md += '> No changes were made.\n\n';
+          }
+
+          if (unchanged.length > 0) {
+            md += `<details><summary>Unchanged (${unchanged.length})</summary>\n\n`;
+            md += '| Repository | Branch |\n|---|---|\n';
+            for (const r of unchanged) {
+              md += `| \`${r.repo}\` | \`${r.branch}\` |\n`;
+            }
+            md += '\n</details>\n';
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
+          console.log(md);
+          JSEOF

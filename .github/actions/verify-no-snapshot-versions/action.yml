@@ -1,0 +1,31 @@
+name: 'Verify No Snapshot Versions'
+description: 'Verifies that all Maven and Gradle build files in a Spring Cloud project contain only release versions (no -SNAPSHOT, -RC*, or -M* versions)'
+author: 'Spring Cloud Team'
+
+inputs:
+  directory:
+    description: 'Root directory of the project to verify. Defaults to the current working directory.'
+    required: false
+    default: '.'
+  exclude-patterns:
+    description: 'Newline-separated list of regular expressions. Any file whose absolute path matches one of these patterns is excluded from version checking.'
+    required: false
+    default: |
+      ^.*\.git/.*$
+      ^.*spring-cloud-contract-maven-plugin/src/test/projects/.*$
+      ^.*spring-cloud-contract-maven-plugin/target/.*$
+      ^.*spring-cloud-contract-gradle-plugin/src/test/.*$
+      ^.*src/test/bats/.*$
+      ^.*samples/standalone/[a-z]+/.*$
+
+outputs:
+  violations:
+    description: 'JSON array of violation objects, each with file, location, and version fields. Empty array when all versions are release versions.'
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'check-circle'
+  color: 'green'

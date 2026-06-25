@@ -1,0 +1,161 @@
+name: Test - Verify No Snapshot Versions
+
+on:
+  push:
+    paths:
+      - '.github/actions/verify-no-snapshot-versions/**'
+      - '.github/workflows/test-verify-no-snapshot-versions.yml'
+  pull_request:
+    paths:
+      - '.github/actions/verify-no-snapshot-versions/**'
+      - '.github/workflows/test-verify-no-snapshot-versions.yml'
+
+jobs:
+  # ── Unit tests ─────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/verify-no-snapshot-versions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/actions/verify-no-snapshot-versions/package.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+  # ── Integration test (clean project — action should succeed) ───────────────
+  integration-test-clean:
+    name: Integration Test (clean project)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create clean Maven + Gradle project
+        run: |
+          mkdir -p /tmp/clean-project/child-module
+
+          cat > /tmp/clean-project/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-config</artifactId>
+            <version>4.2.0</version>
+            <packaging>pom</packaging>
+            <properties>
+              <spring-boot.version>3.3.0</spring-boot.version>
+              <spring-cloud-commons.version>4.2.0</spring-cloud-commons.version>
+            </properties>
+          </project>
+          EOF
+
+          cat > /tmp/clean-project/child-module/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <parent>
+              <groupId>org.springframework.cloud</groupId>
+              <artifactId>spring-cloud-config</artifactId>
+              <version>4.2.0</version>
+            </parent>
+            <artifactId>spring-cloud-config-server</artifactId>
+          </project>
+          EOF
+
+          cat > /tmp/clean-project/gradle.properties << 'EOF'
+          version=4.2.0
+          springBootVersion=3.3.0
+          springCloudCommonsVersion=4.2.0
+          EOF
+
+      - name: Run verify-no-snapshot-versions (should pass)
+        uses: ./.github/actions/verify-no-snapshot-versions
+        with:
+          directory: '/tmp/clean-project'
+
+  # ── Integration test (SNAPSHOT project — action should fail) ──────────────
+  integration-test-snapshot:
+    name: Integration Test (SNAPSHOT project — expected to fail)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create project with SNAPSHOT versions
+        run: |
+          mkdir -p /tmp/snapshot-project
+
+          cat > /tmp/snapshot-project/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-config</artifactId>
+            <version>4.2.0-SNAPSHOT</version>
+            <packaging>pom</packaging>
+            <properties>
+              <spring-boot.version>3.3.0-SNAPSHOT</spring-boot.version>
+            </properties>
+          </project>
+          EOF
+
+          cat > /tmp/snapshot-project/gradle.properties << 'EOF'
+          version=4.2.0-SNAPSHOT
+          springBootVersion=3.3.0-SNAPSHOT
+          EOF
+
+      - name: Run verify-no-snapshot-versions (expected to fail)
+        id: verify
+        uses: ./.github/actions/verify-no-snapshot-versions
+        with:
+          directory: '/tmp/snapshot-project'
+        continue-on-error: true
+
+      - name: Confirm the action correctly reported violations
+        run: |
+          if [[ "${{ steps.verify.outcome }}" != "failure" ]]; then
+            echo "❌ Expected the action to fail for a SNAPSHOT project, but it did not"
+            exit 1
+          fi
+          echo "✅ Action correctly failed when SNAPSHOT versions were detected"
+
+  # ── Dist is up to date ──────────────────────────────────────────────────────
+  dist-up-to-date:
+    name: Verify dist is up to date
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/verify-no-snapshot-versions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/actions/verify-no-snapshot-versions/package.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild dist
+        run: npm run build
+
+      - name: Fail if dist/index.js has uncommitted changes
+        run: |
+          if git diff --quiet dist/index.js; then
+            echo "✅ dist/index.js is up to date"
+          else
+            echo "❌ dist/index.js is out of date — run 'npm run build' and commit the result"
+            git diff dist/index.js
+            exit 1
+          fi

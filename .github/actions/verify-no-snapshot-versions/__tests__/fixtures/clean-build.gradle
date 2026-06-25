@@ -1,0 +1,15 @@
+plugins {
+    id 'org.springframework.boot' version '3.3.0'
+    id 'java'
+}
+
+group = 'org.springframework.cloud'
+version = '4.2.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter'
+}

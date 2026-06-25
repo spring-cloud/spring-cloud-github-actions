@@ -321,12 +321,16 @@ function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVe
   const parentArtifactId = project?.parent?.artifactId;
   if (parentArtifactId) {
     const parentName = artifactIdToProjectName(parentArtifactId);
-    const parentTargetVersion = versions[parentName] ?? (parentName === artifactIdToProjectName(parentArtifactId) ? projectVersion : null);
 
-    // If the parent is the root project of this repo, update to projectVersion.
-    // If the parent is an external Spring Cloud project in the map, update to that version.
+    // Check the exact artifact ID first (handles substitution keys like
+    // spring-cloud-dependencies-parent that are already in the versions map),
+    // then the stripped name (handles patterns like spring-cloud-build-dependencies
+    // → spring-cloud-build). Fall back to projectVersion only when the parent is
+    // the root project of this repo.
     const resolvedParentVersion =
-      versions[parentName] !== undefined
+      versions[parentArtifactId] !== undefined
+        ? versions[parentArtifactId]
+        : versions[parentName] !== undefined
         ? versions[parentName]
         : isChildOfRoot(project, versions, projectVersion)
         ? projectVersion
@@ -580,14 +584,14 @@ function artifactIdToProjectName(artifactId) {
 /**
  * Returns true when a child pom's parent appears to be the root project of this repo
  * (i.e. not an external Spring Cloud parent) by checking that the parent artifactId
- * does NOT appear in the external versions map.
+ * does NOT appear in the external versions map under either its exact name or its
+ * stripped name (after removing -dependencies / -parent suffixes).
  */
 function isChildOfRoot(project, versions, projectVersion) {
   const parentArtifactId = project?.parent?.artifactId;
   if (!parentArtifactId) return false;
   const parentName = artifactIdToProjectName(parentArtifactId);
-  // If the parent is NOT in the external versions map, it's likely the root of this repo
-  return versions[parentName] === undefined;
+  return versions[parentArtifactId] === undefined && versions[parentName] === undefined;
 }
 
 function escapeRegex(str) {

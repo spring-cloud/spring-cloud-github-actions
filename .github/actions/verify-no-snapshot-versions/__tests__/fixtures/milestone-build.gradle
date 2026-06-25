@@ -1,0 +1,6 @@
+plugins {
+    id 'java'
+}
+
+group = 'org.springframework.cloud'
+version = '4.2.0-M1'
