@@ -103,7 +103,7 @@
       }
     }
   },
-   "spring-cloud-sleuth": {
+  "spring-cloud-sleuth": {
     "commercial": {
       "branches": {
         "scheduled": ["3.1.x"],
@@ -137,7 +137,7 @@
       }
     }
   },
-   "spring-cloud-gateway": {
+  "spring-cloud-gateway": {
     "oss": {
       "branches": {
         "scheduled": ["main", "4.3.x"],
@@ -221,7 +221,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["5.0.1.x", "4.3.3.x", "4.2.x", "4.1.x", "3.1.x"],
+        "scheduled": ["release/4.2.7", "5.0.1.x", "4.3.3.x", "4.2.x", "4.1.x", "3.1.x"],
         "default": ["4.2.x"]
       },
       "jdkVersions": {
@@ -229,7 +229,8 @@
         "4.3.3.x": ["17", "21", "25"],
         "4.2.x": ["17", "21"],
         "4.1.x": ["17", "21"],
-        "3.1.x": ["8", "11", "17"]
+        "3.1.x": ["8", "11", "17"],
+        "release/4.2.7": ["17", "21"]
       }
     }
   },
@@ -283,4 +284,3 @@
     }
   }
 }
-
