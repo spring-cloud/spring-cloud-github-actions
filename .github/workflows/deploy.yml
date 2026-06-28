@@ -170,6 +170,8 @@ jobs:
             echo "Using commercial Artifactory credentials"
             echo "ARTIFACTORY_USERNAME=${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}" >> $GITHUB_ENV
             echo "ARTIFACTORY_PASSWORD=${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}" >> $GITHUB_ENV
+            echo "COMMERCIAL_ARTIFACTORY_USERNAME=${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}" >> $GITHUB_ENV
+            echo "COMMERCIAL_ARTIFACTORY_PASSWORD=${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}" >> $GITHUB_ENV
           else
             echo "Using OSS Artifactory credentials"
             echo "ARTIFACTORY_USERNAME=${{ secrets.ARTIFACTORY_USERNAME }}" >> $GITHUB_ENV
