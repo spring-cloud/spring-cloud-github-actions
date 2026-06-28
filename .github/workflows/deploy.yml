@@ -153,13 +153,6 @@ jobs:
           echo "SHOULD_DEPLOY=$SHOULD_DEPLOY" >> $GITHUB_ENV
           echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS, SHOULD_DEPLOY=$SHOULD_DEPLOY"
 
-      - name: Build
-        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'false' }}
-        run: |
-          # Run Maven install for non-deploying JDK versions (no docs profile needed)
-          echo "Building without deployment"
-          ./mvnw clean install -Pspring -B -U $MAVEN_FLAGS
-
       - name: Set Artifactory credentials
         run: |
           # Projects may need these to pull/deploy artifacts
@@ -177,6 +170,13 @@ jobs:
             echo "ARTIFACTORY_USERNAME=${{ secrets.ARTIFACTORY_USERNAME }}" >> $GITHUB_ENV
             echo "ARTIFACTORY_PASSWORD=${{ secrets.ARTIFACTORY_PASSWORD }}" >> $GITHUB_ENV
           fi
+
+      - name: Build
+        if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'false' }}
+        run: |
+          # Run Maven install for non-deploying JDK versions (no docs profile needed)
+          echo "Building without deployment"
+          ./mvnw clean install -Pspring -B -U $MAVEN_FLAGS
 
       - name: Build and deploy
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
