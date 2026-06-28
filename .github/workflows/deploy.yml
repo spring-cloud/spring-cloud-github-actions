@@ -160,14 +160,24 @@ jobs:
           echo "Building without deployment"
           ./mvnw clean install -Pspring -B -U $MAVEN_FLAGS
 
+      - name: Set Artifactory credentials
+        run: |
+          # Projects may need these to pull/deploy artifacts
+          # For example spring cloud contract uses Gradle and its docker/spring-cloud-contract-docker/project/build.gradle needs the credentials
+          # Use && || ternary is avoided here because if the commercial secret is empty the expression
+          # short-circuits to the OSS secret even when commercial == 'true'
+          if [[ "${{ steps.is-commercial.outputs.commercial }}" == "true" ]]; then
+            echo "Using commercial Artifactory credentials"
+            echo "ARTIFACTORY_USERNAME=${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}" >> $GITHUB_ENV
+            echo "ARTIFACTORY_PASSWORD=${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "Using OSS Artifactory credentials"
+            echo "ARTIFACTORY_USERNAME=${{ secrets.ARTIFACTORY_USERNAME }}" >> $GITHUB_ENV
+            echo "ARTIFACTORY_PASSWORD=${{ secrets.ARTIFACTORY_PASSWORD }}" >> $GITHUB_ENV
+          fi
+
       - name: Build and deploy
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
-        env:
-          # Projects may need these to pull/deploy artifacts
-          # For example spring cloud contract uses Gradle and its docker/spring-cloud-contract-docker/project/build.gradle needs the credentials 
-          ARTIFACTORY_USERNAME: ${{ steps.is-commercial.outputs.commercial == 'true' && secrets.COMMERCIAL_ARTIFACTORY_USERNAME || secrets.ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ steps.is-commercial.outputs.commercial == 'true' && secrets.COMMERCIAL_ARTIFACTORY_PASSWORD || secrets.ARTIFACTORY_PASSWORD }}
-
         run: |
           # Run Maven deploy for the designated JDK version (always includes docs profile)
           echo "Building with docs profile and deploying artifacts"
