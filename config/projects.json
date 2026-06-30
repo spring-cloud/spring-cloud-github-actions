@@ -48,23 +48,23 @@
   "spring-cloud-task": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "3.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "3.3.x": ["17", "21", "25"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["3.2.x", "3.1.x", "2.4.x"],
-        "default": ["3.2.x"]
+        "scheduled": ["3.3.x", "3.2.x", "3.1.x", "2.4.x"],
+        "default": ["3.3.x"]
       },
       "jdkVersions": {
         "3.2.x": ["17", "21"],
         "3.1.x": ["17", "21"],
-        "2.4.x": ["8", "11", "17"]
+        "2.4.x": ["8", "11", "17"],
+        "3.3.x": ["17", "21", "25"]
       }
     }
   },
