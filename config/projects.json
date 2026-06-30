@@ -272,5 +272,16 @@
         "4.3.x": ["17", "21", "25"]
       }
     }
+  },
+  "spring-cloud-bus": {
+    "commercial": {
+      "branches": {
+        "scheduled": ["release/4.3.3"],
+        "default": []
+      },
+      "jdkVersions": {
+        "release/4.3.3": ["17", "21", "25"]
+      }
+    }
   }
 }
