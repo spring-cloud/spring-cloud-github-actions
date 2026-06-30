@@ -162,23 +162,23 @@
   "spring-cloud-stream": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "4.3.x": ["17", "21"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["4.2.x", "4.1.x", "3.2.x"],
-        "default": ["4.2.x"]
+        "scheduled": ["4.3.x", "4.2.x", "4.1.x", "3.2.x"],
+        "default": ["4.3.x"]
       },
       "jdkVersions": {
         "4.2.x": ["17", "21"],
         "4.1.x": ["17", "21"],
-        "3.2.x": ["8", "11", "17"]
+        "3.2.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21"]
       }
     }
   },
