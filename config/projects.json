@@ -281,5 +281,16 @@
       },
       "jdkVersions": {}
     }
+  },
+  "spring-cloud-config": {
+    "commercial": {
+      "branches": {
+        "scheduled": ["release/4.3.5"],
+        "default": []
+      },
+      "jdkVersions": {
+        "release/4.3.5": ["17", "21", "25"]
+      }
+    }
   }
 }
