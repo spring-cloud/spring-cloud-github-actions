@@ -249,6 +249,50 @@
       }
     }
   },
+  "spring-cloud-bus": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-config": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
   "defaults": {
     "oss": {
       "branches": {
@@ -271,24 +315,6 @@
         "default": ["17", "21"],
         "4.3.x": ["17", "21", "25"]
       }
-    }
-  },
-  "spring-cloud-bus": {
-    "commercial": {
-      "branches": {
-        "scheduled": [],
-        "default": []
-      },
-      "jdkVersions": {}
-    }
-  },
-  "spring-cloud-config": {
-    "commercial": {
-      "branches": {
-        "scheduled": [],
-        "default": []
-      },
-      "jdkVersions": {}
     }
   }
 }
