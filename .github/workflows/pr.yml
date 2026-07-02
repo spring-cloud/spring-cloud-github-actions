@@ -49,6 +49,8 @@ jobs:
         if: ${{ inputs.custom_build_command != '' }}
         env:
           CUSTOM_BUILD_COMMAND: ${{ inputs.custom_build_command }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
         run: |
           # Execute custom build command provided by caller
           printf '%s\n' "$CUSTOM_BUILD_COMMAND" > /tmp/build-deploy.sh
