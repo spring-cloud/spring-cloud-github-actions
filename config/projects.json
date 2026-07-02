@@ -93,11 +93,12 @@
   "spring-cloud-cloudfoundry": {
     "commercial": {
       "branches": {
-        "scheduled": ["3.1.x"],
+        "scheduled": ["release/3.1.6", "3.1.x"],
         "default": ["3.1.x"]
       },
       "jdkVersions": {
-        "3.1.x": ["8", "11", "17"]
+        "3.1.x": ["8", "11", "17"],
+        "release/3.1.6": ["8", "11", "17"]
       }
     }
   },
