@@ -1,0 +1,10 @@
+plugins {
+    id 'org.springframework.boot' apply false
+}
+
+group = 'org.springframework.cloud'
+version = '3.1.0'
+
+subprojects {
+    apply plugin: 'java'
+}

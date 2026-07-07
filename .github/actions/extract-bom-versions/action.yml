@@ -1,0 +1,29 @@
+name: 'Extract BOM Versions'
+description: 'Fetches the Spring Cloud release train BOM and exports all version properties as action outputs and environment variables'
+author: 'Spring Cloud Team'
+
+inputs:
+  ref:
+    description: 'Branch, tag, or SHA to fetch the BOM from (e.g. 2023.0.x, 2024.0.x). Defaults to main.'
+    required: false
+    default: 'main'
+  commercial:
+    description: 'When true, fetches the BOM from spring-cloud-release-commercial (private repo). A token with access to that repo must be supplied.'
+    required: false
+    default: 'false'
+  token:
+    description: 'GitHub token for fetching the BOM. Required when commercial is true since spring-cloud-release-commercial is a private repo.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  versions:
+    description: 'JSON object containing all extracted version properties (e.g. {"spring-boot": "3.2.0", "spring-cloud-config": "4.1.0"})'
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'package'
+  color: 'green'

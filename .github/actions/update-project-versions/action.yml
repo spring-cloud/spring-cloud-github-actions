@@ -1,0 +1,63 @@
+name: 'Update Project Versions'
+description: 'Updates version properties in a project''s pom.xml, gradle.properties, and build.gradle files using versions from the Spring Cloud release train BOM'
+author: 'Spring Cloud Team'
+
+inputs:
+  release-train-version:
+    description: >
+      Release train version (e.g. 2025.1.0). When supplied the action fetches
+      the matching jenkins-releaser-config properties file from spring-cloud-release
+      (or spring-cloud-release-commercial when commercial=true) and derives both the
+      versions map and the project version automatically.
+      Mutually exclusive with versions/project-version.
+    required: false
+  commercial:
+    description: >
+      When true, fetches the releaser config from the private
+      spring-cloud-release-commercial repository instead of the public
+      spring-cloud-release repository. Requires a token with read access to
+      that repository. Ignored when release-train-version is not set.
+    required: false
+    default: 'false'
+  token:
+    description: >
+      GitHub token used to fetch the releaser config file. Defaults to the
+      workflow token, which is sufficient for the public spring-cloud-release
+      repository. A PAT or a repository secret with read access is required
+      when commercial=true.
+    required: false
+    default: ${{ github.token }}
+  versions:
+    description: >
+      JSON object of versions to apply (e.g. {"spring-boot":"3.2.3","spring-cloud-config":"4.1.1"}).
+      Typically produced by the extract-bom-versions action.
+      Required when release-train-version is not set.
+    required: false
+  project-version:
+    description: >
+      The new version for this project (e.g. 4.1.2). Updates the root pom.xml
+      <version>, child pom <parent><version>, and the bare version= entry in
+      gradle.properties.
+      Required when release-train-version is not set.
+    required: false
+  directory:
+    description: 'Root directory of the project to update. Defaults to the current working directory.'
+    required: false
+    default: '.'
+  project-version-substitutions:
+    description: >
+      A JSON object that maps project names in pom.xml, gradle.properties, or build.gradle to versions when the action uses release-train-version
+      to derive the versions map and project version.  In some projects there may be properties for versions that don't conform to normal
+      naming conventions.  For example, in spring-cloud-contract uses verifierVersion in gradle.properties files.  This should map
+      to the version of spring-cloud-contract from the properties file for the release-train-version.  To accomplish this, you
+      can pass a JSON object {"verifier":"spring-cloud-contract"}.  This will map the verifierVersion property in gradle.properties to
+      the version of spring-cloud-contract in the properties file.
+    required: false
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'edit-3'
+  color: 'green'

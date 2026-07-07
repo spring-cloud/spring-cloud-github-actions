@@ -1,0 +1,312 @@
+name: Run GitHub Actions Workflow Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      generator-version:
+        description: 'Version of github-actions-workflow-generator to use (e.g. 0.0.5). Defaults to latest release.'
+        required: false
+        type: string
+        default: ''
+      release-train-build-sha:
+        description: 'SHA to pin the release-train-build wrapper action to. Defaults to the latest commit that modified the action in this repo.'
+        required: false
+        type: string
+        default: ''
+      release-train-test-sha:
+        description: 'SHA to pin the release-train-test wrapper action to. Defaults to the latest commit that modified the action in this repo.'
+        required: false
+        type: string
+        default: ''
+      spring-release:
+        description: 'Spring release train version (e.g. 2026.1). When set, also processes release/[version] branches found in the spring-io/release-train README.adoc for that version.'
+        required: false
+        type: string
+        default: ''
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names to run against (e.g. spring-cloud-build,spring-cloud-config). When empty, all projects in projects.json are processed.'
+        required: false
+        type: string
+        default: ''
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      generator-version: ${{ steps.find-generator.outputs.version }}
+      generator-url: ${{ steps.find-generator.outputs.url }}
+      build-sha: ${{ steps.find-shas.outputs.build-sha }}
+      test-sha: ${{ steps.find-shas.outputs.test-sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find generator version and download URL
+        id: find-generator
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          if [[ -n "${{ inputs.generator-version }}" ]]; then
+            version="${{ inputs.generator-version }}"
+            tag="v${version}"
+          else
+            response=$(gh api repos/spring-io/github-actions-workflow-generator/releases/latest)
+            tag=$(echo "$response" | jq -r '.tag_name')
+            version="${tag#v}"
+          fi
+          url="https://github.com/spring-io/github-actions-workflow-generator/releases/download/${tag}/github-actions-workflow-generator-${version}.jar"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "Generator version : ${version}"
+          echo "Download URL      : ${url}"
+
+      - name: Find action SHAs
+        id: find-shas
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          if [[ -n "${{ inputs.release-train-build-sha }}" ]]; then
+            build_sha="${{ inputs.release-train-build-sha }}"
+          else
+            build_sha=$(gh api "repos/spring-cloud/spring-cloud-github-actions/commits" \
+              -X GET \
+              -f path=".github/actions/release-train-build/action.yml" \
+              -f per_page=1 \
+              --jq '.[0].sha')
+          fi
+          if [[ -n "${{ inputs.release-train-test-sha }}" ]]; then
+            test_sha="${{ inputs.release-train-test-sha }}"
+          else
+            test_sha=$(gh api "repos/spring-cloud/spring-cloud-github-actions/commits" \
+              -X GET \
+              -f path=".github/actions/release-train-test/action.yml" \
+              -f per_page=1 \
+              --jq '.[0].sha')
+          fi
+          echo "build-sha=${build_sha}" >> "$GITHUB_OUTPUT"
+          echo "test-sha=${test_sha}" >> "$GITHUB_OUTPUT"
+          echo "release-train-build SHA : ${build_sha}"
+          echo "release-train-test SHA  : ${test_sha}"
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          SPRING_RELEASE: ${{ inputs.spring-release }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+        run: |
+          python3 - << 'PYEOF'
+          import json, os, re, subprocess, sys
+
+          with open('config/projects.json') as f:
+              projects = json.load(f)
+
+          defaults = projects.get('defaults', {})
+
+          projects_filter_raw = os.environ.get('PROJECTS_FILTER', '').strip()
+          projects_filter = {p.strip() for p in projects_filter_raw.split(',') if p.strip()} if projects_filter_raw else set()
+
+          def get_jdks(project_key, type_key, branch):
+              proj = projects.get(project_key, {})
+              type_cfg = proj.get(type_key, {})
+              jdkmap = type_cfg.get('jdkVersions', {})
+              if branch in jdkmap:
+                  return jdkmap[branch]
+              if 'default' in jdkmap:
+                  return jdkmap['default']
+              def_jdkmap = defaults.get(type_key, {}).get('jdkVersions', {})
+              if branch in def_jdkmap:
+                  return def_jdkmap[branch]
+              return def_jdkmap.get('default', ['17', '21', '25'])
+
+          def primary_jdk(jdks):
+              return '8' if '8' in jdks else '17'
+
+          entries = []
+          seen = set()
+
+          def add_entry(repo, branch, type_key, project_key):
+              key = (repo, branch)
+              if key in seen:
+                  return
+              seen.add(key)
+              jdks = get_jdks(project_key, type_key, branch)
+              entries.append({
+                  'repo': repo,
+                  'branch': branch,
+                  'primary_jdk': primary_jdk(jdks),
+              })
+
+          for project_key, config in projects.items():
+              if project_key == 'defaults':
+                  continue
+              if projects_filter and project_key not in projects_filter:
+                  continue
+              for type_key in ('oss', 'commercial'):
+                  type_cfg = config.get(type_key)
+                  if not type_cfg:
+                      continue
+                  repo = (f'spring-cloud/{project_key}-commercial'
+                          if type_key == 'commercial'
+                          else f'spring-cloud/{project_key}')
+                  for branch in type_cfg.get('branches', {}).get('scheduled', []):
+                      add_entry(repo, branch, type_key, project_key)
+
+          spring_release = os.environ.get('SPRING_RELEASE', '').strip()
+          if spring_release:
+              result = subprocess.run(
+                  ['gh', 'api', 'repos/spring-io/release-train/contents/README.adoc',
+                   '-X', 'GET', '-f', f'ref={spring_release}', '--jq', '.content'],
+                  capture_output=True, text=True)
+              if result.returncode != 0:
+                  print(f'Warning: could not fetch README.adoc for spring release {spring_release}: '
+                        f'{result.stderr.strip()}', file=sys.stderr)
+              else:
+                  decode = subprocess.run(['base64', '-d'],
+                                          input=result.stdout.strip(),
+                                          capture_output=True, text=True)
+                  current_repo = None
+                  current_project_key = None
+                  for line in decode.stdout.splitlines():
+                      if re.match(r'^== ', line):
+                          if 'Spring Cloud' not in line:
+                              current_repo = None
+                              current_project_key = None
+                          continue
+                      m = re.search(
+                          r'\*\*Releasing from:\*\* https://github\.com/spring-cloud/([^\[]+)\[',
+                          line)
+                      if m:
+                          repo_name = m.group(1).strip().rstrip('/')
+                          current_repo = f'spring-cloud/{repo_name}'
+                          current_project_key = repo_name.replace('-commercial', '')
+                          continue
+                      if current_repo:
+                          vm = re.search(r'=== .+ (\d+\.\d+(?:\.\d+(?:\.\d+)?)?)\s*$', line)
+                          if vm:
+                              version = vm.group(1)
+                              parts = version.split('.')
+                              parent_branch = '.'.join(parts[:-1]) + '.x'
+                              if projects_filter and current_project_key not in projects_filter:
+                                  continue
+                              add_entry(current_repo, f'release/{version}',
+                                        'commercial', current_project_key)
+
+          matrix = {'include': entries}
+          matrix_json = json.dumps(matrix, separators=(',', ':'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'matrix={matrix_json}\n')
+          print(f'Matrix built: {len(entries)} entries')
+          PYEOF
+
+  generate:
+    name: "Generate — ${{ matrix.repo }}@${{ matrix.branch }}"
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: liberica
+          java-version: '25'
+
+      - name: Download generator JAR
+        run: |
+          curl -fL "${{ needs.setup.outputs.generator-url }}" -o generator.jar
+          echo "Downloaded github-actions-workflow-generator ${{ needs.setup.outputs.generator-version }}"
+
+      - name: Clone repository
+        env:
+          TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          git clone --depth 1 --branch "${{ matrix.branch }}" \
+            "https://x-access-token:${TOKEN}@github.com/${{ matrix.repo }}.git" repo
+          cd repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Run workflow generator
+        working-directory: repo
+        run: |
+          java -jar ../generator.jar \
+            "--workflow.generator.project.java.versions.primary=${{ matrix.primary_jdk }}" \
+            "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
+            "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD" \
+            "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
+            "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD"
+
+      - name: Update release-train wrapper actions
+        working-directory: repo
+        env:
+          BUILD_SHA: ${{ needs.setup.outputs.build-sha }}
+          TEST_SHA: ${{ needs.setup.outputs.test-sha }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, re
+
+          build_sha = os.environ['BUILD_SHA']
+          test_sha  = os.environ['TEST_SHA']
+
+          ACTIONS = {
+              '.github/actions/release-train-build/action.yml': (
+                  'Build Release',
+                  'spring-cloud/spring-cloud-github-actions/.github/actions/release-train-build',
+                  build_sha,
+              ),
+              '.github/actions/release-train-test/action.yml': (
+                  'Test Release',
+                  'spring-cloud/spring-cloud-github-actions/.github/actions/release-train-test',
+                  test_sha,
+              ),
+          }
+
+          SHA_RE = re.compile(r'(@)[0-9a-f]{40}')
+
+          for path, (action_name, action_ref, sha) in ACTIONS.items():
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              if os.path.exists(path):
+                  with open(path) as f:
+                      content = f.read()
+                  new_content = SHA_RE.sub(lambda m: m.group(1) + sha, content)
+                  if new_content == content:
+                      print(f'  {path}: SHA already up to date.')
+                  else:
+                      with open(path, 'w') as f:
+                          f.write(new_content)
+                      print(f'  {path}: updated SHA to {sha}.')
+              else:
+                  with open(path, 'w') as f:
+                      f.write(
+                          f'name: {action_name}\n'
+                          f'runs:\n'
+                          f'  using: composite\n'
+                          f'  steps:\n'
+                          f'    - uses: {action_ref}@{sha}\n'
+                      )
+                  print(f'  {path}: created.')
+          PYEOF
+
+      - name: Commit and push changes
+        working-directory: repo
+        run: |
+          git add .github/
+          if git diff --staged --quiet; then
+            echo "No changes to commit for ${{ matrix.repo }}@${{ matrix.branch }}."
+          else
+            git commit -m "Update generated GitHub Actions workflow files"
+            git push
+            echo "Changes pushed to ${{ matrix.repo }}@${{ matrix.branch }}."
+          fi

@@ -1,0 +1,13 @@
+name: Test Release
+runs:
+  using: composite
+  steps:
+    - name: Copy Release Train Settings
+      shell: bash
+      run: |
+        if [ ! -f release-train-settings.xml ]; then
+          cp "${{ github.action_path }}/../release-train-settings.xml" release-train-settings.xml
+        fi
+    - name: Test Release
+      shell: bash
+      run:  ./mvnw --batch-mode --settings release-train-settings.xml clean verify --activate-profiles releaseTrain -Pdocs

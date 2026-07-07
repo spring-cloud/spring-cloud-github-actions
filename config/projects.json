@@ -2,93 +2,89 @@
   "spring-cloud-kubernetes": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "3.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "3.3.x": ["17", "21", "25"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["3.2.x", "3.1.x", "2.1.x"],
-        "default": ["3.2.x"]
+        "scheduled": ["3.3.x", "3.2.x", "2.1.x"],
+        "default": ["3.3.x"]
       },
       "jdkVersions": {
         "3.2.x": ["17", "21"],
-        "3.1.x": ["17", "21"],
-        "2.1.x": ["8", "11", "17"]
+        "2.1.x": ["8", "11", "17"],
+        "3.3.x": ["17", "21", "25"]
       }
     }
   },
   "spring-cloud-circuitbreaker": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "3.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "3.3.x": ["17", "21", "25"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["3.2.x", "3.1.x", "2.1.x"],
-        "default": ["3.2.x"]
+        "scheduled": ["3.3.x", "3.2.x", "3.1.x", "2.1.x"],
+        "default": ["3.3.x"]
       },
       "jdkVersions": {
         "3.2.x": ["17", "21"],
         "3.1.x": ["17", "21"],
-        "2.1.x": ["8", "11", "17"]
+        "2.1.x": ["8", "11", "17"],
+        "3.3.x": ["17", "21", "25"]
       }
     }
   },
   "spring-cloud-task": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "3.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "3.3.x": ["17", "21", "25"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["3.2.x", "3.1.x", "2.4.x"],
-        "default": ["3.2.x"]
+        "scheduled": ["3.3.x", "3.2.x", "2.4.x"],
+        "default": ["3.3.x"]
       },
       "jdkVersions": {
         "3.2.x": ["17", "21"],
-        "3.1.x": ["17", "21"],
-        "2.4.x": ["8", "11", "17"]
+        "2.4.x": ["8", "11", "17"],
+        "3.3.x": ["17", "21", "25"]
       }
     }
   },
   "spring-cloud-release": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "2025.0.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "2025.0.x": ["17", "21", "25"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["2025.0.2.x", "2024.0.x", "2023.0.x", "2021.0.x"],
-        "default": ["2024.0.x"]
+        "scheduled": ["2025.0.x", "2024.0.x", "2021.0.x"],
+        "default": ["2025.0.x"]
       },
       "jdkVersions": {
-        "2025.0.2.x": ["17", "21", "25"],
         "2024.0.x": ["17", "21"],
-        "2023.0.x": ["17", "21"],
-        "2021.0.x": ["8", "11", "17"]
+        "2021.0.x": ["8", "11", "17"],
+        "2025.0.x": ["17", "21", "25"]
       }
     }
   },
@@ -103,7 +99,7 @@
       }
     }
   },
-   "spring-cloud-sleuth": {
+  "spring-cloud-sleuth": {
     "commercial": {
       "branches": {
         "scheduled": ["3.1.x"],
@@ -114,121 +110,90 @@
       }
     }
   },
-  "spring-cloud-contract": {
+  "spring-cloud-gateway": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "4.3.x": ["17", "21"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["4.2.x", "4.1.x", "3.1.x"],
-        "default": ["4.2.x"]
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
       },
       "jdkVersions": {
         "4.2.x": ["17", "21"],
-        "4.1.x": ["17", "21"],
-        "3.1.x": ["8", "11", "17"]
-      }
-    }
-  },
-   "spring-cloud-gateway": {
-    "oss": {
-      "branches": {
-        "scheduled": ["main", "4.3.x"],
-        "default": ["main"]
-      },
-      "jdkVersions": {
-        "main": ["17", "21", "25"],
+        "3.1.x": ["8", "11", "17"],
         "4.3.x": ["17", "21"]
-      }
-    },
-    "commercial": {
-      "branches": {
-        "scheduled": ["5.0.1.x", "4.3.4.x", "4.2.x", "4.1.x", "3.1.x"],
-        "default": ["4.2.x"]
-      },
-      "jdkVersions": {
-        "5.0.1.x": ["17", "21", "25"],
-        "4.3.4.x": ["17", "21"],
-        "4.2.x": ["17", "21"],
-        "4.1.x": ["17", "21"],
-        "3.1.x": ["8", "11", "17"]
       }
     }
   },
   "spring-cloud-stream": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "4.3.x": ["17", "21"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["4.2.x", "4.1.x", "3.2.x"],
-        "default": ["4.2.x"]
+        "scheduled": ["4.3.x", "4.2.x", "3.2.x"],
+        "default": ["4.3.x"]
       },
       "jdkVersions": {
         "4.2.x": ["17", "21"],
-        "4.1.x": ["17", "21"],
-        "3.2.x": ["8", "11", "17"]
+        "3.2.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21"]
       }
     }
   },
   "spring-cloud-function": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "4.3.x": ["17", "21"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["4.2.x", "4.1.x", "3.2.x"],
-        "default": ["4.2.x"]
+        "scheduled": ["4.3.x", "4.2.x", "3.2.x"],
+        "default": ["4.3.x"]
       },
       "jdkVersions": {
         "4.2.x": ["17", "21"],
-        "4.1.x": ["17", "21"],
-        "3.2.x": ["8", "11", "17"]
+        "3.2.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21"]
       }
     }
   },
   "spring-cloud-build": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "4.3.x": ["17", "21", "25"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["5.0.1.x", "4.3.3.x", "4.2.x", "4.1.x", "3.1.x"],
-        "default": ["4.2.x"]
+        "scheduled": [ "4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
       },
       "jdkVersions": {
-        "5.0.1.x": ["17", "21", "25"],
-        "4.3.3.x": ["17", "21", "25"],
+        "4.3.x": ["17", "21", "25"],
         "4.2.x": ["17", "21"],
-        "4.1.x": ["17", "21"],
         "3.1.x": ["8", "11", "17"]
       }
     }
@@ -236,51 +201,202 @@
   "spring-cloud-commons": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"],
-        "4.3.x": ["17", "21", "25"]
+        "main": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["5.0.1.x", "4.2.x", "4.1.x", "3.1.x"],
-        "default": ["4.2.x"]
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
       },
       "jdkVersions": {
-        "5.0.1.x": ["17", "21", "25"],
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-bus": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-config": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-netflix": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-openfeign": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
         "4.2.x": ["17", "21"],
         "4.1.x": ["17", "21"],
-        "3.1.x": ["8", "11", "17"]
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-consul": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-zookeeper": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
+      }
+    }
+  },
+  "spring-cloud-vault": {
+    "oss": {
+      "branches": {
+        "scheduled": ["main"],
+        "default": ["main"]
+      },
+      "jdkVersions": {
+        "main": ["17", "21", "25"]
+      }
+    },
+    "commercial": {
+      "branches": {
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
+      },
+      "jdkVersions": {
+        "4.2.x": ["17", "21"],
+        "3.1.x": ["8", "11", "17"],
+        "4.3.x": ["17", "21", "25"]
       }
     }
   },
   "defaults": {
     "oss": {
       "branches": {
-        "scheduled": ["main", "4.3.x"],
+        "scheduled": ["main"],
         "default": ["main"]
       },
       "jdkVersions": {
         "main": ["17", "21", "25"],
-        "4.3.x": ["17", "21", "25"],
         "default": ["17", "21", "25"]
       }
     },
     "commercial": {
       "branches": {
-        "scheduled": ["4.2.x", "4.1.x", "3.1.x"],
-        "default": ["4.2.x", "4.1.x"]
+        "scheduled": ["4.3.x", "4.2.x", "3.1.x"],
+        "default": ["4.3.x"]
       },
       "jdkVersions": {
         "4.2.x": ["17", "21"],
-        "4.1.x": ["17", "21"],
         "3.1.x": ["8", "11", "17"],
-        "default": ["17", "21"]
+        "default": ["17", "21"],
+        "4.3.x": ["17", "21", "25"]
       }
     }
   }
 }
-

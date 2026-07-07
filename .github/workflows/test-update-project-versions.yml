@@ -1,0 +1,161 @@
+name: Test - Update Project Versions
+
+on:
+  push:
+    paths:
+      - '.github/actions/update-project-versions/**'
+      - '.github/workflows/test-update-project-versions.yml'
+  pull_request:
+    paths:
+      - '.github/actions/update-project-versions/**'
+      - '.github/workflows/test-update-project-versions.yml'
+
+jobs:
+  # ── Unit tests ─────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/update-project-versions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/actions/update-project-versions/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run unit tests
+        run: npm test
+
+  # ── Integration test ────────────────────────────────────────────────────────
+  # Creates a small Maven project in a temp directory and verifies the action
+  # updates pom.xml versions as expected.
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create test Maven project
+        run: |
+          mkdir -p /tmp/test-project/child-module
+
+          # Root pom.xml
+          cat > /tmp/test-project/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-config</artifactId>
+            <version>4.1.0</version>
+            <packaging>pom</packaging>
+            <modules>
+              <module>child-module</module>
+            </modules>
+            <properties>
+              <spring-boot.version>3.2.2</spring-boot.version>
+              <spring-cloud-commons.version>4.1.0</spring-cloud-commons.version>
+            </properties>
+          </project>
+          EOF
+
+          # Child module pom.xml
+          cat > /tmp/test-project/child-module/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <parent>
+              <groupId>org.springframework.cloud</groupId>
+              <artifactId>spring-cloud-config</artifactId>
+              <version>4.1.0</version>
+            </parent>
+            <artifactId>spring-cloud-config-server</artifactId>
+          </project>
+          EOF
+
+      - name: Run update-project-versions action
+        uses: ./.github/actions/update-project-versions
+        with:
+          versions: '{"spring-boot":"3.2.3","spring-cloud-commons":"4.1.1"}'
+          project-version: '4.1.2'
+          directory: '/tmp/test-project'
+
+      - name: Verify root pom project version was updated
+        run: |
+          VERSION=$(grep -o '<version>[^<]*</version>' /tmp/test-project/pom.xml | head -1 | sed 's/<[^>]*>//g')
+          echo "Root pom version: $VERSION"
+          if [[ "$VERSION" != "4.1.2" ]]; then
+            echo "❌ Expected root pom version 4.1.2, got: $VERSION"
+            exit 1
+          fi
+          echo "✅ Root pom version updated to 4.1.2"
+
+      - name: Verify spring-boot.version property was updated
+        run: |
+          VALUE=$(grep -o '<spring-boot.version>[^<]*</spring-boot.version>' /tmp/test-project/pom.xml | sed 's/<[^>]*>//g')
+          echo "spring-boot.version: $VALUE"
+          if [[ "$VALUE" != "3.2.3" ]]; then
+            echo "❌ Expected spring-boot.version 3.2.3, got: $VALUE"
+            exit 1
+          fi
+          echo "✅ spring-boot.version updated to 3.2.3"
+
+      - name: Verify spring-cloud-commons.version property was updated
+        run: |
+          VALUE=$(grep -o '<spring-cloud-commons.version>[^<]*</spring-cloud-commons.version>' /tmp/test-project/pom.xml | sed 's/<[^>]*>//g')
+          echo "spring-cloud-commons.version: $VALUE"
+          if [[ "$VALUE" != "4.1.1" ]]; then
+            echo "❌ Expected spring-cloud-commons.version 4.1.1, got: $VALUE"
+            exit 1
+          fi
+          echo "✅ spring-cloud-commons.version updated to 4.1.1"
+
+      - name: Verify child module parent version was updated
+        run: |
+          PARENT_VERSION=$(grep -A5 '<parent>' /tmp/test-project/child-module/pom.xml | grep -o '<version>[^<]*</version>' | sed 's/<[^>]*>//g')
+          echo "Child module parent version: $PARENT_VERSION"
+          if [[ "$PARENT_VERSION" != "4.1.2" ]]; then
+            echo "❌ Expected child module parent version 4.1.2, got: $PARENT_VERSION"
+            exit 1
+          fi
+          echo "✅ Child module parent version updated to 4.1.2"
+
+  # ── Dist is up to date ──────────────────────────────────────────────────────
+  # Ensures dist/index.js reflects the current source so nobody forgets to
+  # run `npm run build` before committing.
+  dist-up-to-date:
+    name: Verify dist is up to date
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/update-project-versions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/actions/update-project-versions/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Rebuild dist
+        run: npm run build
+
+      - name: Fail if dist/index.js has uncommitted changes
+        run: |
+          if git diff --quiet dist/index.js; then
+            echo "✅ dist/index.js is up to date"
+          else
+            echo "❌ dist/index.js is out of date — run 'npm run build' and commit the result"
+            git diff dist/index.js
+            exit 1
+          fi

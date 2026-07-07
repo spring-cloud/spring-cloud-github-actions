@@ -1,0 +1,138 @@
+name: Join Release Train
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config or spring-cloud-config-commercial)'
+        required: true
+        type: string
+      branch:
+        description: 'Source branch to create the release branch from (e.g. main, 4.2.x)'
+        required: true
+        type: string
+      release-train:
+        description: 'Spring release train to join (e.g. 2026.09)'
+        required: true
+        type: string
+      token:
+        description: 'GitHub token with access to the project repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_call:
+    inputs:
+      project:
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config or spring-cloud-config-commercial)'
+        required: true
+        type: string
+      branch:
+        description: 'Source branch to create the release branch from (e.g. main, 4.2.x)'
+        required: true
+        type: string
+      release-train:
+        description: 'Spring release train to join (e.g. 2025.09)'
+        required: true
+        type: string
+    secrets:
+      token:
+        description: 'GitHub token with access to the project repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  join-release-train:
+    name: Join Release Train - ${{ inputs.project }} (${{ inputs.branch }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine release version and commercial project
+        id: setup
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          echo "Reading pom.xml from spring-cloud/${{ inputs.project }} at ${{ inputs.branch }}..."
+          pom=$(gh api "repos/spring-cloud/${{ inputs.project }}/contents/pom.xml?ref=${{ inputs.branch }}" \
+            --jq '.content' | tr -d '\n' | base64 -d)
+
+          version=$(echo "$pom" | python3 -c "
+          import sys, xml.etree.ElementTree as ET
+          root = ET.fromstring(sys.stdin.read())
+          ns = root.tag.split('}')[0].strip('{') if '}' in root.tag else ''
+          tag = ('{' + ns + '}version') if ns else 'version'
+          print(root.find(tag).text.replace('-SNAPSHOT', ''))
+          ")
+          echo "release-version=$version" >> $GITHUB_OUTPUT
+          echo "Release version: $version"
+
+          project="${{ inputs.project }}"
+          if [[ "$project" == *-commercial ]]; then
+            commercial_project="$project"
+            deployment_destination="Spring Enterprise"
+          else
+            commercial_project="${project}-commercial"
+            deployment_destination="Maven Central"
+          fi
+          echo "commercial-project=$commercial_project" >> $GITHUB_OUTPUT
+          echo "deployment-destination=$deployment_destination" >> $GITHUB_OUTPUT
+          echo "Commercial project: $commercial_project"
+          echo "Deployment destination: $deployment_destination"
+
+      - name: Create release branch in commercial repo
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          commercial_project="${{ steps.setup.outputs.commercial-project }}"
+          release_branch="release/${{ steps.setup.outputs.release-version }}"
+          token="${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}"
+          project="${{ inputs.project }}"
+
+          if [[ "$project" == *-commercial ]]; then
+            # Source is already a commercial repo — use its branch SHA via the API
+            echo "Creating ${release_branch} in spring-cloud/${commercial_project} from ${project}@${{ inputs.branch }}..."
+            source_sha=$(gh api "repos/spring-cloud/${commercial_project}/git/ref/heads/${{ inputs.branch }}" \
+              --jq '.object.sha')
+            gh api "repos/spring-cloud/${commercial_project}/git/refs" \
+              --method POST \
+              --field ref="refs/heads/${release_branch}" \
+              --field sha="${source_sha}"
+          else
+            # Source is an OSS repo — clone it and push to the commercial repo
+            echo "Creating ${release_branch} in spring-cloud/${commercial_project} from OSS ${project}@${{ inputs.branch }}..."
+            git clone --depth 1 --branch "${{ inputs.branch }}" \
+              "https://x-access-token:${token}@github.com/spring-cloud/${project}.git" source-repo
+            cd source-repo
+            git remote add commercial \
+              "https://x-access-token:${token}@github.com/spring-cloud/${commercial_project}.git"
+            git push commercial "HEAD:refs/heads/${release_branch}"
+            cd ..
+            rm -rf source-repo
+          fi
+          echo "Branch ${release_branch} created successfully."
+
+      - name: Trigger release-train-join workflow and wait
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          commercial_project="${{ steps.setup.outputs.commercial-project }}"
+          release_branch="release/${{ steps.setup.outputs.release-version }}"
+          deployment_destination="${{ steps.setup.outputs.deployment-destination }}"
+
+          run_url=$(gh workflow run release-train-join.yml \
+            --repo "spring-cloud/${commercial_project}" \
+            --ref "${release_branch}" \
+            --field "deployment-destination=${deployment_destination}" \
+            --field "release-train=${{ inputs.release-train }}" \
+            --field "release-train-repository=spring-io/release-train")
+          echo "Dispatched workflow run. Waiting for $run_url to complete."
+          run_id=${run_url##*/}
+          watch_exit_code=0
+          gh run watch $run_id --repo "spring-cloud/${commercial_project}" --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
+          if [[ $watch_exit_code -eq 0 ]]; then
+            echo "Workflow run succeeded."
+          else
+            echo "Workflow run failed."
+          fi
+          exit $watch_exit_code
