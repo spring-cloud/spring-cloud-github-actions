@@ -55,6 +55,19 @@
 					</snapshots>
 				</repository>
 			</repositories>
+			<pluginRepositories>
+				<pluginRepository>
+					<id>release-train</id>
+					<url>${env.RELEASE_TRAIN_MAVEN_REPOSITORY_URL}</url>
+					<releases>
+						<enabled>true</enabled>
+					</releases>
+					<snapshots>
+						<enabled>true</enabled>
+						<updatePolicy>always</updatePolicy>
+					</snapshots>
+				</pluginRepository>
+			</pluginRepositories>
 		</profile>
 	</profiles>
 </settings>
