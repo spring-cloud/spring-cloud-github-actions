@@ -278,9 +278,13 @@ jobs:
             echo "One or more required workflows are missing — generator will run (primary JDK: ${primary_jdk})."
           fi
 
+      - name: Checkout
+        if: steps.check.outputs.needs-generation == 'true'
+        uses: actions/checkout@v4
+
       - name: Run workflow generator for hotfix branch
         if: steps.check.outputs.needs-generation == 'true'
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/generate-workflows-for-branch@main
+        uses: ./.github/actions/generate-workflows-for-branch
         with:
           repo:        ${{ needs.derive.outputs.commercial_repo }}
           branch:      ${{ needs.derive.outputs.commercial_branch }}

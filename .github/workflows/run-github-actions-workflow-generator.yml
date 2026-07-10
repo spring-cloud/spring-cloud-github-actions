@@ -206,9 +206,15 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref:   ${{ needs.setup.outputs.sha }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
       - name: Generate workflows
         id: generate
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/generate-workflows-for-branch@main
+        uses: ./.github/actions/generate-workflows-for-branch
         with:
           repo:              ${{ matrix.repo }}
           branch:            ${{ matrix.branch }}
