@@ -42,11 +42,6 @@ on:
         required: false
         type: string
         default: ''
-      project_version_substitutions:
-        description: 'JSON map of non-standard version property prefixes to project names (e.g. {"verifier":"spring-cloud-contract"}). Only used with release_train_version.'
-        required: false
-        type: string
-        default: ''
 
   workflow_call:
     inputs:
@@ -74,11 +69,6 @@ on:
         default: ''
       versions:
         description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0"}). Mutually exclusive with release_train_version.'
-        required: false
-        type: string
-        default: ''
-      project_version_substitutions:
-        description: 'JSON map of non-standard version property prefixes to project names. Only used with release_train_version.'
         required: false
         type: string
         default: ''
@@ -188,10 +178,9 @@ jobs:
         if: ${{ inputs.release_train_version != '' }}
         uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
         with:
-          release-train-version:        ${{ inputs.release_train_version }}
-          project-version-substitutions: ${{ inputs.project_version_substitutions }}
-          token:                        ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
-          directory:                    _version_repo
+          release-train-version: ${{ inputs.release_train_version }}
+          token:                 ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          directory:             _version_repo
 
       # Always stamp the project version to the hotfix snapshot (or the
       # explicit override).  When versions is supplied it also updates
@@ -201,7 +190,6 @@ jobs:
         uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
         with:
           project-version: ${{ steps.setup.outputs.effective_version }}
-          project-version-substitutions: ${{ inputs.project_version_substitutions }}
           versions:        ${{ inputs.versions || '{}' }}
           directory:       _version_repo
 

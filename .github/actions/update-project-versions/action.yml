@@ -52,7 +52,9 @@ inputs:
       to the version of spring-cloud-contract from the properties file for the release-train-version.  To accomplish this, you
       can pass a JSON object {"verifier":"spring-cloud-contract"}.  This will map the verifierVersion property in gradle.properties to
       the version of spring-cloud-contract in the properties file.
+      Pass '{}' to disable all substitutions.
     required: false
+    default: '{"spring-cloud-dependencies-parent":"spring-cloud-build","spring-boot-starter-parent":"spring-boot","spring-cloud-starter-build":"spring-cloud-release","spring-cloud":"spring-cloud-release","verifier":"spring-cloud-contract","springBoot":"spring-boot"}'
 
 runs:
   using: node20

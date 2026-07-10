@@ -100,7 +100,6 @@ runs:
         commercial: ${{ endsWith(inputs.project, '-commercial') }}
         token: ${{ inputs.token }}
         directory: ${{ inputs.project }}
-        project-version-substitutions: '{"spring-cloud-dependencies-parent":"spring-cloud-build","spring-boot-starter-parent":"spring-boot","spring-cloud-starter-build":"spring-cloud-release","spring-cloud":"spring-cloud-release","verifier":"spring-cloud-contract","springBoot":"spring-boot"}'
 
     - name: Delete CI and PR workflows from release branch
       shell: bash
