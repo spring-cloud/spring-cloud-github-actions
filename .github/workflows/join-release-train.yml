@@ -130,23 +130,11 @@ jobs:
           echo "Check passed: ${tag} does not exist in any repo."
 
       - name: Create milestone in source repo if missing
-        env:
-          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-        run: |
-          version="${{ steps.setup.outputs.release-version }}"
-          repo="spring-cloud/${{ inputs.project }}"
-          echo "Checking for milestone '${version}' in ${repo}..."
-          milestone_number=$(gh api "repos/${repo}/milestones?per_page=100" | \
-            jq -r --arg title "$version" '.[] | select(.title == $title) | .number')
-          if [[ -n "$milestone_number" ]]; then
-            echo "Milestone '${version}' already exists in ${repo} (#${milestone_number})."
-          else
-            echo "Milestone '${version}' not found — creating..."
-            gh api "repos/${repo}/milestones" \
-              --method POST \
-              --field title="$version"
-            echo "Milestone '${version}' created in ${repo}."
-          fi
+        uses: ./.github/actions/create-milestone
+        with:
+          repo:    spring-cloud/${{ inputs.project }}
+          version: ${{ steps.setup.outputs.release-version }}
+          token:   ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Create release branch in commercial repo
         env:

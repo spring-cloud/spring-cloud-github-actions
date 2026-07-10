@@ -91,6 +91,7 @@ jobs:
       commercial_repo:    ${{ steps.derive.outputs.commercial_repo }}
       commercial_branch:  ${{ steps.derive.outputs.commercial_branch }}
       commercial_project: ${{ steps.derive.outputs.commercial_project }}
+      commercial_version: ${{ steps.derive.outputs.commercial_version }}
     steps:
       - name: Derive commercial repo and branch from tag
         id: derive
@@ -102,9 +103,11 @@ jobs:
           COMMERCIAL_PROJECT="${COMMERCIAL_REPO#spring-cloud/}"
           # strip leading 'v', append '.1', prefix with 'release/'  (v5.0.1 -> release/5.0.1.1)
           COMMERCIAL_BRANCH="release/${OSS_TAG#v}.1"
-          echo "commercial_repo=${COMMERCIAL_REPO}"       >> "$GITHUB_OUTPUT"
-          echo "commercial_branch=${COMMERCIAL_BRANCH}"   >> "$GITHUB_OUTPUT"
-          echo "commercial_project=${COMMERCIAL_PROJECT}" >> "$GITHUB_OUTPUT"
+          COMMERCIAL_VERSION="${COMMERCIAL_BRANCH#release/}"
+          echo "commercial_repo=${COMMERCIAL_REPO}"         >> "$GITHUB_OUTPUT"
+          echo "commercial_branch=${COMMERCIAL_BRANCH}"     >> "$GITHUB_OUTPUT"
+          echo "commercial_project=${COMMERCIAL_PROJECT}"   >> "$GITHUB_OUTPUT"
+          echo "commercial_version=${COMMERCIAL_VERSION}"   >> "$GITHUB_OUTPUT"
           echo "OSS repo:           $OSS_REPO"
           echo "OSS tag:            $OSS_TAG"
           echo "Commercial repo:    $COMMERCIAL_REPO"
@@ -207,6 +210,20 @@ jobs:
           git push origin "${{ needs.derive.outputs.commercial_branch }}"
           echo "Version updates committed."
 
+  create-milestone:
+    needs: derive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create milestone in commercial repo if missing
+        uses: ./.github/actions/create-milestone
+        with:
+          repo:    ${{ needs.derive.outputs.commercial_repo }}
+          version: ${{ needs.derive.outputs.commercial_version }}
+          token:   ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
   ensure-workflows:
     needs: [derive, update-versions]
     runs-on: ubuntu-latest
@@ -292,7 +309,7 @@ jobs:
           token:       ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
   trigger-release-train-join:
-    needs: [derive, ensure-workflows]
+    needs: [derive, ensure-workflows, create-milestone]
     runs-on: ubuntu-latest
     steps:
       - name: Trigger release-train-join workflow in commercial repo
