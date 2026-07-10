@@ -315,7 +315,7 @@ jobs:
     needs: [derive, ensure-workflows, create-milestone]
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger release-train-join workflow in commercial repo
+      - name: Trigger release-train-join workflow and wait
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         shell: bash
@@ -323,13 +323,22 @@ jobs:
           commercial_project="${{ needs.derive.outputs.commercial_project }}"
           release_branch="${{ needs.derive.outputs.commercial_branch }}"
           echo "Triggering release-train-join.yml in spring-cloud/${commercial_project} on ${release_branch}..."
-          gh workflow run release-train-join.yml \
+          run_url=$(gh workflow run release-train-join.yml \
             --repo "spring-cloud/${commercial_project}" \
             --ref "${release_branch}" \
             --field "deployment-destination=Spring Enterprise" \
             --field "release-train=${{ inputs.spring_release_train }}" \
-            --field "release-train-repository=spring-io/release-train"
-          echo "release-train-join.yml dispatched."
+            --field "release-train-repository=spring-io/release-train")
+          echo "Dispatched workflow run. Waiting for $run_url to complete."
+          run_id=${run_url##*/}
+          watch_exit_code=0
+          gh run watch $run_id --repo "spring-cloud/${commercial_project}" --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
+          if [[ $watch_exit_code -eq 0 ]]; then
+            echo "Workflow run succeeded."
+          else
+            echo "Workflow run failed."
+          fi
+          exit $watch_exit_code
 
   trigger-ci:
     needs: [derive, trigger-release-train-join]
