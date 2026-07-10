@@ -181,6 +181,7 @@ jobs:
           release-train-version: ${{ inputs.release_train_version }}
           token:                 ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
           directory:             _version_repo
+          commercial:            'true' # use release config from commercial repo
 
       # Always stamp the project version to the hotfix snapshot (or the
       # explicit override).  When versions is supplied it also updates
