@@ -1,0 +1,167 @@
+name: 'Generate Workflows for Branch'
+description: >
+  Downloads the github-actions-workflow-generator JAR, updates release-train
+  wrapper action SHAs, runs the generator on the given repository branch, and
+  commits/pushes any resulting changes.
+
+inputs:
+  repo:
+    description: 'Full repository path (e.g. spring-cloud/spring-cloud-stream-commercial)'
+    required: true
+  branch:
+    description: 'Branch to generate workflows for (e.g. release/5.0.2.1)'
+    required: true
+  primary-jdk:
+    description: 'Primary JDK version passed to the generator (e.g. 17)'
+    required: false
+    default: '17'
+  generator-version:
+    description: >
+      Version of github-actions-workflow-generator to use.
+      Defaults to the latest release when not supplied.
+    required: false
+    default: ''
+  sha:
+    description: >
+      SHA to pin the release-train wrapper actions to.
+      Defaults to the latest commit on spring-cloud/spring-cloud-github-actions
+      when not supplied.
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token with write access to the target repository'
+    required: true
+
+outputs:
+  changed:
+    description: "'true' if workflow files were changed and pushed, 'false' otherwise"
+    value: ${{ steps.commit.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve generator version and action SHA
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        if [[ -n "${{ inputs.generator-version }}" ]]; then
+          version="${{ inputs.generator-version }}"
+        else
+          tag=$(gh api repos/spring-io/github-actions-workflow-generator/releases/latest --jq '.tag_name')
+          version="${tag#v}"
+        fi
+        url="https://github.com/spring-io/github-actions-workflow-generator/releases/download/v${version}/github-actions-workflow-generator-${version}.jar"
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "url=${url}"          >> "$GITHUB_OUTPUT"
+        echo "Generator version: ${version}"
+
+        if [[ -n "${{ inputs.sha }}" ]]; then
+          sha="${{ inputs.sha }}"
+        else
+          sha=$(gh api "repos/spring-cloud/spring-cloud-github-actions/commits" \
+            -X GET -f per_page=1 --jq '.[0].sha')
+        fi
+        echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+        echo "SHA: ${sha}"
+
+    - name: Set up Java 25
+      uses: actions/setup-java@v4
+      with:
+        distribution: liberica
+        java-version: '25'
+
+    - name: Download generator JAR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        version="${{ steps.resolve.outputs.version }}"
+        gh release download "v${version}" \
+          --repo spring-io/github-actions-workflow-generator \
+          --pattern "github-actions-workflow-generator-${version}.jar" \
+          --output _gen_generator.jar
+        echo "Downloaded github-actions-workflow-generator ${version}"
+
+    - name: Clone repository
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+      run: |
+        git clone --depth 1 --branch "${{ inputs.branch }}" \
+          "https://x-access-token:${TOKEN}@github.com/${{ inputs.repo }}.git" _gen_repo
+        git -C _gen_repo config user.email "spring-builds@users.noreply.github.com"
+        git -C _gen_repo config user.name "spring-builds"
+
+    - name: Update release-train wrapper actions
+      shell: bash
+      working-directory: _gen_repo
+      env:
+        SHA: ${{ steps.resolve.outputs.sha }}
+      run: |
+        node - << 'JSEOF'
+        const fs   = require('fs');
+        const path = require('path');
+
+        const sha = process.env.SHA;
+
+        const ACTIONS = [
+          {
+            file: '.github/actions/release-train-build/action.yml',
+            name: 'Build Release',
+            ref:  'spring-cloud/spring-cloud-github-actions/.github/actions/release-train-build',
+          },
+          {
+            file: '.github/actions/release-train-test/action.yml',
+            name: 'Test Release',
+            ref:  'spring-cloud/spring-cloud-github-actions/.github/actions/release-train-test',
+          },
+        ];
+
+        for (const { file, name, ref } of ACTIONS) {
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          if (fs.existsSync(file)) {
+            const original = fs.readFileSync(file, 'utf8');
+            const shaRe    = new RegExp(`(${ref.replace(/\//g, '\\/')})@[0-9a-f]{40}`, 'g');
+            const updated  = original.replace(shaRe, `$1@${sha}`);
+            if (updated === original) {
+              console.log(`  ${file}: SHA already up to date.`);
+            } else {
+              fs.writeFileSync(file, updated, 'utf8');
+              console.log(`  ${file}: updated SHA to ${sha}.`);
+            }
+          } else {
+            const content = `name: ${name}\nruns:\n  using: composite\n  steps:\n    - uses: ${ref}@${sha}\n`;
+            fs.writeFileSync(file, content, 'utf8');
+            console.log(`  ${file}: created.`);
+          }
+        }
+        JSEOF
+
+    - name: Run workflow generator
+      shell: bash
+      working-directory: _gen_repo
+      run: |
+        java -jar ../_gen_generator.jar \
+          "--workflow.generator.project.java.versions.primary=${{ inputs.primary-jdk }}" \
+          "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
+          "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD" \
+          "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
+          "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD"
+
+    - name: Commit and push changes
+      id: commit
+      shell: bash
+      working-directory: _gen_repo
+      run: |
+        git add .github/
+        if git diff --staged --quiet; then
+          echo "No changes to commit for ${{ inputs.repo }}@${{ inputs.branch }}."
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        else
+          git commit -m "Update generated GitHub Actions workflow files"
+          git push
+          echo "Changes pushed to ${{ inputs.repo }}@${{ inputs.branch }}."
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        fi

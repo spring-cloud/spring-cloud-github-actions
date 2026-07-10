@@ -207,8 +207,88 @@ jobs:
           git push origin "${{ needs.derive.outputs.commercial_branch }}"
           echo "Version updates committed."
 
-  trigger-release-train-join:
+  ensure-workflows:
     needs: [derive, update-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for required release train workflows
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          commercial_project="${{ needs.derive.outputs.commercial_project }}"
+          release_branch="${{ needs.derive.outputs.commercial_branch }}"
+
+          missing=false
+          for workflow in "release-train-join.yml" "release-train-ready.yml"; do
+            if gh api "repos/spring-cloud/${commercial_project}/contents/.github/workflows/${workflow}?ref=${release_branch}" --silent 2>/dev/null; then
+              echo "  ✓ ${workflow} present"
+            else
+              echo "  ✗ ${workflow} missing"
+              missing=true
+            fi
+          done
+          echo "needs-generation=${missing}" >> "$GITHUB_OUTPUT"
+
+          # Look up primary JDK from projects.json.
+          # initialize-commercial-branch already ran update-projects-json, which added
+          # commercial.jdkVersions[release_branch] sourced from oss.jdkVersions['X.Y.x'].
+          # We look up by the commercial branch name directly, matching how the generator
+          # queries scheduled branches.
+          project_key="${commercial_project%-commercial}"
+          echo "JDK lookup: commercial.jdkVersions['${release_branch}'] in project '${project_key}'"
+
+          gh api repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json \
+            -X GET -f ref=main --jq '.content' | base64 -d > /tmp/projects.json
+
+          export PROJECT_KEY="${project_key}"
+          export COMMERCIAL_BRANCH="${release_branch}"
+          primary_jdk=$(node - << 'JSEOF'
+          const fs               = require('fs');
+          const projectKey       = process.env.PROJECT_KEY;
+          const commercialBranch = process.env.COMMERCIAL_BRANCH;
+          const projects         = JSON.parse(fs.readFileSync('/tmp/projects.json', 'utf8'));
+          const defaults         = projects.defaults || {};
+
+          function getJdks(pk, type, branch) {
+            const cfg    = (projects[pk] || {})[type] || {};
+            const jdkmap = cfg.jdkVersions || {};
+            if (jdkmap[branch]) return jdkmap[branch];
+            if (jdkmap['default']) {
+              process.stderr.write(`WARNING: '${branch}' not found in projects.json commercial.jdkVersions for '${pk}' — falling back to commercial default: ${JSON.stringify(jdkmap['default'])}\n`);
+              return jdkmap['default'];
+            }
+            const defMap = (defaults[type] || {}).jdkVersions || {};
+            if (defMap[branch]) return defMap[branch];
+            const globalFallback = defMap['default'] || ['17', '21', '25'];
+            process.stderr.write(`WARNING: '${branch}' not found in projects.json for '${pk}' — falling back to global default: ${JSON.stringify(globalFallback)}\n`);
+            return globalFallback;
+          }
+
+          const jdks = getJdks(projectKey, 'commercial', commercialBranch);
+          process.stdout.write(jdks.includes('8') ? '8' : '17');
+          JSEOF
+          )
+          echo "primary-jdk=${primary_jdk}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$missing" == "false" ]]; then
+            echo "All required workflows are present — skipping generator."
+          else
+            echo "One or more required workflows are missing — generator will run (primary JDK: ${primary_jdk})."
+          fi
+
+      - name: Run workflow generator for hotfix branch
+        if: steps.check.outputs.needs-generation == 'true'
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/generate-workflows-for-branch@main
+        with:
+          repo:        ${{ needs.derive.outputs.commercial_repo }}
+          branch:      ${{ needs.derive.outputs.commercial_branch }}
+          primary-jdk: ${{ steps.check.outputs.primary-jdk }}
+          token:       ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+  trigger-release-train-join:
+    needs: [derive, ensure-workflows]
     runs-on: ubuntu-latest
     steps:
       - name: Trigger release-train-join workflow in commercial repo
