@@ -19,7 +19,7 @@ inputs:
   commit-message:
     description: 'Commit message'
     required: false
-    default: 'Updating settings.xml'
+    default: 'Updating settings.xml [skip actions]'
   git-user-name:
     description: 'Git author name for the commit'
     required: false

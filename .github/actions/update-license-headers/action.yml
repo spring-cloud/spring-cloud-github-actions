@@ -15,7 +15,7 @@ inputs:
   commit-message:
     description: 'Commit message for the license updates'
     required: false
-    default: 'Updating license headers'
+    default: 'Updating license headers [skip actions]'
   git-user-name:
     description: 'Git author name for the commit'
     required: false

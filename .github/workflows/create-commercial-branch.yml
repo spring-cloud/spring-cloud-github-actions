@@ -60,3 +60,25 @@ jobs:
       set_default_branch: ${{ inputs.set_default_branch }}
     secrets:
       token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+  trigger-ci:
+    needs: initialize
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push empty commit to trigger CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="spring-cloud/${{ inputs.oss_repo }}-commercial"
+          BRANCH="${{ inputs.oss_branch }}"
+
+          git clone --single-branch --branch "$BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _trigger_repo
+
+          cd _trigger_repo
+          git config user.name  "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+          git commit --allow-empty -m "Initialize commercial branch"
+          git push origin "$BRANCH"
+          echo "Empty commit pushed to trigger CI on ${COMMERCIAL_REPO}@${BRANCH}."

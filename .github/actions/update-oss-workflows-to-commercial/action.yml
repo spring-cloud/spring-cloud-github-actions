@@ -15,7 +15,7 @@ inputs:
   commit-message:
     description: 'Commit message for the workflow updates'
     required: false
-    default: 'updating workflows for commercial repo'
+    default: 'updating workflows for commercial repo [skip actions]'
   git-user-name:
     description: 'Git author name for the commit'
     required: false

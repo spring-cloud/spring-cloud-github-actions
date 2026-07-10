@@ -160,7 +160,7 @@ runs:
           echo "No changes to commit for ${{ inputs.repo }}@${{ inputs.branch }}."
           echo "changed=false" >> "$GITHUB_OUTPUT"
         else
-          git commit -m "Update generated GitHub Actions workflow files"
+          git commit -m "Update generated GitHub Actions workflow files [skip actions]"
           git push
           echo "Changes pushed to ${{ inputs.repo }}@${{ inputs.branch }}."
           echo "changed=true" >> "$GITHUB_OUTPUT"

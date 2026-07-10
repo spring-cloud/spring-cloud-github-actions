@@ -15,7 +15,7 @@ inputs:
   commit-message:
     description: 'Commit message for the distribution management updates'
     required: false
-    default: 'Updating distribution management for commercial repo'
+    default: 'Updating distribution management for commercial repo [skip actions]'
   git-user-name:
     description: 'Git author name for the commit'
     required: false

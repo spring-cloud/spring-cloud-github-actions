@@ -15,7 +15,7 @@ inputs:
   commit-message:
     description: 'Commit message for the repository updates'
     required: false
-    default: 'Updating repositories to commercial Broadcom repositories'
+    default: 'Updating repositories to commercial Broadcom repositories [skip actions]'
   git-user-name:
     description: 'Git author name for the commit'
     required: false

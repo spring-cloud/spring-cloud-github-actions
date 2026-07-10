@@ -22,7 +22,7 @@ inputs:
   commit-message:
     description: 'Commit message for the playbook update'
     required: false
-    default: 'Updating antora playbook for new branch'
+    default: 'Updating antora playbook for new branch [skip actions]'
   git-user-name:
     description: 'Git author name for the commit'
     required: false

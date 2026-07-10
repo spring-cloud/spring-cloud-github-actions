@@ -88,7 +88,7 @@ runs:
         fi
 
         if [[ -z "$COMMIT_MSG" ]]; then
-          COMMIT_MSG="Initialize ${COMMERCIAL_BRANCH} from ${OSS_REPO}@${OSS_REF}"
+          COMMIT_MSG="Initialize ${COMMERCIAL_BRANCH} from ${OSS_REPO}@${OSS_REF} [skip actions]"
         fi
 
         echo "=== Create Commercial Branch ==="

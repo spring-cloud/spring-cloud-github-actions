@@ -209,7 +209,7 @@ jobs:
             echo "No version changes to commit."
             exit 0
           fi
-          git commit -m "Updating project version to ${{ steps.setup.outputs.effective_version }}"
+          git commit -m "Updating project version to ${{ steps.setup.outputs.effective_version }} [skip actions]"
           git push origin "${{ needs.derive.outputs.commercial_branch }}"
           echo "Version updates committed."
 
@@ -330,3 +330,25 @@ jobs:
             --field "release-train=${{ inputs.spring_release_train }}" \
             --field "release-train-repository=spring-io/release-train"
           echo "release-train-join.yml dispatched."
+
+  trigger-ci:
+    needs: [derive, trigger-release-train-join]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push empty commit to trigger CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
+          BRANCH="${{ needs.derive.outputs.commercial_branch }}"
+
+          git clone --single-branch --branch "$BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _trigger_repo
+
+          cd _trigger_repo
+          git config user.name  "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+          git commit --allow-empty -m "Initialize hotfix branch"
+          git push origin "$BRANCH"
+          echo "Empty commit pushed to trigger CI on ${COMMERCIAL_REPO}@${BRANCH}."
