@@ -1,0 +1,34 @@
+name: 'Update Commercial Repositories'
+description: 'Replaces Spring OSS repo.spring.io repository references with commercial Broadcom Artifactory repositories in POM and Gradle files'
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Commercial repository to update (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'Branch to update'
+    required: true
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+  commit-message:
+    description: 'Commit message for the repository updates'
+    required: false
+    default: 'Updating repositories to commercial Broadcom repositories'
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'database'
+  color: 'green'

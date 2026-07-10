@@ -1,0 +1,120 @@
+name: 'Copy Dependabot Config'
+description: 'Copies a dependabot.yml or dependabot.yaml from one branch to another within the same repository'
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Repository containing both branches (format: org/repo-name)'
+    required: true
+  source-branch:
+    description: 'Branch to copy the dependabot config from (defaults to the repository default branch)'
+    required: false
+    default: ''
+  target-branch:
+    description: 'Branch to copy the dependabot config to'
+    required: true
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+  commit-message:
+    description: 'Commit message for the dependabot config commit'
+    required: false
+    default: 'adding dependabot yaml'
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Copy dependabot config
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        REPO="${{ inputs.repository }}"
+        SOURCE_BRANCH="${{ inputs.source-branch }}"
+        TARGET_BRANCH="${{ inputs.target-branch }}"
+        COMMIT_MSG="${{ inputs.commit-message }}"
+
+        # Resolve source branch to the repo default if not specified
+        if [[ -z "$SOURCE_BRANCH" ]]; then
+          SOURCE_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq '.defaultBranchRef.name')
+          echo "Source branch not specified, using default branch: ${SOURCE_BRANCH}"
+        fi
+
+        echo "=== Copy Dependabot Config ==="
+        echo "Repository:     $REPO"
+        echo "Source branch:  $SOURCE_BRANCH"
+        echo "Target branch:  $TARGET_BRANCH"
+        echo ""
+
+        git clone \
+          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" _dependabot_repo
+
+        cd _dependabot_repo
+
+        git config user.name "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        # Fetch both branches
+        git fetch origin "$SOURCE_BRANCH" "$TARGET_BRANCH"
+
+        # Check for a dependabot config on the source branch (try both extensions)
+        DEPENDABOT_FILE=""
+        if git show "origin/${SOURCE_BRANCH}:.github/dependabot.yml" > /dev/null 2>&1; then
+          DEPENDABOT_FILE=".github/dependabot.yml"
+        elif git show "origin/${SOURCE_BRANCH}:.github/dependabot.yaml" > /dev/null 2>&1; then
+          DEPENDABOT_FILE=".github/dependabot.yaml"
+        fi
+
+        if [[ -z "$DEPENDABOT_FILE" ]]; then
+          echo "No dependabot.yml or dependabot.yaml found on '${SOURCE_BRANCH}', nothing to copy."
+          exit 0
+        fi
+
+        echo "Found ${DEPENDABOT_FILE} on '${SOURCE_BRANCH}', copying to '${TARGET_BRANCH}'..."
+
+        git checkout "$TARGET_BRANCH"
+
+        # Remove any existing dependabot config on the target branch so the
+        # incoming file replaces it cleanly without conflicts.
+        for EXISTING in ".github/dependabot.yml" ".github/dependabot.yaml"; do
+          if [[ -f "$EXISTING" ]]; then
+            echo "Removing existing ${EXISTING} from '${TARGET_BRANCH}'..."
+            git rm -f "$EXISTING"
+          fi
+        done
+
+        mkdir -p .github
+        git show "origin/${SOURCE_BRANCH}:${DEPENDABOT_FILE}" > "$DEPENDABOT_FILE"
+
+        # Append a copy of every entry that targets the source branch, with
+        # target-branch set to the new branch.  Using the source branch as the
+        # filter (rather than ecosystem type) means entries for special branches
+        # like docs-build, or older branches like 3.1.x, are not copied.
+        export SOURCE_BRANCH
+        export DEPENDABOT_TARGET_BRANCH="$TARGET_BRANCH"
+        yq e '.updates += [.updates[] | select(.["target-branch"] == strenv(SOURCE_BRANCH)) | .["target-branch"] = strenv(DEPENDABOT_TARGET_BRANCH)]' \
+          -i "$DEPENDABOT_FILE"
+
+        git add "$DEPENDABOT_FILE"
+
+        if git diff --cached --quiet; then
+          echo "Dependabot config on '${TARGET_BRANCH}' is already identical to '${SOURCE_BRANCH}', nothing to commit."
+          exit 0
+        fi
+
+        git commit -m "$COMMIT_MSG"
+        git push origin "$TARGET_BRANCH"
+
+        echo "Dependabot config committed to '${TARGET_BRANCH}'."
+
+branding:
+  icon: 'shield'
+  color: 'blue'

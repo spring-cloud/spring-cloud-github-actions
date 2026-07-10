@@ -1,6 +1,62 @@
 name: Create Commercial Branch
 
+# Simplified wrapper over initialize-commercial-branch for the common case:
+# copy an OSS branch to the commercial repo (same org, -commercial suffix),
+# using the same branch name.  Exposes only the inputs that vary per invocation.
+
 on:
   workflow_dispatch:
+    inputs:
+      oss_repo:
+        description: 'Open source repository name in the spring-cloud org (e.g. spring-cloud-build)'
+        required: true
+        type: string
+      oss_branch:
+        description: 'Branch to copy from the OSS repository'
+        required: true
+        type: string
+      set_default_branch:
+        description: 'Set the new branch as the default branch of the commercial repo'
+        required: false
+        type: boolean
+        default: false
+      token:
+        description: 'GitHub token with contents:write on the commercial repo (and administration:write if set_default_branch is true). Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_call:
+    inputs:
+      oss_repo:
+        description: 'Open source repository name in the spring-cloud org (e.g. spring-cloud-build)'
+        required: true
+        type: string
+      oss_branch:
+        description: 'Branch to copy from the OSS repository'
+        required: true
+        type: string
+      set_default_branch:
+        description: 'Set the new branch as the default branch of the commercial repo'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      token:
+        description: 'GitHub token with contents: write on the commercial repo. Falls back to the GH_ACTIONS_REPO_TOKEN organization secret.'
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
+  initialize:
+    uses: ./.github/workflows/initialize-commercial-branch.yml
+    with:
+      oss_repo:           ${{ format('spring-cloud/{0}', inputs.oss_repo) }}
+      oss_branch:         ${{ inputs.oss_branch }}
+      commercial_repo:    ${{ format('spring-cloud/{0}-commercial', inputs.oss_repo) }}
+      commercial_branch:  ${{ inputs.oss_branch }}
+      set_default_branch: ${{ inputs.set_default_branch }}
+    secrets:
+      token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}

@@ -1,0 +1,26 @@
+name: 'Retire Branch from Projects JSON'
+description: >
+  Updates config/projects.json when a branch is retired: removes the branch
+  from the scheduled array and jdkVersions. Fails if the branch is currently
+  set as the default branch, preventing accidental retirement of an active branch.
+  Commercial repos modify the commercial section; OSS repos modify the oss section.
+author: 'Spring Cloud Team'
+
+inputs:
+  repo:
+    description: 'Repository containing the branch being retired (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'Branch being retired'
+    required: true
+  token:
+    description: 'GitHub token with contents:write on the spring-cloud-github-actions repository'
+    required: true
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'file-text'
+  color: 'red'

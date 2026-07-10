@@ -28,9 +28,11 @@ runs:
         if [[ "$REPO_NAME" == *"-commercial" ]]; then
           echo "commercial=true" >> $GITHUB_OUTPUT
           echo "base-repo-name=${REPO_NAME%-commercial}" >> $GITHUB_OUTPUT
+          echo "Repository '$REPO_NAME' is a commercial repository"
         else
           echo "commercial=false" >> $GITHUB_OUTPUT
           echo "base-repo-name=$REPO_NAME" >> $GITHUB_OUTPUT
+          echo "Repository '$REPO_NAME' is not a commercial repository"
         fi
 
 branding:

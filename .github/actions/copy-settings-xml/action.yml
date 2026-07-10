@@ -1,0 +1,99 @@
+name: 'Copy Settings XML'
+description: 'Replaces .settings.xml on a target branch with the version from the source branch'
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Repository containing both branches (format: org/repo-name)'
+    required: true
+  source-branch:
+    description: 'Branch to copy .settings.xml from (defaults to the repository default branch)'
+    required: false
+    default: ''
+  target-branch:
+    description: 'Branch to copy .settings.xml to'
+    required: true
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+  commit-message:
+    description: 'Commit message'
+    required: false
+    default: 'Updating settings.xml'
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Copy settings.xml
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        REPO="${{ inputs.repository }}"
+        SOURCE_BRANCH="${{ inputs.source-branch }}"
+        TARGET_BRANCH="${{ inputs.target-branch }}"
+        SETTINGS_FILE=".settings.xml"
+
+        # Resolve source branch to the repo default if not specified
+        if [[ -z "$SOURCE_BRANCH" ]]; then
+          SOURCE_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq '.defaultBranchRef.name')
+          echo "Source branch not specified, using default branch: ${SOURCE_BRANCH}"
+        fi
+
+        echo "=== Copy Settings XML ==="
+        echo "Repository:     $REPO"
+        echo "Source branch:  $SOURCE_BRANCH"
+        echo "Target branch:  $TARGET_BRANCH"
+        echo ""
+
+        # Check that .settings.xml exists on the source branch before doing anything
+        git clone \
+          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" _settings_xml_repo
+
+        cd _settings_xml_repo
+
+        git config user.name "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        git fetch origin "$SOURCE_BRANCH" "$TARGET_BRANCH"
+
+        if ! git show "origin/${SOURCE_BRANCH}:${SETTINGS_FILE}" > /dev/null 2>&1; then
+          echo "No ${SETTINGS_FILE} found on '${SOURCE_BRANCH}', nothing to copy."
+          exit 0
+        fi
+
+        git checkout "$TARGET_BRANCH"
+
+        # Remove any existing .settings.xml on the target branch
+        if [[ -f "$SETTINGS_FILE" ]]; then
+          echo "Removing existing ${SETTINGS_FILE} from '${TARGET_BRANCH}'..."
+          git rm -f "$SETTINGS_FILE"
+        fi
+
+        # Copy from source branch
+        echo "Copying ${SETTINGS_FILE} from '${SOURCE_BRANCH}' to '${TARGET_BRANCH}'..."
+        git show "origin/${SOURCE_BRANCH}:${SETTINGS_FILE}" > "$SETTINGS_FILE"
+
+        git add "$SETTINGS_FILE"
+
+        if git diff --cached --quiet; then
+          echo "${SETTINGS_FILE} on '${TARGET_BRANCH}' is already identical to '${SOURCE_BRANCH}', nothing to commit."
+          exit 0
+        fi
+
+        git commit -m "${{ inputs.commit-message }}"
+        git push origin "$TARGET_BRANCH"
+
+        echo "${SETTINGS_FILE} committed to '${TARGET_BRANCH}'."
+
+branding:
+  icon: 'file-text'
+  color: 'green'

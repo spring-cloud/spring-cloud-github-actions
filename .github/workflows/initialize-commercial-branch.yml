@@ -1,0 +1,172 @@
+name: Initialize Commercial Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      oss_repo:
+        description: 'Open source repository to copy from (format: org/repo-name)'
+        required: true
+        type: string
+      oss_branch:
+        description: 'Branch in the OSS repository to copy. Mutually exclusive with oss_tag.'
+        required: false
+        type: string
+        default: ''
+      oss_tag:
+        description: 'Tag in the OSS repository to copy. Mutually exclusive with oss_branch. When used, commercial_branch is required.'
+        required: false
+        type: string
+        default: ''
+      commercial_repo:
+        description: 'Commercial repository to create the branch in (format: org/repo-name)'
+        required: true
+        type: string
+      commercial_branch:
+        description: 'Target branch name in the commercial repo. Defaults to oss_branch. Required when oss_tag is used.'
+        required: false
+        type: string
+        default: ''
+      set_default_branch:
+        description: 'Set the new branch as the default branch of the commercial repo'
+        required: false
+        type: boolean
+        default: false
+      token:
+        description: 'GitHub token with contents: write on the commercial repo. Falls back to the GH_ACTIONS_REPO_TOKEN organization secret if not provided.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_call:
+    inputs:
+      oss_repo:
+        description: 'Open source repository to copy from (format: org/repo-name)'
+        required: true
+        type: string
+      oss_branch:
+        description: 'Branch in the OSS repository to copy. Mutually exclusive with oss_tag.'
+        required: false
+        type: string
+        default: ''
+      oss_tag:
+        description: 'Tag in the OSS repository to copy. Mutually exclusive with oss_branch. When used, commercial_branch is required.'
+        required: false
+        type: string
+        default: ''
+      commercial_repo:
+        description: 'Commercial repository to create the branch in (format: org/repo-name)'
+        required: true
+        type: string
+      commercial_branch:
+        description: 'Target branch name in the commercial repo. Defaults to oss_branch. Required when oss_tag is used.'
+        required: false
+        type: string
+        default: ''
+      set_default_branch:
+        description: 'Set the new branch as the default branch of the commercial repo'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      token:
+        description: 'GitHub token with contents: write (and administration: write if set_default_branch is true) on the commercial repo. Falls back to the GH_ACTIONS_REPO_TOKEN organization secret if not provided.'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  initialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout spring-cloud-github-actions
+        uses: actions/checkout@v4
+
+      - name: Create commercial branch from OSS
+        id: create-branch
+        uses: ./.github/actions/create-commercial-branch
+        with:
+          oss-repo: ${{ inputs.oss_repo }}
+          oss-branch: ${{ inputs.oss_branch }}
+          oss-tag: ${{ inputs.oss_tag }}
+          commercial-repo: ${{ inputs.commercial_repo }}
+          commercial-branch: ${{ inputs.commercial_branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Copy settings.xml to new branch
+        uses: ./.github/actions/copy-settings-xml
+        with:
+          repository: ${{ inputs.commercial_repo }}
+          source-branch: ${{ steps.create-branch.outputs.previous-default-branch }}
+          target-branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update workflows for commercial repo
+        uses: ./.github/actions/update-oss-workflows-to-commercial
+        with:
+          repository: ${{ inputs.commercial_repo }}
+          branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update license headers
+        uses: ./.github/actions/update-license-headers
+        with:
+          repository: ${{ inputs.commercial_repo }}
+          branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update repositories to commercial Broadcom repositories
+        uses: ./.github/actions/update-commercial-repositories
+        with:
+          repository: ${{ inputs.commercial_repo }}
+          branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update distribution management
+        uses: ./.github/actions/update-distribution-management
+        with:
+          repository: ${{ inputs.commercial_repo }}
+          branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update Antora playbook on docs-build branch
+        uses: ./.github/actions/update-antora-playbook
+        with:
+          repository: ${{ inputs.commercial_repo }}
+          branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # Only runs when we are promoting this branch to the new default.
+      # Source is the *old* default branch (captured before any changes), so the
+      # copy happens before we switch the default pointer.
+      - name: Copy dependabot config to new branch
+        if: ${{ inputs.set_default_branch }}
+        uses: ./.github/actions/copy-dependabot-config
+        with:
+          repository: ${{ inputs.commercial_repo }}
+          source-branch: ${{ steps.create-branch.outputs.previous-default-branch }}
+          target-branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # Runs last so the dependabot config is already committed before the
+      # default branch pointer moves.
+      - name: Set new default branch
+        if: ${{ inputs.set_default_branch }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          BRANCH="${{ steps.create-branch.outputs.commercial-branch }}"
+          REPO="${{ inputs.commercial_repo }}"
+          echo "Setting '${BRANCH}' as the default branch of ${REPO}..."
+          gh repo edit "$REPO" --default-branch "$BRANCH"
+          echo "Default branch updated to '${BRANCH}'."
+
+      - name: Update projects.json
+        uses: ./.github/actions/update-projects-json
+        with:
+          oss-repo:            ${{ inputs.oss_repo }}
+          oss-branch:          ${{ inputs.oss_branch }}
+          commercial-branch:   ${{ steps.create-branch.outputs.commercial-branch }}
+          set-default-branch:  ${{ inputs.set_default_branch }}
+          token:               ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}

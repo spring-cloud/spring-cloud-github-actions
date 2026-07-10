@@ -1,0 +1,41 @@
+name: 'Update Antora Playbook'
+description: >
+  Adds a new commercial branch to the Antora playbook on the docs-build branch,
+  adjusting content.sources.branches and content.sources.tags so the branch
+  and its release tags are included in documentation builds.
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Commercial repository whose docs-build branch contains the Antora playbook (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'New commercial branch to register in the playbook'
+    required: true
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+  docs-build-branch:
+    description: 'Branch that holds the Antora playbook'
+    required: false
+    default: 'docs-build'
+  commit-message:
+    description: 'Commit message for the playbook update'
+    required: false
+    default: 'Updating antora playbook for new branch'
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'book-open'
+  color: 'blue'

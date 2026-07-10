@@ -1,6 +1,205 @@
 name: Create Hotfix Branch
 
+# Creates a commercial hotfix branch from an OSS tag.
+#
+# The commercial repo is always the OSS repo with -commercial appended.
+# The commercial branch name is derived from the tag by stripping the leading
+# 'v' and appending '.x'  (e.g. v5.0.1 -> 5.0.1.x).
+#
+# After the branch is initialised, the project version is stamped to
+# <current-version>.1-SNAPSHOT (e.g. 5.0.1 -> 5.0.1.1-SNAPSHOT).
+# Optionally, dependency versions can be updated from a release train or an
+# explicit project-version override can be supplied.
+
 on:
   workflow_dispatch:
+    inputs:
+      oss_repo:
+        description: 'Open source repository name in the spring-cloud org (e.g. spring-cloud-stream)'
+        required: true
+        type: string
+      oss_tag:
+        description: 'OSS tag to create the hotfix branch from (e.g. v5.0.1)'
+        required: true
+        type: string
+      project_version:
+        description: 'Override the auto-computed hotfix project version (default: <current-version>.1-SNAPSHOT)'
+        required: false
+        type: string
+        default: ''
+      release_train_version:
+        description: 'Release train version (e.g. 2025.0.1) — when supplied, dependency versions are updated from the Spring Cloud release train'
+        required: false
+        type: string
+        default: ''
+      versions:
+        description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0","spring-cloud-commons":"4.1.1"}). Mutually exclusive with release_train_version.'
+        required: false
+        type: string
+        default: ''
+      project_version_substitutions:
+        description: 'JSON map of non-standard version property prefixes to project names (e.g. {"verifier":"spring-cloud-contract"}). Only used with release_train_version.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_call:
+    inputs:
+      oss_repo:
+        description: 'Open source repository name in the spring-cloud org (e.g. spring-cloud-stream)'
+        required: true
+        type: string
+      oss_tag:
+        description: 'OSS tag to create the hotfix branch from (e.g. v5.0.1)'
+        required: true
+        type: string
+      project_version:
+        description: 'Override the auto-computed hotfix project version (default: <current-version>.1-SNAPSHOT)'
+        required: false
+        type: string
+        default: ''
+      release_train_version:
+        description: 'Release train version (e.g. 2025.0.1) — when supplied, dependency versions are updated from the Spring Cloud release train'
+        required: false
+        type: string
+        default: ''
+      versions:
+        description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0"}). Mutually exclusive with release_train_version.'
+        required: false
+        type: string
+        default: ''
+      project_version_substitutions:
+        description: 'JSON map of non-standard version property prefixes to project names. Only used with release_train_version.'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      token:
+        description: 'GitHub token with contents: write on the commercial repo. Falls back to the GH_ACTIONS_REPO_TOKEN organization secret.'
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
+  # Strip the leading 'v' from the tag and append '.x' to form the commercial
+  # branch name.  GitHub Actions expressions have no replace/substring function
+  # so this needs a shell step.
+  derive:
+    runs-on: ubuntu-latest
+    outputs:
+      commercial_repo:   ${{ steps.derive.outputs.commercial_repo }}
+      commercial_branch: ${{ steps.derive.outputs.commercial_branch }}
+    steps:
+      - name: Derive commercial repo and branch from tag
+        id: derive
+        shell: bash
+        run: |
+          OSS_REPO="spring-cloud/${{ inputs.oss_repo }}"
+          OSS_TAG="${{ inputs.oss_tag }}"
+          COMMERCIAL_REPO="${OSS_REPO}-commercial"
+          # strip leading 'v' and append '.x'  (v5.0.1 -> 5.0.1.x)
+          COMMERCIAL_BRANCH="${OSS_TAG#v}.x"
+          echo "commercial_repo=${COMMERCIAL_REPO}"     >> "$GITHUB_OUTPUT"
+          echo "commercial_branch=${COMMERCIAL_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "OSS repo:          $OSS_REPO"
+          echo "OSS tag:           $OSS_TAG"
+          echo "Commercial repo:   $COMMERCIAL_REPO"
+          echo "Commercial branch: $COMMERCIAL_BRANCH"
+
+  initialize:
+    needs: derive
+    uses: ./.github/workflows/initialize-commercial-branch.yml
+    with:
+      oss_repo:           ${{ format('spring-cloud/{0}', inputs.oss_repo) }}
+      oss_tag:            ${{ inputs.oss_tag }}
+      commercial_repo:    ${{ needs.derive.outputs.commercial_repo }}
+      commercial_branch:  ${{ needs.derive.outputs.commercial_branch }}
+      set_default_branch: false
+    secrets: inherit
+
+  update-versions:
+    needs: [derive, initialize]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone commercial branch and compute hotfix version
+        id: setup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
+          COMMERCIAL_BRANCH="${{ needs.derive.outputs.commercial_branch }}"
+
+          git clone --single-branch --branch "$COMMERCIAL_BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _version_repo
+
+          git -C _version_repo config user.name  "Spring Builds"
+          git -C _version_repo config user.email "svc.spring-builds@broadcom.com"
+
+          # Read the project version from the root pom.xml using Python for
+          # reliable XML parsing (handles optional namespace prefixes).
+          CURRENT_VERSION=$(python3 - <<'PYEOF'
+          import xml.etree.ElementTree as ET, sys
+          tree = ET.parse('_version_repo/pom.xml')
+          root = tree.getroot()
+          ns = (root.tag.split('}')[0] + '}') if '}' in root.tag else ''
+          v = root.find(f'{ns}version')
+          print(v.text.strip() if v is not None else '', end='')
+          PYEOF
+          )
+
+          if [[ -z "$CURRENT_VERSION" ]]; then
+            echo "ERROR: could not read project version from _version_repo/pom.xml"
+            exit 1
+          fi
+
+          AUTO_VERSION="${CURRENT_VERSION}.1-SNAPSHOT"
+          EFFECTIVE_VERSION="${{ inputs.project_version }}"
+          if [[ -z "$EFFECTIVE_VERSION" ]]; then
+            EFFECTIVE_VERSION="$AUTO_VERSION"
+          fi
+
+          echo "current_version=${CURRENT_VERSION}"     >> "$GITHUB_OUTPUT"
+          echo "effective_version=${EFFECTIVE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Current version:   $CURRENT_VERSION"
+          echo "Auto version:      $AUTO_VERSION"
+          echo "Effective version: $EFFECTIVE_VERSION"
+
+      # When release-train-version is provided, update dependency version
+      # properties from the release train first.  This also stamps the project
+      # version to the release train value; the next step overwrites that with
+      # the correct hotfix snapshot.
+      - name: Update dependency versions from release train
+        if: ${{ inputs.release_train_version != '' }}
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+        with:
+          release-train-version:        ${{ inputs.release_train_version }}
+          project-version-substitutions: ${{ inputs.project_version_substitutions }}
+          token:                        ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          directory:                    _version_repo
+
+      # Always stamp the project version to the hotfix snapshot (or the
+      # explicit override).  When versions is supplied it also updates
+      # dependency properties in the same pass; otherwise versions:'{}' ensures
+      # only the project version is touched.
+      - name: Stamp hotfix project version
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+        with:
+          project-version: ${{ steps.setup.outputs.effective_version }}
+          project-version-substitutions: ${{ inputs.project_version_substitutions }}
+          versions:        ${{ inputs.versions || '{}' }}
+          directory:       _version_repo
+
+      - name: Commit and push version updates
+        shell: bash
+        run: |
+          cd _version_repo
+          git add .
+          if git diff --cached --quiet; then
+            echo "No version changes to commit."
+            exit 0
+          fi
+          git commit -m "Updating project version to ${{ steps.setup.outputs.effective_version }}"
+          git push origin "${{ needs.derive.outputs.commercial_branch }}"
+          echo "Version updates committed."

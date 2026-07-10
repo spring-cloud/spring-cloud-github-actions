@@ -1,6 +1,209 @@
 name: Retire Branch
 
+# Removes Dependabot entries for a branch that is no longer maintained and
+# locks the branch so no further commits can be pushed to it.
+#
+# Requires a token with:
+#   contents:write       — to update dependabot.yml on the default branch
+#   administration:write — to set branch protection / lock the branch
+
 on:
   workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Repository name in the spring-cloud org (e.g. spring-cloud-build-commercial)'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to retire'
+        required: true
+        type: string
+      token:
+        description: 'GitHub token with contents:write and administration:write on the target repository. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_call:
+    inputs:
+      repo:
+        description: 'Repository name in the spring-cloud org (e.g. spring-cloud-build-commercial)'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to retire'
+        required: true
+        type: string
+    secrets:
+      token:
+        description: 'GitHub token with contents:write and administration:write on the target repository. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout spring-cloud-github-actions
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 1. Update projects.json — preflight check before any branch changes.
+      #    Fails if the branch is currently set as the default.
+      # -----------------------------------------------------------------------
+      - name: Update projects.json
+        uses: ./.github/actions/retire-branch-projects-json
+        with:
+          repo:   ${{ format('spring-cloud/{0}', inputs.repo) }}
+          branch: ${{ inputs.branch }}
+          token:  ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 2. Remove Dependabot entries targeting the retiring branch.
+      #    Dependabot configuration lives on the default branch of the repo.
+      # -----------------------------------------------------------------------
+      - name: Remove Dependabot entries for retiring branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          REPO="spring-cloud/${{ inputs.repo }}"
+          BRANCH="${{ inputs.branch }}"
+
+          echo "=== Remove Dependabot Entries ==="
+          echo "Repository: $REPO"
+          echo "Branch:     $BRANCH"
+          echo ""
+
+          # Clone the default branch (where dependabot.yml lives).
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" _retire_repo
+
+          cd _retire_repo
+          git config user.name  "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+
+          DEPBOT_FILE=""
+          if [[ -f ".github/dependabot.yml" ]]; then
+            DEPBOT_FILE=".github/dependabot.yml"
+          elif [[ -f ".github/dependabot.yaml" ]]; then
+            DEPBOT_FILE=".github/dependabot.yaml"
+          fi
+
+          if [[ -z "$DEPBOT_FILE" ]]; then
+            echo "No dependabot.yml found on the default branch — nothing to remove."
+          else
+            echo "Found $DEPBOT_FILE"
+
+            BEFORE=$(yq e '.updates | length' "$DEPBOT_FILE")
+            yq e "del(.updates[] | select(.target-branch == \"${BRANCH}\"))" -i "$DEPBOT_FILE"
+            AFTER=$(yq e '.updates | length' "$DEPBOT_FILE")
+            REMOVED=$((BEFORE - AFTER))
+
+            if [[ $REMOVED -eq 0 ]]; then
+              echo "No Dependabot entries found for branch '${BRANCH}' — nothing to remove."
+            else
+              echo "Removed ${REMOVED} Dependabot entr$([ $REMOVED -eq 1 ] && echo 'y' || echo 'ies') targeting '${BRANCH}'."
+
+              if [[ $AFTER -eq 0 ]]; then
+                echo "No entries remain — removing ${DEPBOT_FILE}."
+                rm "$DEPBOT_FILE"
+              fi
+
+              git add .
+              git commit -m "Remove Dependabot entries for retired branch ${BRANCH}"
+              git push origin HEAD
+              echo "Dependabot configuration updated."
+            fi
+          fi
+
+      # -----------------------------------------------------------------------
+      # 3. Lock the branch via a repository ruleset so no further commits can
+      #    be pushed to it.  All retired branches are accumulated under a single
+      #    ruleset named "Retired Branch Lock" so they are easy to audit.
+      # -----------------------------------------------------------------------
+      - name: Lock branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          REPO="spring-cloud/${{ inputs.repo }}"
+          BRANCH="${{ inputs.branch }}"
+          RULESET_NAME="Locked Branches"
+          REF="refs/heads/${BRANCH}"
+
+          echo "=== Lock Branch ==="
+          echo "Repository: $REPO"
+          echo "Branch:     $BRANCH"
+          echo ""
+
+          # Look for an existing repo-level ruleset with this name.
+          # Filtering by source_type=="Repository" avoids matching org-level rulesets
+          # (which also appear in this list but cannot be patched via the repo API).
+          RULESET_ID=$(gh api "repos/${REPO}/rulesets" \
+            | jq -r --arg name "$RULESET_NAME" \
+                '.[] | select(.name == $name and .source_type == "Repository") | .id')
+
+          if [[ -z "$RULESET_ID" ]]; then
+            echo "No existing '${RULESET_NAME}' ruleset found — creating one."
+
+            jq -n \
+              --arg name  "$RULESET_NAME" \
+              --arg ref   "$REF" \
+              '{
+                name:        $name,
+                target:      "branch",
+                enforcement: "active",
+                conditions: {
+                  ref_name: { include: [$ref], exclude: [] }
+                },
+                rules: [
+                  { type: "creation" },
+                  { type: "update",   parameters: { update_allows_fetch_and_merge: false } },
+                  { type: "deletion" },
+                  { type: "non_fast_forward" }
+                ]
+              }' \
+            | gh api "repos/${REPO}/rulesets" \
+                --method POST \
+                --header "Content-Type: application/json" \
+                --input -
+
+            echo "Created '${RULESET_NAME}' ruleset targeting branch '${BRANCH}'."
+          else
+            echo "Found existing '${RULESET_NAME}' ruleset (ID: ${RULESET_ID})."
+
+            # Fetch the full ruleset so we can PUT it back with the updated include list.
+            # (The update endpoint is PUT and requires the complete ruleset body.)
+            echo "Fetching ruleset details..."
+            RULESET=$(gh api "repos/${REPO}/rulesets/${RULESET_ID}")
+            echo "Ruleset fetched successfully."
+
+            CURRENT=$(echo "$RULESET" | jq '.conditions.ref_name.include')
+            ALREADY=$(echo "$CURRENT" | jq -r --arg ref "$REF" 'map(select(. == $ref)) | length')
+
+            if [[ "$ALREADY" -gt 0 ]]; then
+              echo "Branch '${BRANCH}' is already in the ruleset — nothing to do."
+            else
+              NEW_INCLUDES=$(echo "$CURRENT" | jq --arg ref "$REF" '. + [$ref]')
+
+              # Rebuild the full body required by PUT, updating only the include list.
+              echo "$RULESET" \
+                | jq --argjson includes "$NEW_INCLUDES" \
+                    '.conditions.ref_name.include = $includes
+                     | {name, target, enforcement, conditions, rules,
+                        bypass_actors: (.bypass_actors // [])}' \
+              | gh api "repos/${REPO}/rulesets/${RULESET_ID}" \
+                  --method PUT \
+                  --header "Content-Type: application/json" \
+                  --input -
+
+              echo "Added branch '${BRANCH}' to the '${RULESET_NAME}' ruleset."
+            fi
+          fi
+
+          echo ""
+          echo "Branch '${BRANCH}' is now locked — no further commits can be pushed to it."

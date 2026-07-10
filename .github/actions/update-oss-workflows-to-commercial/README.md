@@ -38,13 +38,45 @@ If a workflow file is not found the action logs a warning and continues without 
 ## Usage
 
 ```yaml
-- name: Checkout spring-cloud-github-actions
-  uses: actions/checkout@v4
-
 - name: Update workflows for commercial repo
-  uses: ./.github/actions/update-oss-workflows-to-commercial
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-oss-workflows-to-commercial@main
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
-    branch: release/3.3.1
-    token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+    branch: 3.3.x
+    token: ${{ secrets.COMMERCIAL_REPO_TOKEN }}
+```
+
+## Composing with initialize-commercial-branch
+
+This action is designed to be used alongside the other commercial branch actions:
+
+```yaml
+jobs:
+  initialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create commercial branch from OSS
+        id: create-branch
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-commercial-branch@main
+        with:
+          oss-repo: spring-cloud/spring-cloud-foo
+          oss-branch: 3.3.x
+          commercial-repo: spring-cloud/spring-cloud-foo-commercial
+          token: ${{ secrets.COMMERCIAL_REPO_TOKEN }}
+
+      - name: Update workflows for commercial repo
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-oss-workflows-to-commercial@main
+        with:
+          repository: spring-cloud/spring-cloud-foo-commercial
+          branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ secrets.COMMERCIAL_REPO_TOKEN }}
+
+      - name: Copy dependabot config to new branch
+        if: ${{ inputs.set_default_branch }}
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-dependabot-config@main
+        with:
+          repository: spring-cloud/spring-cloud-foo-commercial
+          source-branch: ${{ steps.create-branch.outputs.previous-default-branch }}
+          target-branch: ${{ steps.create-branch.outputs.commercial-branch }}
+          token: ${{ secrets.COMMERCIAL_REPO_TOKEN }}
 ```

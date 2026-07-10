@@ -1,0 +1,15 @@
+site:
+  title: Spring Cloud Config
+  url: https://docs.spring.io/spring-cloud-config
+
+content:
+  sources:
+    - url: https://github.com/spring-cloud/spring-cloud-config-commercial
+      branches: [main, '4.2.x', '4.3.x']
+      tags: ['v{4..9}.+({0..3}).+({0..9})?(-{RC,M}*)', '!v4.0.+([0-9]).+([0-9])?(-{RC,M}*)']
+    - url: https://github.com/spring-cloud/spring-cloud-config
+      branches: [main]
+
+ui:
+  bundle:
+    url: https://example.com/ui-bundle.zip
