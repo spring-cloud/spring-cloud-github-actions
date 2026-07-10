@@ -118,6 +118,22 @@ describe('resolveJdkVersions', () => {
     expect(resolveJdkVersions(entryNoOssParent, '4.3.3.x', '')).toEqual(['17', '21']);
   });
 
+  test('falls back to oss default branch JDKs for hotfix when parent not in projects.json', () => {
+    // Simulates spring-cloud-build where oss.jdkVersions only has 'main' (no '5.0.x')
+    const entryMainOnly = {
+      oss: {
+        branches: { default: ['main'], scheduled: ['main'] },
+        jdkVersions: { main: ['17', '21', '25'] },
+      },
+      commercial: {
+        jdkVersions: { '4.3.x': ['17', '21', '25'] },
+      },
+    };
+    // release/5.0.2.1 → parent is 5.0.x → not in oss or commercial jdkVersions
+    // → should fall back to oss.jdkVersions['main']
+    expect(resolveJdkVersions(entryMainOnly, 'release/5.0.2.1', '')).toEqual(['17', '21', '25']);
+  });
+
   test('falls back to oss default when no matching branch', () => {
     expect(resolveJdkVersions(entry, '6.0.x', 'unknown')).toEqual(['17', '21']);
   });

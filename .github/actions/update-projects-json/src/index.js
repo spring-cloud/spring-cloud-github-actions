@@ -42,6 +42,7 @@ function parentBranch(branch) {
 function resolveJdkVersions(entry, commercialBranch, ossBranch) {
   const ossJdk = ((entry.oss || {}).jdkVersions) || {};
   const commercialJdk = ((entry.commercial || {}).jdkVersions) || {};
+  const ossDefaultBranches = ((entry.oss || {}).branches || {}).default || [];
 
   if (isHotfixBranch(commercialBranch)) {
     const p = parentBranch(commercialBranch);
@@ -52,6 +53,14 @@ function resolveJdkVersions(entry, commercialBranch, ossBranch) {
     if (commercialJdk[p]) {
       core.info(`  Hotfix branch — parent '${p}' is already commercial; using commercial.jdkVersions['${p}']: ${JSON.stringify(commercialJdk[p])}`);
       return [...commercialJdk[p]];
+    }
+    // Parent branch not in projects.json — tag was cut from the OSS default branch (e.g. main).
+    // Fall back to the JDKs configured for the OSS default branch.
+    for (const defaultBranch of ossDefaultBranches) {
+      if (ossJdk[defaultBranch]) {
+        core.info(`  Hotfix branch — parent '${p}' not found; falling back to oss.jdkVersions['${defaultBranch}'] (OSS default): ${JSON.stringify(ossJdk[defaultBranch])}`);
+        return [...ossJdk[defaultBranch]];
+      }
     }
   }
 
