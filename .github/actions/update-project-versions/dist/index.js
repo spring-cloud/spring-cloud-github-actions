@@ -28308,11 +28308,15 @@ async function run() {
       // Capture the current root version before any files are modified so that
       // non-root poms with a matching explicit <version> can be detected reliably.
       let currentRootVersion = null;
+      let rootArtifactId = null;
       if (fs.existsSync(rootPom)) {
         const rootParser = new XMLParser({ ignoreAttributes: false });
         const rootParsed = rootParser.parse(fs.readFileSync(rootPom, 'utf-8'));
         currentRootVersion = rootParsed?.project?.version
           ? String(rootParsed.project.version)
+          : null;
+        rootArtifactId = rootParsed?.project?.artifactId
+          ? String(rootParsed.project.artifactId)
           : null;
       }
 
@@ -28323,7 +28327,8 @@ async function run() {
           isRoot,
           projectVersion,
           versions,
-          currentRootVersion
+          currentRootVersion,
+          rootArtifactId
         );
         if (changed) {
           core.info(`Updated ${path.relative(directory, file)}: ${updatedProperties.join(', ')}`);
@@ -28509,7 +28514,7 @@ function detectProjectName(directory) {
  * @param {string|null} currentRootVersion - the root pom's version before any edits;
  *   non-root poms whose own <version> equals this value will also have it updated
  */
-function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVersion = null) {
+function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVersion = null, rootArtifactId = null) {
   const content = fs.readFileSync(filePath, 'utf-8');
   let updated = content;
   const updatedProperties = [];
@@ -28557,8 +28562,8 @@ function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVe
         ? versions[parentArtifactId]
         : versions[parentName] !== undefined
         ? versions[parentName]
-        : isChildOfRoot(project, versions, projectVersion)
-        ? projectVersion
+      : isChildOfRoot(project, versions, rootArtifactId)
+      ? projectVersion
         : null;
 
     if (resolvedParentVersion && project.parent?.version) {
@@ -28807,16 +28812,39 @@ function artifactIdToProjectName(artifactId) {
 }
 
 /**
- * Returns true when a child pom's parent appears to be the root project of this repo
- * (i.e. not an external Spring Cloud parent) by checking that the parent artifactId
- * does NOT appear in the external versions map under either its exact name or its
- * stripped name (after removing -dependencies / -parent suffixes).
+ * Returns true when a child pom's parent is the root project of this repo
+ * (i.e. not an external parent like spring-boot-starter-parent or
+ * spring-cloud-dependencies-parent).
+ *
+ * When rootArtifactId is supplied (read from the root pom at runtime) the parent
+ * must both (a) be absent from the external versions map AND (b) match the root
+ * artifactId or its stripped form. This prevents external parents that happen to
+ * be absent from the versions map (e.g. spring-boot-starter-parent when versions
+ * is empty) from being incorrectly stamped with the project version.
+ *
+ * When rootArtifactId is null (e.g. in unit tests that don't supply it) the
+ * function falls back to the looser heuristic of "not in versions map".
  */
-function isChildOfRoot(project, versions, projectVersion) {
+function isChildOfRoot(project, versions, rootArtifactId = null) {
   const parentArtifactId = project?.parent?.artifactId;
   if (!parentArtifactId) return false;
   const parentName = artifactIdToProjectName(parentArtifactId);
-  return versions[parentArtifactId] === undefined && versions[parentName] === undefined;
+
+  if (versions[parentArtifactId] !== undefined || versions[parentName] !== undefined) {
+    return false;
+  }
+
+  if (rootArtifactId !== null) {
+    const rootName = artifactIdToProjectName(rootArtifactId);
+    return (
+      parentArtifactId === rootArtifactId ||
+      parentArtifactId === rootName ||
+      parentName === rootArtifactId ||
+      parentName === rootName
+    );
+  }
+
+  return true;
 }
 
 function escapeRegex(str) {
@@ -28838,6 +28866,7 @@ module.exports = {
   findFiles,
   camelToKebab,
   artifactIdToProjectName,
+  isChildOfRoot,
 };
 
 if (require.main === require.cache[eval('__filename')]) {

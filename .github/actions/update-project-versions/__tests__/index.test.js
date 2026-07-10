@@ -15,6 +15,7 @@ const {
   updateBuildGradleContent,
   camelToKebab,
   artifactIdToProjectName,
+  isChildOfRoot,
   updatePomFile,
   findFiles,
 } = require('../src/index');
@@ -396,6 +397,97 @@ describe('updatePomFile', () => {
     expect(parentBlock).toContain('<version>3.2.3</version>');
   });
 
+  it('does not stamp projectVersion onto an external parent (spring-boot-dependencies) when versions map is empty', () => {
+    // Regression test for spring-cloud/spring-cloud-build-commercial commit da5fef0:
+    // spring-cloud-build-dependencies/pom.xml has spring-boot-dependencies (an external
+    // Spring Boot BOM) as its parent, not the project root. With an empty versions map
+    // (hotfix branch stamp step uses versions:'{}'), the old isChildOfRoot heuristic
+    // incorrectly treated any parent absent from the map as "child of root" and stamped
+    // it with projectVersion (5.0.2.1-SNAPSHOT instead of keeping 4.0.7).
+    const pomContent = `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.springframework.cloud</groupId>
+  <artifactId>spring-cloud-build-dependencies</artifactId>
+  <version>5.0.2</version>
+  <name>spring-cloud-build-dependencies</name>
+  <packaging>pom</packaging>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-dependencies</artifactId>
+    <version>4.0.7</version>
+    <relativePath/>
+  </parent>
+</project>`;
+    const dest = path.join(tmpDir, 'pom.xml');
+    fs.writeFileSync(dest, pomContent);
+
+    // Simulate the hotfix stamp: empty versions map, rootArtifactId = "spring-cloud-build"
+    updatePomFile(dest, false, '5.0.2.1-SNAPSHOT', {}, '5.0.2', 'spring-cloud-build');
+
+    const written = fs.readFileSync(dest, 'utf-8');
+    const parentBlock = written.match(/<parent>[\s\S]*?<\/parent>/)[0];
+    // Parent version must remain 4.0.7 — NOT be stamped with 5.0.2.1-SNAPSHOT
+    expect(parentBlock).toContain('<version>4.0.7</version>');
+    // Own <version> should be updated (matches currentRootVersion)
+    expect(written).toMatch(/<artifactId>spring-cloud-build-dependencies<\/artifactId>\s*<version>5\.0\.2\.1-SNAPSHOT<\/version>/);
+  });
+
+  it('still stamps projectVersion onto a genuine child-of-root parent when rootArtifactId is provided', () => {
+    const src = fixturePath('maven-multi', 'spring-cloud-config-server', 'pom.xml');
+    const dest = path.join(tmpDir, 'pom.xml');
+    fs.copyFileSync(src, dest);
+
+    // root artifactId matches the parent of this child module
+    updatePomFile(dest, false, '4.1.1', {}, null, 'spring-cloud-config');
+
+    const written = fs.readFileSync(dest, 'utf-8');
+    const parentBlock = written.match(/<parent>[\s\S]*?<\/parent>/)[0];
+    expect(parentBlock).toContain('<version>4.1.1</version>');
+  });
+
+});
+
+// ── isChildOfRoot ─────────────────────────────────────────────────────────────
+
+describe('isChildOfRoot', () => {
+  const makeProject = (parentArtifactId) => ({ parent: { artifactId: parentArtifactId } });
+
+  it('returns true when parent matches rootArtifactId exactly', () => {
+    expect(isChildOfRoot(makeProject('spring-cloud-config'), {}, 'spring-cloud-config')).toBe(true);
+  });
+
+  it('returns true when parent matches the stripped rootArtifactId', () => {
+    // root is spring-cloud-foo-parent → stripped → spring-cloud-foo; parent is spring-cloud-foo-parent
+    expect(isChildOfRoot(makeProject('spring-cloud-foo-parent'), {}, 'spring-cloud-foo-parent')).toBe(true);
+  });
+
+  it('returns false for spring-boot-dependencies when rootArtifactId is known', () => {
+    // The exact case from spring-cloud-build-commercial: spring-cloud-build-dependencies
+    // has spring-boot-dependencies as parent; root is spring-cloud-build.
+    expect(isChildOfRoot(makeProject('spring-boot-dependencies'), {}, 'spring-cloud-build')).toBe(false);
+  });
+
+  it('returns false for spring-boot-starter-parent when rootArtifactId is known', () => {
+    expect(isChildOfRoot(makeProject('spring-boot-starter-parent'), {}, 'spring-cloud-build')).toBe(false);
+  });
+
+  it('returns false for spring-cloud-dependencies-parent when rootArtifactId is known and versions map is empty', () => {
+    expect(isChildOfRoot(makeProject('spring-cloud-dependencies-parent'), {}, 'spring-cloud-config')).toBe(false);
+  });
+
+  it('returns false when parent is in the versions map regardless of rootArtifactId', () => {
+    expect(isChildOfRoot(makeProject('spring-cloud-config'), { 'spring-cloud-config': '4.2.0' }, 'spring-cloud-config')).toBe(false);
+  });
+
+  it('falls back to the old heuristic (not-in-versions-map) when rootArtifactId is null', () => {
+    // Without rootArtifactId, any parent absent from the map is treated as root
+    expect(isChildOfRoot(makeProject('spring-boot-starter-parent'), {}, null)).toBe(true);
+  });
+
+  it('returns false with no parent element', () => {
+    expect(isChildOfRoot({}, {}, 'spring-cloud-config')).toBe(false);
+  });
 });
 
 // ── findFiles ──────────────────────────────────────────────────────────────────
