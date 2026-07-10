@@ -1,15 +1,16 @@
 name: Create Hotfix Branch
 
-# Creates a commercial hotfix branch from an OSS tag.
+# Creates a commercial hotfix release branch directly from an OSS tag.
 #
 # The commercial repo is always the OSS repo with -commercial appended.
-# The commercial branch name is derived from the tag by stripping the leading
-# 'v' and appending '.x'  (e.g. v5.0.1 -> 5.0.1.x).
+# The release branch is named release/<version>.1, derived from the tag by
+# stripping the leading 'v' and appending '.1'  (e.g. v5.0.1 -> release/5.0.1.1).
 #
 # After the branch is initialised, the project version is stamped to
 # <current-version>.1-SNAPSHOT (e.g. 5.0.1 -> 5.0.1.1-SNAPSHOT).
 # Optionally, dependency versions can be updated from a release train or an
 # explicit project-version override can be supplied.
+# Finally, release-train-join.yml is triggered in the commercial repo.
 
 on:
   workflow_dispatch:
@@ -20,6 +21,10 @@ on:
         type: string
       oss_tag:
         description: 'OSS tag to create the hotfix branch from (e.g. v5.0.1)'
+        required: true
+        type: string
+      spring_release_train:
+        description: 'Spring release train this hotfix is part of (e.g. 2026.1)'
         required: true
         type: string
       project_version:
@@ -53,6 +58,10 @@ on:
         description: 'OSS tag to create the hotfix branch from (e.g. v5.0.1)'
         required: true
         type: string
+      spring_release_train:
+        description: 'Spring release train this hotfix is part of (e.g. 2026.1)'
+        required: true
+        type: string
       project_version:
         description: 'Override the auto-computed hotfix project version (default: <current-version>.1-SNAPSHOT)'
         required: false
@@ -82,14 +91,16 @@ permissions:
   contents: read
 
 jobs:
-  # Strip the leading 'v' from the tag and append '.x' to form the commercial
-  # branch name.  GitHub Actions expressions have no replace/substring function
-  # so this needs a shell step.
+  # Strip the leading 'v' from the tag, append '.1', and prefix with 'release/'
+  # to form the commercial release branch name (e.g. v5.0.1 -> release/5.0.1.1).
+  # GitHub Actions expressions have no replace/substring function so this needs
+  # a shell step.
   derive:
     runs-on: ubuntu-latest
     outputs:
-      commercial_repo:   ${{ steps.derive.outputs.commercial_repo }}
-      commercial_branch: ${{ steps.derive.outputs.commercial_branch }}
+      commercial_repo:    ${{ steps.derive.outputs.commercial_repo }}
+      commercial_branch:  ${{ steps.derive.outputs.commercial_branch }}
+      commercial_project: ${{ steps.derive.outputs.commercial_project }}
     steps:
       - name: Derive commercial repo and branch from tag
         id: derive
@@ -98,14 +109,17 @@ jobs:
           OSS_REPO="spring-cloud/${{ inputs.oss_repo }}"
           OSS_TAG="${{ inputs.oss_tag }}"
           COMMERCIAL_REPO="${OSS_REPO}-commercial"
-          # strip leading 'v' and append '.x'  (v5.0.1 -> 5.0.1.x)
-          COMMERCIAL_BRANCH="${OSS_TAG#v}.x"
-          echo "commercial_repo=${COMMERCIAL_REPO}"     >> "$GITHUB_OUTPUT"
-          echo "commercial_branch=${COMMERCIAL_BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "OSS repo:          $OSS_REPO"
-          echo "OSS tag:           $OSS_TAG"
-          echo "Commercial repo:   $COMMERCIAL_REPO"
-          echo "Commercial branch: $COMMERCIAL_BRANCH"
+          COMMERCIAL_PROJECT="${COMMERCIAL_REPO#spring-cloud/}"
+          # strip leading 'v', append '.1', prefix with 'release/'  (v5.0.1 -> release/5.0.1.1)
+          COMMERCIAL_BRANCH="release/${OSS_TAG#v}.1"
+          echo "commercial_repo=${COMMERCIAL_REPO}"       >> "$GITHUB_OUTPUT"
+          echo "commercial_branch=${COMMERCIAL_BRANCH}"   >> "$GITHUB_OUTPUT"
+          echo "commercial_project=${COMMERCIAL_PROJECT}" >> "$GITHUB_OUTPUT"
+          echo "OSS repo:           $OSS_REPO"
+          echo "OSS tag:            $OSS_TAG"
+          echo "Commercial repo:    $COMMERCIAL_REPO"
+          echo "Commercial project: $COMMERCIAL_PROJECT"
+          echo "Commercial branch:  $COMMERCIAL_BRANCH"
 
   initialize:
     needs: derive
@@ -203,3 +217,23 @@ jobs:
           git commit -m "Updating project version to ${{ steps.setup.outputs.effective_version }}"
           git push origin "${{ needs.derive.outputs.commercial_branch }}"
           echo "Version updates committed."
+
+  trigger-release-train-join:
+    needs: [derive, update-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger release-train-join workflow in commercial repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        shell: bash
+        run: |
+          commercial_project="${{ needs.derive.outputs.commercial_project }}"
+          release_branch="${{ needs.derive.outputs.commercial_branch }}"
+          echo "Triggering release-train-join.yml in spring-cloud/${commercial_project} on ${release_branch}..."
+          gh workflow run release-train-join.yml \
+            --repo "spring-cloud/${commercial_project}" \
+            --ref "${release_branch}" \
+            --field "deployment-destination=Spring Enterprise" \
+            --field "release-train=${{ inputs.spring_release_train }}" \
+            --field "release-train-repository=spring-io/release-train"
+          echo "release-train-join.yml dispatched."
