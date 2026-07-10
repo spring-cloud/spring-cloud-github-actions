@@ -129,6 +129,9 @@ jobs:
     needs: [derive, initialize]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Clone commercial branch and compute hotfix version
         id: setup
         shell: bash
@@ -179,7 +182,7 @@ jobs:
       # the correct hotfix snapshot.
       - name: Update dependency versions from release train
         if: ${{ inputs.release_train_version != '' }}
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+        uses: ./.github/actions/update-project-versions
         with:
           release-train-version: ${{ inputs.release_train_version }}
           token:                 ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
@@ -191,7 +194,7 @@ jobs:
       # dependency properties in the same pass; otherwise versions:'{}' ensures
       # only the project version is touched.
       - name: Stamp hotfix project version
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+        uses: ./.github/actions/update-project-versions
         with:
           project-version: ${{ steps.setup.outputs.effective_version }}
           versions:        ${{ inputs.versions || '{}' }}
