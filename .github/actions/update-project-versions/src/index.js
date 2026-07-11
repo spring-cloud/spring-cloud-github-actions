@@ -160,7 +160,9 @@ async function run() {
  * Exported for unit testing.
  */
 function releaseTrainVersionToFileName(version) {
-  return version.replace(/\./g, '_') + '.properties';
+  return version
+    .replace(/-snapshot$/i, '-SNAPSHOT')
+    .replace(/\./g, '_') + '.properties';
 }
 
 /**

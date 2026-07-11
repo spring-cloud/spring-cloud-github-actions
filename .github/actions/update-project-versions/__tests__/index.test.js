@@ -378,6 +378,14 @@ describe('releaseTrainVersionToFileName', () => {
   it('converts a version with double-digit segments', () => {
     expect(releaseTrainVersionToFileName('2024.0.10')).toBe('2024_0_10.properties');
   });
+
+  it('normalizes lowercase -snapshot suffix to uppercase', () => {
+    expect(releaseTrainVersionToFileName('2025.1.2.1-snapshot')).toBe('2025_1_2_1-SNAPSHOT.properties');
+  });
+
+  it('preserves uppercase -SNAPSHOT suffix unchanged', () => {
+    expect(releaseTrainVersionToFileName('2025.1.2.1-SNAPSHOT')).toBe('2025_1_2_1-SNAPSHOT.properties');
+  });
 });
 
 // ── getReleaserConfigUrl ──────────────────────────────────────────────────────
