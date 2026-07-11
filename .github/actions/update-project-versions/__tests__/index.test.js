@@ -514,7 +514,7 @@ describe('findFiles', () => {
 // ── releaseTrainVersionToFileName ─────────────────────────────────────────────
 
 describe('releaseTrainVersionToFileName', () => {
-  it('converts a three-part version', () => {
+  it('converts a three-part GA version', () => {
     expect(releaseTrainVersionToFileName('2025.1.0')).toBe('2025_1_0.properties');
   });
 
@@ -526,12 +526,20 @@ describe('releaseTrainVersionToFileName', () => {
     expect(releaseTrainVersionToFileName('2024.0.10')).toBe('2024_0_10.properties');
   });
 
-  it('normalizes lowercase -snapshot suffix to uppercase', () => {
-    expect(releaseTrainVersionToFileName('2025.1.2.1-snapshot')).toBe('2025_1_2_1-SNAPSHOT.properties');
+  it('converts a four-part hotfix GA version', () => {
+    expect(releaseTrainVersionToFileName('2025.1.2.1')).toBe('2025_1_2_1.properties');
   });
 
-  it('preserves uppercase -SNAPSHOT suffix unchanged', () => {
-    expect(releaseTrainVersionToFileName('2025.1.2.1-SNAPSHOT')).toBe('2025_1_2_1-SNAPSHOT.properties');
+  it('normalizes uppercase -SNAPSHOT suffix to lowercase', () => {
+    expect(releaseTrainVersionToFileName('2025.1.2.1-SNAPSHOT')).toBe('2025_1_2_1-snapshot.properties');
+  });
+
+  it('preserves lowercase -snapshot suffix unchanged', () => {
+    expect(releaseTrainVersionToFileName('2025.1.2.1-snapshot')).toBe('2025_1_2_1-snapshot.properties');
+  });
+
+  it('normalizes uppercase -RC1 suffix to lowercase', () => {
+    expect(releaseTrainVersionToFileName('2025.1.2.1-RC1')).toBe('2025_1_2_1-rc1.properties');
   });
 });
 

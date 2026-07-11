@@ -28390,8 +28390,9 @@ async function run() {
  * Exported for unit testing.
  */
 function releaseTrainVersionToFileName(version) {
+  // Pre-release qualifiers (-SNAPSHOT, -RC1, -M1, etc.) are lowercase in file names.
   return version
-    .replace(/-snapshot$/i, '-SNAPSHOT')
+    .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
     .replace(/\./g, '_') + '.properties';
 }
 
