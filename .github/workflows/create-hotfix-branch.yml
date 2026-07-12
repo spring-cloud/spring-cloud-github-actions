@@ -42,6 +42,11 @@ on:
         required: false
         type: string
         default: ''
+      sha:
+        description: 'Commit SHA of this repo to copy release-train action files from. Defaults to the commit that triggered this workflow.'
+        required: false
+        type: string
+        default: ''
 
   workflow_call:
     inputs:
@@ -69,6 +74,11 @@ on:
         default: ''
       versions:
         description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0"}). Mutually exclusive with release_train_version.'
+        required: false
+        type: string
+        default: ''
+      sha:
+        description: 'Commit SHA of this repo to copy release-train action files from. Defaults to the commit that triggered this workflow.'
         required: false
         type: string
         default: ''
@@ -301,6 +311,8 @@ jobs:
       - name: Checkout
         if: steps.check.outputs.needs-generation == 'true'
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
 
       - name: Run workflow generator for hotfix branch
         if: steps.check.outputs.needs-generation == 'true'

@@ -17,8 +17,9 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 | [pr.yml](.github/workflows/pr.yml) | Reusable build workflow called during pull requests. Accepts a custom build command and Artifactory/Dockerhub secrets. | — |
 | [initialize-commercial-branch.yml](.github/workflows/initialize-commercial-branch.yml) | Full-control workflow that creates a new commercial branch from an OSS branch and runs all commercial setup steps (settings, CI/PR workflows, licenses, repositories, distribution management, Antora playbook, projects.json). | [Example](examples/initialize-commercial-branch.yml) |
 | [create-commercial-branch.yml](.github/workflows/create-commercial-branch.yml) | Simplified wrapper over `initialize-commercial-branch` for the common case: copies an OSS branch to `<repo>-commercial` using the same branch name. | — |
-| [create-hotfix-branch.yml](.github/workflows/create-hotfix-branch.yml) | Creates a commercial hotfix branch from an OSS tag, applies all commercial setup steps, and stamps the project version to a hotfix snapshot. | [README](.github/workflows/README-create-hotfix-branch.md) |
+| [create-hotfix-branch.yml](.github/workflows/create-hotfix-branch.yml) | Creates a commercial hotfix `release/[version]` branch directly from an OSS tag, applies all commercial setup steps, stamps the project version, ensures release-train workflows are present, triggers `release-train-join`, and starts CI. | [README](.github/workflows/README-create-hotfix-branch.md) |
 | [retire-branch.yml](.github/workflows/retire-branch.yml) | Retires a branch: removes it from `projects.json`, removes its Dependabot entries, and locks the branch via the GitHub API. | [README](.github/workflows/README-retire-branch.md) |
+| [run-github-actions-workflow-generator.yml](.github/workflows/run-github-actions-workflow-generator.yml) | Runs the workflow generator across all tracked projects and branches, copying release-train action files and regenerating workflow files. | [README](.github/workflows/run-github-actions-workflow-generator.README.md) |
 
 ## Actions
 
@@ -26,6 +27,8 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 |--------|-------------|---------------|
 | [determine-matrix](.github/actions/determine-matrix/) | Reads [config/projects.json](config/projects.json) and produces a build matrix (branches × JDK versions) for the current repo and event. Supports OSS/commercial, scheduled vs single-branch, and comma-separated branch overrides. | [README](.github/actions/determine-matrix/README.md) |
 | [create-commercial-branch](.github/actions/create-commercial-branch/) | Copies the content of an OSS branch into a new orphan branch in a commercial repository, with no OSS git history. Optionally sets the new branch as the repo default. | [README](.github/actions/create-commercial-branch/README.md) |
+| [generate-workflows-for-branch](.github/actions/generate-workflows-for-branch/) | Copies release-train action files and runs the workflow generator for a single repository branch. Used by both the generator workflow and `create-hotfix-branch`. | [README](.github/actions/generate-workflows-for-branch/README.md) |
+| [create-milestone](.github/actions/create-milestone/) | Creates a milestone in a GitHub repository for a given version if one does not already exist. | [README](.github/actions/create-milestone/README.md) |
 | [copy-dependabot-config](.github/actions/copy-dependabot-config/) | Copies `dependabot.yml` / `dependabot.yaml` from one branch to another within the same repository as a separate commit. | [README](.github/actions/copy-dependabot-config/README.md) |
 | [copy-settings-xml](.github/actions/copy-settings-xml/) | Replaces `.settings.xml` on a target branch with the version from the source (or default) branch. | [README](.github/actions/copy-settings-xml/README.md) |
 | [update-oss-workflows-to-commercial](.github/actions/update-oss-workflows-to-commercial/) | Updates `ci` and `pr` workflow files on a commercial branch: restricts branches, adds `runs_on`, and injects Artifactory secrets. | [README](.github/actions/update-oss-workflows-to-commercial/README.md) |
@@ -41,6 +44,7 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 ## Configuration
 
 - **[config/projects.json](config/projects.json)** — Defines, per project, which branches to build (e.g. for scheduled runs) and which JDK versions to use per branch. Includes separate `oss` and `commercial` sections and a `defaults` fallback. The [determine-matrix](.github/actions/determine-matrix/README.md) action reads this file to build the matrix used by the [deploy](.github/workflows/README-deploy.md) workflow.
+- **[config/release-train-actions/](config/release-train-actions/README.md)** — Project-specific and branch-specific overrides for the `release-train-build` and `release-train-test` actions deployed to commercial repositories by the workflow generator. Uses a three-level lookup (branch-specific → project-level → global default).
 
 ## Quick start
 

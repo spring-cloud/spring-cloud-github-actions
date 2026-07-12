@@ -1,14 +1,15 @@
 # Run GitHub Actions Workflow Generator
 
-Runs the [github-actions-workflow-generator](https://github.com/spring-io/github-actions-workflow-generator) across all Spring Cloud OSS and commercial repositories and branches, keeping generated workflow files and release-train wrapper actions up to date.
+Runs the [github-actions-workflow-generator](https://github.com/spring-io/github-actions-workflow-generator) across all Spring Cloud OSS and commercial repositories and branches, keeping generated workflow files and release-train action files up to date.
 
 ## What It Does
 
-For every repository and branch tracked in [`config/projects.json`](../config/projects.json) on the `main` branch:
+For every repository and branch tracked in [`config/projects.json`](../config/projects.json):
 
-1. Creates or updates `.github/actions/release-train-build/action.yml` and `.github/actions/release-train-test/action.yml` in the target repo, pinning them to the latest SHA of those actions in this repo.
-2. Runs the workflow generator JAR, which regenerates `.github/workflows/release-train-*.yml` files (build, test, join, leave, ready) in the target repo.
-3. Commits and pushes any changes with the message `Update generated GitHub Actions workflow files`.
+1. Copies `.github/actions/release-train-build/action.yml` and `.github/actions/release-train-test/action.yml` into the target repo from this repo (see [Release Train Actions](#release-train-actions)).
+2. Copies `release-train-settings.xml` to the root of the target repo.
+3. Runs the workflow generator JAR, which regenerates `.github/workflows/release-train-*.yml` files (build, test, join, leave, ready) in the target repo.
+4. Commits and pushes any changes with the message `Update generated GitHub Actions workflow files [skip actions]`.
 
 The primary Java version passed to the generator is determined per-branch from `projects.json`:
 - `8` if JDK 8 is listed in the branch's `jdkVersions`
@@ -23,8 +24,7 @@ The workflow is triggered manually via **Actions → Run GitHub Actions Workflow
 | Input | Required | Default | Description |
 |---|---|---|---|
 | `generator-version` | No | Latest release | Version of `github-actions-workflow-generator` to use (e.g. `0.0.5`). |
-| `release-train-build-sha` | No | Auto-detected | SHA to pin `.github/actions/release-train-build/action.yml` to. Defaults to the SHA of the latest commit that modified that action in this repo. |
-| `release-train-test-sha` | No | Auto-detected | SHA to pin `.github/actions/release-train-test/action.yml` to. Defaults to the SHA of the latest commit that modified that action in this repo. |
+| `sha` | No | Triggering commit | Commit SHA of this repo to copy release-train action files from. Useful for rolling out a specific version of the build/test logic. |
 | `spring-release` | No | _(empty)_ | Spring release train version (e.g. `2026.1`). When set, also processes `release/[version]` branches found in the `spring-io/release-train` README for that version. See [Spring Release Branches](#spring-release-branches). |
 | `projects` | No | _(empty — all projects)_ | Comma-separated list of Spring Cloud project names to limit the run to (e.g. `spring-cloud-build,spring-cloud-config`). When empty, every project in `projects.json` is processed. |
 | `token` | No | `GH_ACTIONS_REPO_TOKEN` | GitHub token with write access to all target repos. Falls back to the `GH_ACTIONS_REPO_TOKEN` organisation secret. |
@@ -51,13 +51,12 @@ projects: spring-cloud-config,spring-cloud-gateway
 generator-version: 0.0.5
 ```
 
-### Pin wrapper action SHAs manually
+### Copy action files from a specific commit
 
-Useful if you want to roll out a specific version of the build/test logic without waiting for the auto-detect:
+Useful when you want to roll out a specific version of the build/test action logic:
 
 ```
-release-train-build-sha: 348109524f9790dc1e20d48043fb1ef4765373b8
-release-train-test-sha:  3844cdcd9639d7dfdfaa5bb8affb730c54ddfee2
+sha: 348109524f9790dc1e20d48043fb1ef4765373b8
 ```
 
 ### Include active release-train branches
@@ -72,29 +71,37 @@ When `spring-release` is set, the workflow fetches `README.adoc` from the `sprin
 
 The primary JDK for a release branch is determined by deriving the parent branch from the version number (e.g. `release/3.1.15` → parent `3.1.x`) and looking up that branch's `jdkVersions` in `projects.json`.
 
-## Wrapper Actions
+## Release Train Actions
 
-Each target repo is expected to have (or will have created):
+Each target repo receives a copy of the release-train action files directly from this repo. The source file for each action is chosen using a three-level lookup (first match wins):
 
-**`.github/actions/release-train-build/action.yml`**
-```yaml
-name: Build Release
-runs:
-  using: composite
-  steps:
-    - uses: spring-cloud/spring-cloud-github-actions/.github/actions/release-train-build@<sha>
+1. **Branch-specific override**: `config/release-train-actions/<project>/<branch>/<action>/action.yml`
+2. **Project-level override**: `config/release-train-actions/<project>/<action>/action.yml`
+3. **Global default**: `.github/actions/<action>/action.yml`
+
+Where `<project>` is the OSS project name (e.g. `spring-cloud-kubernetes`, without the `-commercial` suffix) and `<branch>` is the exact branch name (e.g. `release/5.0.2.1` — branch names containing `/` become nested directories naturally).
+
+### Adding a project-level override
+
+Create the override file in this repo and re-run the generator:
+
+```
+config/release-train-actions/
+  spring-cloud-kubernetes/
+    release-train-build/
+      action.yml    ← custom build logic (e.g. adds MAVEN_OPTS)
 ```
 
-**`.github/actions/release-train-test/action.yml`**
-```yaml
-name: Test Release
-runs:
-  using: composite
-  steps:
-    - uses: spring-cloud/spring-cloud-github-actions/.github/actions/release-train-test@<sha>
-```
+### Adding a branch-specific override
 
-If these files already exist, only the SHA is updated; any other content in the file is preserved.
+```
+config/release-train-actions/
+  spring-cloud-foo/
+    release/
+      5.0.2.1/
+        release-train-build/
+          action.yml    ← only used for this specific branch
+```
 
 ## Adding a New Project
 

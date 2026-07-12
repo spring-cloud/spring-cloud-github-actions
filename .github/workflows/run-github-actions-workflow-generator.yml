@@ -9,7 +9,7 @@ on:
         type: string
         default: ''
       sha:
-        description: 'SHA to pin both release-train wrapper actions to. Defaults to the latest commit in this repo.'
+        description: 'Commit SHA of this repo to copy release-train action files from. Defaults to the commit that triggered this workflow.'
         required: false
         type: string
         default: ''
@@ -40,7 +40,6 @@ jobs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
       generator-version: ${{ steps.find-generator.outputs.version }}
       generator-url: ${{ steps.find-generator.outputs.url }}
-      sha: ${{ steps.find-sha.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,22 +62,6 @@ jobs:
           echo "url=${url}" >> "$GITHUB_OUTPUT"
           echo "Generator version : ${version}"
           echo "Download URL      : ${url}"
-
-      - name: Find action SHA
-        id: find-sha
-        env:
-          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-        run: |
-          if [[ -n "${{ inputs.sha }}" ]]; then
-            sha="${{ inputs.sha }}"
-          else
-            sha=$(gh api "repos/spring-cloud/spring-cloud-github-actions/commits" \
-              -X GET \
-              -f per_page=1 \
-              --jq '.[0].sha')
-          fi
-          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
-          echo "SHA : ${sha}"
 
       - name: Build matrix
         id: build-matrix
@@ -209,7 +192,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref:   ${{ needs.setup.outputs.sha }}
+          ref:   ${{ inputs.sha || github.sha }}
           token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Generate workflows
@@ -220,7 +203,6 @@ jobs:
           branch:            ${{ matrix.branch }}
           primary-jdk:       ${{ matrix.primary_jdk }}
           generator-version: ${{ needs.setup.outputs.generator-version }}
-          sha:               ${{ needs.setup.outputs.sha }}
           token:             ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Record result
