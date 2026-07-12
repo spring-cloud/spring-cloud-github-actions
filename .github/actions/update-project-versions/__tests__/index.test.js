@@ -551,6 +551,15 @@ describe('isChildOfRoot', () => {
     expect(isChildOfRoot(makeProject('spring-boot-dependencies'), {}, null, internal)).toBe(false);
   });
 
+  it('returns false when stripped parent name matches an internal module but the parent itself is external', () => {
+    // Regression: spring-cloud-release-commercial has a module spring-cloud-dependencies
+    // (artifactId = spring-cloud-dependencies) and an external parent spring-cloud-dependencies-parent.
+    // Stripping -parent from spring-cloud-dependencies-parent gives spring-cloud-dependencies,
+    // which IS in the set — but we must not match on stripped names.
+    const internal = new Set(['spring-cloud-starter-build', 'spring-cloud-dependencies']);
+    expect(isChildOfRoot(makeProject('spring-cloud-dependencies-parent'), {}, null, internal)).toBe(false);
+  });
+
   it('internalArtifactIds takes precedence over rootArtifactId', () => {
     // rootArtifactId alone would return false for adapter-parent, but internalArtifactIds knows it's internal
     const internal = new Set(['spring-cloud-function-parent', 'spring-cloud-function-adapter-parent']);

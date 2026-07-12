@@ -635,7 +635,12 @@ function isChildOfRoot(project, versions, rootArtifactId = null, internalArtifac
   }
 
   if (internalArtifactIds !== null) {
-    return internalArtifactIds.has(parentArtifactId) || internalArtifactIds.has(parentName);
+    // Exact match only — do NOT check the stripped parentName.
+    // Stripping '-parent'/'-dependencies' from an external parent's artifactId could
+    // accidentally match an internal module that shares the stripped name
+    // (e.g. spring-cloud-dependencies-parent strips to spring-cloud-dependencies,
+    // which is a real module in spring-cloud-release-commercial).
+    return internalArtifactIds.has(parentArtifactId);
   }
 
   if (rootArtifactId !== null) {
