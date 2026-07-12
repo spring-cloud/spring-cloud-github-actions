@@ -28320,6 +28320,19 @@ async function run() {
           : null;
       }
 
+      // Pre-scan all pom files to collect every artifactId that belongs to this
+      // project. This lets isChildOfRoot recognise intermediate aggregate parent poms
+      // (e.g. spring-cloud-function-adapter-parent inside spring-cloud-function-adapters/)
+      // so that their child poms have their parent version updated correctly.
+      const internalArtifactIds = new Set();
+      if (rootArtifactId) internalArtifactIds.add(rootArtifactId);
+      const pomParser = new XMLParser({ ignoreAttributes: false });
+      for (const file of pomFiles) {
+        const parsed = pomParser.parse(fs.readFileSync(file, 'utf-8'));
+        const aid = parsed?.project?.artifactId;
+        if (aid) internalArtifactIds.add(String(aid));
+      }
+
       for (const file of pomFiles) {
         const isRoot = path.resolve(file) === path.resolve(rootPom);
         const { changed, updatedProperties } = updatePomFile(
@@ -28328,7 +28341,8 @@ async function run() {
           projectVersion,
           versions,
           currentRootVersion,
-          rootArtifactId
+          rootArtifactId,
+          internalArtifactIds
         );
         if (changed) {
           core.info(`Updated ${path.relative(directory, file)}: ${updatedProperties.join(', ')}`);
@@ -28516,8 +28530,10 @@ function detectProjectName(directory) {
  * @param {Record<string, string>} versions
  * @param {string|null} currentRootVersion - the root pom's version before any edits;
  *   non-root poms whose own <version> equals this value will also have it updated
+ * @param {Set<string>|null} internalArtifactIds - set of all artifactIds found in
+ *   this project's pom files; used to recognise intermediate parent poms as internal
  */
-function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVersion = null, rootArtifactId = null) {
+function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVersion = null, rootArtifactId = null, internalArtifactIds = null) {
   const content = fs.readFileSync(filePath, 'utf-8');
   let updated = content;
   const updatedProperties = [];
@@ -28565,7 +28581,7 @@ function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVe
         ? versions[parentArtifactId]
         : versions[parentName] !== undefined
         ? versions[parentName]
-      : isChildOfRoot(project, versions, rootArtifactId)
+      : isChildOfRoot(project, versions, rootArtifactId, internalArtifactIds)
       ? projectVersion
         : null;
 
@@ -28815,26 +28831,36 @@ function artifactIdToProjectName(artifactId) {
 }
 
 /**
- * Returns true when a child pom's parent is the root project of this repo
+ * Returns true when a child pom's parent is part of this project
  * (i.e. not an external parent like spring-boot-starter-parent or
  * spring-cloud-dependencies-parent).
  *
- * When rootArtifactId is supplied (read from the root pom at runtime) the parent
- * must both (a) be absent from the external versions map AND (b) match the root
- * artifactId or its stripped form. This prevents external parents that happen to
- * be absent from the versions map (e.g. spring-boot-starter-parent when versions
- * is empty) from being incorrectly stamped with the project version.
+ * When internalArtifactIds is supplied (a Set of every artifactId found in the
+ * project's pom files) the parent must be a member of that set. This correctly
+ * handles multi-level module hierarchies where an intermediate aggregate pom
+ * (e.g. spring-cloud-function-adapter-parent) is itself a parent of deeper
+ * sub-modules — those sub-modules would be missed when only comparing against
+ * the root artifactId.
  *
- * When rootArtifactId is null (e.g. in unit tests that don't supply it) the
- * function falls back to the looser heuristic of "not in versions map".
+ * When only rootArtifactId is supplied the parent must match the root artifactId
+ * or its stripped form. This prevents external parents absent from the versions
+ * map (e.g. spring-boot-starter-parent when versions is empty) from being
+ * incorrectly stamped with the project version.
+ *
+ * When neither is supplied the function falls back to the looser heuristic of
+ * "not in versions map" (used only in unit tests that don't supply either).
  */
-function isChildOfRoot(project, versions, rootArtifactId = null) {
+function isChildOfRoot(project, versions, rootArtifactId = null, internalArtifactIds = null) {
   const parentArtifactId = project?.parent?.artifactId;
   if (!parentArtifactId) return false;
   const parentName = artifactIdToProjectName(parentArtifactId);
 
   if (versions[parentArtifactId] !== undefined || versions[parentName] !== undefined) {
     return false;
+  }
+
+  if (internalArtifactIds !== null) {
+    return internalArtifactIds.has(parentArtifactId) || internalArtifactIds.has(parentName);
   }
 
   if (rootArtifactId !== null) {

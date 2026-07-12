@@ -446,6 +446,56 @@ describe('updatePomFile', () => {
     expect(parentBlock).toContain('<version>4.1.1</version>');
   });
 
+  it('updates parent version in a deep sub-module whose parent is an intermediate aggregate pom', () => {
+    // Regression test for spring-cloud-function-adapters:
+    // spring-cloud-function-adapter-aws has parent spring-cloud-function-adapter-parent,
+    // which is itself a child of the root spring-cloud-function-parent.
+    // Without internalArtifactIds the intermediate parent name does not match the root,
+    // so the deep sub-module's parent version was left unchanged.
+    const srcDir = fixturePath('maven-multi-level');
+    const destRoot = path.join(tmpDir, 'root');
+    const destAdapters = path.join(destRoot, 'spring-cloud-function-adapters');
+    const destAws = path.join(destAdapters, 'spring-cloud-function-adapter-aws');
+    fs.mkdirSync(destRoot, { recursive: true });
+    fs.mkdirSync(destAdapters, { recursive: true });
+    fs.mkdirSync(destAws, { recursive: true });
+
+    fs.copyFileSync(path.join(srcDir, 'pom.xml'), path.join(destRoot, 'pom.xml'));
+    fs.copyFileSync(path.join(srcDir, 'spring-cloud-function-adapters', 'pom.xml'), path.join(destAdapters, 'pom.xml'));
+    fs.copyFileSync(path.join(srcDir, 'spring-cloud-function-adapters', 'spring-cloud-function-adapter-aws', 'pom.xml'), path.join(destAws, 'pom.xml'));
+
+    const rootPom     = path.join(destRoot, 'pom.xml');
+    const adaptersPom = path.join(destAdapters, 'pom.xml');
+    const awsPom      = path.join(destAws, 'pom.xml');
+
+    const internalIds = new Set(['spring-cloud-function-parent', 'spring-cloud-function-adapter-parent', 'spring-cloud-function-adapter-aws']);
+    const versionMap  = { 'spring-cloud-build': '4.2.1', 'spring-boot': '3.4.2' };
+    const currentRoot = '5.0.3';
+    const newVersion  = '5.0.3.1-SNAPSHOT';
+
+    updatePomFile(rootPom,     true,  newVersion, versionMap, currentRoot, 'spring-cloud-function-parent', internalIds);
+    updatePomFile(adaptersPom, false, newVersion, versionMap, currentRoot, 'spring-cloud-function-parent', internalIds);
+    updatePomFile(awsPom,      false, newVersion, versionMap, currentRoot, 'spring-cloud-function-parent', internalIds);
+
+    // Root: own version updated
+    const rootContent = fs.readFileSync(rootPom, 'utf-8');
+    expect(rootContent).toMatch(/<artifactId>spring-cloud-function-parent<\/artifactId>\s*<version>5\.0\.3\.1-SNAPSHOT<\/version>/);
+    // Root: spring-cloud-build parent version updated from versions map
+    expect(rootContent).toMatch(/<parent>[\s\S]*?<version>4\.2\.1<\/version>[\s\S]*?<\/parent>/);
+
+    // Intermediate aggregate: no own <version>, but parent version updated
+    const adaptersContent = fs.readFileSync(adaptersPom, 'utf-8');
+    const adaptersParent = adaptersContent.match(/<parent>[\s\S]*?<\/parent>/)[0];
+    expect(adaptersParent).toContain('<version>5.0.3.1-SNAPSHOT</version>');
+
+    // Deep sub-module: parent (spring-cloud-function-adapter-parent) version updated
+    const awsContent = fs.readFileSync(awsPom, 'utf-8');
+    const awsParent = awsContent.match(/<parent>[\s\S]*?<\/parent>/)[0];
+    expect(awsParent).toContain('<version>5.0.3.1-SNAPSHOT</version>');
+    // spring-boot.version property also updated
+    expect(awsContent).toContain('<spring-boot.version>3.4.2</spring-boot.version>');
+  });
+
 });
 
 // ── isChildOfRoot ─────────────────────────────────────────────────────────────
@@ -487,6 +537,24 @@ describe('isChildOfRoot', () => {
 
   it('returns false with no parent element', () => {
     expect(isChildOfRoot({}, {}, 'spring-cloud-config')).toBe(false);
+  });
+
+  it('returns true when parent is an intermediate project pom in internalArtifactIds', () => {
+    // Mirrors spring-cloud-function-adapters case: the leaf adapter has
+    // spring-cloud-function-adapter-parent (not the root) as its parent.
+    const internal = new Set(['spring-cloud-function-parent', 'spring-cloud-function-adapter-parent']);
+    expect(isChildOfRoot(makeProject('spring-cloud-function-adapter-parent'), {}, null, internal)).toBe(true);
+  });
+
+  it('returns false when parent is external even though versions map is empty (internalArtifactIds provided)', () => {
+    const internal = new Set(['spring-cloud-function-parent', 'spring-cloud-function-adapter-parent']);
+    expect(isChildOfRoot(makeProject('spring-boot-dependencies'), {}, null, internal)).toBe(false);
+  });
+
+  it('internalArtifactIds takes precedence over rootArtifactId', () => {
+    // rootArtifactId alone would return false for adapter-parent, but internalArtifactIds knows it's internal
+    const internal = new Set(['spring-cloud-function-parent', 'spring-cloud-function-adapter-parent']);
+    expect(isChildOfRoot(makeProject('spring-cloud-function-adapter-parent'), {}, 'spring-cloud-function-parent', internal)).toBe(true);
   });
 });
 
