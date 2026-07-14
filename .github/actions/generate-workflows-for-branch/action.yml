@@ -115,9 +115,14 @@ runs:
           fi
         done
 
+        # Copy deployment-spec.yml into the release-train-build action directory so
+        # Artifactory knows which artifacts to publish after the build.
+        cp "${overrides_root}/deployment-spec.yml" "_gen_repo/.github/actions/release-train-build/deployment-spec.yml"
+        echo "  deployment-spec.yml: copied to .github/actions/release-train-build/"
+
         # Copy release-train-settings.xml to the commercial repo root so
         # ./mvnw --settings release-train-settings.xml resolves correctly.
-        cp "${workspace}/.github/actions/release-train-settings.xml" "_gen_repo/release-train-settings.xml"
+        cp "${overrides_root}/release-train-settings.xml" "_gen_repo/release-train-settings.xml"
         echo "  release-train-settings.xml: copied to repo root"
 
     - name: Run workflow generator
