@@ -125,16 +125,24 @@ runs:
         cp "${overrides_root}/release-train-settings.xml" "_gen_repo/release-train-settings.xml"
         echo "  release-train-settings.xml: copied to repo root"
 
+    - name: Copy workflow-generator config
+      shell: bash
+      run: |
+        overrides_root="${GITHUB_WORKSPACE}/config/release-train-actions"
+        mkdir -p _gen_repo/.github
+        if [[ "${{ inputs.primary-jdk }}" == "8" ]]; then
+          cp "${overrides_root}/workflow-generator-jdk8.yml" "_gen_repo/.github/workflow-generator.yml"
+          echo "Copied workflow-generator-jdk8.yml to .github/workflow-generator.yml"
+        else
+          cp "${overrides_root}/workflow-generator.yml" "_gen_repo/.github/workflow-generator.yml"
+          echo "Copied workflow-generator.yml to .github/workflow-generator.yml"
+        fi
+
     - name: Run workflow generator
       shell: bash
       working-directory: _gen_repo
       run: |
-        java -jar ../_gen_generator.jar \
-          "--workflow.generator.project.java.versions.primary=${{ inputs.primary-jdk }}" \
-          "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
-          "--workflow.generator.workflows.release-train.build.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD" \
-          "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_USERNAME=secrets.COMMERCIAL_ARTIFACTORY_USERNAME" \
-          "--workflow.generator.workflows.release-train.test.env.COMMERCIAL_REPO_PASSWORD=secrets.COMMERCIAL_ARTIFACTORY_PASSWORD"
+        java -jar ../_gen_generator.jar
 
     - name: Commit and push changes
       id: commit
