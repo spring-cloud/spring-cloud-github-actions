@@ -72,6 +72,23 @@ runs:
 
         git checkout "$TARGET_BRANCH"
 
+        # Preserve the license header from the existing .settings.xml before overwriting,
+        # so that e.g. an Apache header on an OSS-derived branch is not replaced by the
+        # Broadcom header present in the commercial default branch.
+        if [[ -f "$SETTINGS_FILE" ]]; then
+          node -e "
+            const fs = require('fs');
+            const content = fs.readFileSync('.settings.xml', 'utf8');
+            const m = content.match(/<!--[\s\S]*?-->/);
+            if (m) fs.writeFileSync('/tmp/_preserved_header.txt', m[0]);
+          " 2>/dev/null || true
+          if [[ -s /tmp/_preserved_header.txt ]]; then
+            echo "Preserved existing license header from '${TARGET_BRANCH}:${SETTINGS_FILE}'."
+          else
+            rm -f /tmp/_preserved_header.txt
+          fi
+        fi
+
         # Remove any existing .settings.xml on the target branch
         if [[ -f "$SETTINGS_FILE" ]]; then
           echo "Removing existing ${SETTINGS_FILE} from '${TARGET_BRANCH}'..."
@@ -81,6 +98,18 @@ runs:
         # Copy from source branch
         echo "Copying ${SETTINGS_FILE} from '${SOURCE_BRANCH}' to '${TARGET_BRANCH}'..."
         git show "origin/${SOURCE_BRANCH}:${SETTINGS_FILE}" > "$SETTINGS_FILE"
+
+        # Restore the preserved license header if we captured one
+        if [[ -f /tmp/_preserved_header.txt ]]; then
+          echo "Restoring preserved license header..."
+          node -e "
+            const fs = require('fs');
+            const content = fs.readFileSync('.settings.xml', 'utf8');
+            const header = fs.readFileSync('/tmp/_preserved_header.txt', 'utf8');
+            const updated = content.replace(/<!--[\s\S]*?-->/, header);
+            fs.writeFileSync('.settings.xml', updated);
+          "
+        fi
 
         git add "$SETTINGS_FILE"
 
