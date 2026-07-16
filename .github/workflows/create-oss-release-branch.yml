@@ -100,8 +100,11 @@ jobs:
   create-branch:
     needs: derive
     runs-on: ubuntu-latest
+    outputs:
+      oss_sha: ${{ steps.clone.outputs.oss_sha }}
     steps:
       - name: Clone OSS branch and push to commercial repo as release branch
+        id: clone
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
@@ -119,7 +122,9 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${commercial_repo}.git"
           git push commercial "HEAD:refs/heads/${commercial_branch}"
 
-          echo "Branch ${commercial_branch} created in ${commercial_repo}."
+          oss_sha=$(git rev-parse HEAD)
+          echo "oss_sha=${oss_sha}" >> "$GITHUB_OUTPUT"
+          echo "Branch ${commercial_branch} created in ${commercial_repo} at ${oss_sha}."
 
   # Apply commercial initialisation steps to the new release branch.
   # Each action commits with [skip actions] so CI is not triggered until the
@@ -304,18 +309,20 @@ jobs:
           fi
           exit $watch_exit_code
 
-  # Push a final empty commit (without [skip actions]) to trigger the CI
-  # pipeline on the newly initialised commercial release branch.
+  # Squash all [skip actions] initialization commits into a single commit and
+  # push it (without [skip actions]) to trigger the CI pipeline on the newly
+  # initialised commercial release branch.
   trigger-ci:
-    needs: [derive, trigger-release-train-join]
+    needs: [derive, create-branch, trigger-release-train-join]
     runs-on: ubuntu-latest
     steps:
-      - name: Push empty commit to trigger CI
+      - name: Squash initialization commits and push to trigger CI
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
           COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
           BRANCH="${{ needs.derive.outputs.commercial_branch }}"
+          BASE_SHA="${{ needs.create-branch.outputs.oss_sha }}"
 
           git clone --single-branch --branch "$BRANCH" \
             "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _trigger_repo
@@ -323,6 +330,16 @@ jobs:
           cd _trigger_repo
           git config user.name  "Spring Builds"
           git config user.email "svc.spring-builds@broadcom.com"
-          git commit --allow-empty -m "Initialize OSS release branch"
-          git push origin "$BRANCH"
-          echo "Empty commit pushed to trigger CI on ${COMMERCIAL_REPO}@${BRANCH}."
+
+          # Soft-reset to the OSS SHA that the branch was created from, staging all
+          # initialization changes, then commit them as a single push to trigger CI.
+          if [[ "$(git rev-parse HEAD)" != "$BASE_SHA" ]]; then
+            git reset --soft "$BASE_SHA"
+            git commit -m "Initialize commercial release branch"
+            git push --force-with-lease origin "$BRANCH"
+            echo "Squashed initialization commits into a single commit on ${COMMERCIAL_REPO}@${BRANCH}."
+          else
+            git commit --allow-empty -m "Initialize commercial release branch"
+            git push origin "$BRANCH"
+            echo "No initialization commits to squash; pushed empty commit to trigger CI on ${COMMERCIAL_REPO}@${BRANCH}."
+          fi
