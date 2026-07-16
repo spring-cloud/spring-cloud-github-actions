@@ -142,6 +142,29 @@ describe('resolveJdkVersions', () => {
     const emptyEntry = {};
     expect(resolveJdkVersions(emptyEntry, '1.0.x', '')).toEqual(['17', '21']);
   });
+
+  test('uses oss-branch JDKs directly for release/ branch created from an OSS branch', () => {
+    const entryWithMain = {
+      oss: {
+        branches: { default: ['main'], scheduled: ['main'] },
+        jdkVersions: { main: ['17', '21'], '4.2.x': ['17'] },
+      },
+      commercial: { jdkVersions: {} },
+    };
+    // release/4.2.7 created from OSS main branch — should use ossJdk['main']
+    expect(resolveJdkVersions(entryWithMain, 'release/4.2.7', 'main')).toEqual(['17', '21']);
+  });
+
+  test('uses commercial branch JDKs for release/ branch created from a commercial source', () => {
+    const entryCommercial = {
+      oss: { jdkVersions: {} },
+      commercial: {
+        jdkVersions: { main: ['17', '21', '25'] },
+      },
+    };
+    // release/5.0.0 created from commercial main — should use commercialJdk['main']
+    expect(resolveJdkVersions(entryCommercial, 'release/5.0.0', 'main', true)).toEqual(['17', '21', '25']);
+  });
 });
 
 // ── updateProjects ──────────────────────────────────────────────────────────
@@ -228,6 +251,43 @@ describe('updateProjects', () => {
     const data = makeData();
     const changed = updateProjects(data, 'spring-cloud/spring-cloud-config', '', 'release/4.2.7', false);
     expect(changed).toBe(true);
+    expect(data['spring-cloud-config'].oss.branches.scheduled).toContain('4.2.x');
+  });
+
+  test('strips -commercial suffix for project lookup when source is commercial repo', () => {
+    const data = makeData();
+    // spring-cloud-config-commercial → looks up 'spring-cloud-config' entry
+    const changed = updateProjects(data, 'spring-cloud/spring-cloud-config-commercial', 'main', 'release/4.2.7', false);
+    expect(changed).toBe(true);
+    // Should update the spring-cloud-config entry, not create a new one
+    expect(data['spring-cloud-config'].commercial.branches.scheduled).toContain('release/4.2.7');
+    expect(data['spring-cloud-config-commercial']).toBeUndefined();
+  });
+
+  test('uses oss-branch JDKs for release/ branch created from OSS branch in updateProjects', () => {
+    const data = {
+      defaults: {
+        oss: {
+          branches: { default: ['main'] },
+          jdkVersions: { default: ['17', '21'] },
+        },
+        commercial: { branches: { scheduled: [] }, jdkVersions: {} },
+      },
+      'spring-cloud-config': {
+        oss: {
+          branches: { default: ['main'], scheduled: ['4.1.x', '4.2.x'] },
+          jdkVersions: { '4.1.x': ['17'], '4.2.x': ['17', '21'], main: ['17', '21', '25'] },
+        },
+        commercial: {
+          branches: { default: ['4.2.x'], scheduled: ['4.2.x'] },
+          jdkVersions: { '4.2.x': ['17', '21'] },
+        },
+      },
+    };
+    updateProjects(data, 'spring-cloud/spring-cloud-config', 'main', 'release/5.0.0', false);
+    // Should use ossJdk['main'] = ['17', '21', '25']
+    expect(data['spring-cloud-config'].commercial.jdkVersions['release/5.0.0']).toEqual(['17', '21', '25']);
+    // OSS branch should NOT be removed for a release/ branch
     expect(data['spring-cloud-config'].oss.branches.scheduled).toContain('4.2.x');
   });
 });

@@ -25690,6 +25690,14 @@ const COMMERCIAL_REPOS = [
 
 const COMMERCIAL_URLS = new Set(COMMERCIAL_REPOS.map(r => r.url));
 
+const SPRING_SNAPSHOT_REPO = {
+  id:               'spring-snapshots',
+  name:             'Spring Snapshots',
+  url:              'https://repo.spring.io/snapshot',
+  snapshotsEnabled: true,
+  releasesEnabled:  false,
+};
+
 const XML_EXTS  = new Set(['.xml', '.pom']);
 const SKIP_DIRS = new Set([
   '.git', 'node_modules', 'target', 'build',
@@ -25705,9 +25713,10 @@ const POM_PLUGIN_REPOS_RE = /([ \t]*)<pluginRepositories>(.*?)<\/pluginRepositor
  * Builds a complete <repositories> or <pluginRepositories> XML block.
  * preservedEntries are raw XML strings for repository entries that should be kept
  * in addition to the commercial repos (used by the spring-cloud-contract override).
+ * includeSnapshotRepo adds https://repo.spring.io/snapshot as a snapshot-only entry.
  * Exported for unit testing.
  */
-function buildPomBlock(tag, indent, preservedEntries = []) {
+function buildPomBlock(tag, indent, preservedEntries = [], includeSnapshotRepo = false) {
   const entryTag = tag === 'repositories' ? 'repository' : 'pluginRepository';
   const i1 = indent + '\t';
   const i2 = i1 + '\t';
@@ -25732,6 +25741,20 @@ function buildPomBlock(tag, indent, preservedEntries = []) {
     lines.push(`${i1}</${entryTag}>`);
   }
 
+  if (includeSnapshotRepo) {
+    lines.push(`${i1}<${entryTag}>`);
+    lines.push(`${i2}<id>${SPRING_SNAPSHOT_REPO.id}</id>`);
+    lines.push(`${i2}<name>${SPRING_SNAPSHOT_REPO.name}</name>`);
+    lines.push(`${i2}<url>${SPRING_SNAPSHOT_REPO.url}</url>`);
+    lines.push(`${i2}<snapshots>`);
+    lines.push(`${i3}<enabled>true</enabled>`);
+    lines.push(`${i2}</snapshots>`);
+    lines.push(`${i2}<releases>`);
+    lines.push(`${i3}<enabled>false</enabled>`);
+    lines.push(`${i2}</releases>`);
+    lines.push(`${i1}</${entryTag}>`);
+  }
+
   for (const entry of preservedEntries) {
     lines.push(`${i1}${entry}`);
   }
@@ -25743,9 +25766,10 @@ function buildPomBlock(tag, indent, preservedEntries = []) {
 /**
  * Updates <repositories> and <pluginRepositories> blocks in POM content.
  * preserveIds is a Set of repository IDs to keep alongside the commercial repos.
+ * includeSnapshotRepo adds https://repo.spring.io/snapshot as a snapshot-only entry.
  * Exported for unit testing.
  */
-function updatePom(content, preserveIds = new Set()) {
+function updatePom(content, preserveIds = new Set(), includeSnapshotRepo = false) {
   const replaceBlock = (match, indent, body, tag) => {
     if (!OLD_SPRING_IO_RE.test(match)) return match;
     if ([...COMMERCIAL_URLS].some(u => match.includes(u))) return match;
@@ -25761,7 +25785,7 @@ function updatePom(content, preserveIds = new Set()) {
         }
       }
     }
-    return buildPomBlock(tag, indent, preserved);
+    return buildPomBlock(tag, indent, preserved, includeSnapshotRepo);
   };
 
   content = content.replace(POM_REPOS_RE,        (m, ind, body) => replaceBlock(m, ind, body, 'repositories'));
@@ -25798,9 +25822,10 @@ function detectInnerIndent(blockBody, fallback) {
 /**
  * Builds maven {} blocks for Gradle.
  * withCredentials adds credential blocks (used by spring-cloud-contract override).
+ * includeSnapshotRepo adds https://repo.spring.io/snapshot as an additional entry.
  * Exported for unit testing.
  */
-function buildGradleMavenEntries(indent, isKotlin, withCredentials = false) {
+function buildGradleMavenEntries(indent, isKotlin, withCredentials = false, includeSnapshotRepo = false) {
   const i2 = indent + '    ';
   const i3 = i2 + '    ';
   const lines = [];
@@ -25833,6 +25858,17 @@ function buildGradleMavenEntries(indent, isKotlin, withCredentials = false) {
     }
     lines.push(`${indent}}`);
   }
+
+  if (includeSnapshotRepo) {
+    lines.push(`${indent}maven {`);
+    if (isKotlin) {
+      lines.push(`${i2}url = uri("${SPRING_SNAPSHOT_REPO.url}")`);
+    } else {
+      lines.push(`${i2}url '${SPRING_SNAPSHOT_REPO.url}'`);
+    }
+    lines.push(`${indent}}`);
+  }
+
   return lines.join('\n') + '\n';
 }
 
@@ -25841,7 +25877,7 @@ function buildGradleMavenEntries(indent, isKotlin, withCredentials = false) {
  * Returns [newBody, changed].
  * Exported for unit testing.
  */
-function processGradleBlock(blockBody, innerIndent, isKotlin, forceAdd = false, withCredentials = false) {
+function processGradleBlock(blockBody, innerIndent, isKotlin, forceAdd = false, withCredentials = false, includeSnapshotRepo = false) {
   if ([...COMMERCIAL_URLS].some(u => blockBody.includes(u))) return [blockBody, false];
   if (!forceAdd && !OLD_SPRING_IO_RE.test(blockBody)) return [blockBody, false];
 
@@ -25865,7 +25901,7 @@ function processGradleBlock(blockBody, innerIndent, isKotlin, forceAdd = false, 
     searchPos = braceClose + 1;
   }
 
-  const newEntries = buildGradleMavenEntries(innerIndent, isKotlin, withCredentials);
+  const newEntries = buildGradleMavenEntries(innerIndent, isKotlin, withCredentials, includeSnapshotRepo);
 
   if (forceAdd && toRemove.length === 0) {
     const lastNl   = blockBody.lastIndexOf('\n');
@@ -25891,7 +25927,7 @@ function processGradleBlock(blockBody, innerIndent, isKotlin, forceAdd = false, 
  * Updates all repositories {} blocks in Gradle content.
  * Exported for unit testing.
  */
-function updateGradle(content, isKotlin, withCredentials = false) {
+function updateGradle(content, isKotlin, withCredentials = false, includeSnapshotRepo = false) {
   const buildscriptRanges = [];
   BUILDSCRIPT_RE.lastIndex = 0;
   for (const bsm of content.matchAll(BUILDSCRIPT_RE)) {
@@ -25920,7 +25956,7 @@ function updateGradle(content, isKotlin, withCredentials = false) {
     const blockBody   = content.slice(blockOpen + 1, blockClose);
     const innerIndent = detectInnerIndent(blockBody, outerIndent + '    ');
 
-    const [newBody, wasChanged] = processGradleBlock(blockBody, innerIndent, isKotlin, forceAdd, withCredentials);
+    const [newBody, wasChanged] = processGradleBlock(blockBody, innerIndent, isKotlin, forceAdd, withCredentials, includeSnapshotRepo);
     if (wasChanged) {
       result.push(content.slice(pos, blockOpen + 1));
       result.push(newBody);
@@ -25942,7 +25978,7 @@ function updateGradle(content, isKotlin, withCredentials = false) {
  * Returns true when the file was modified.
  * Exported for unit testing.
  */
-function processFile(filePath, updatedSet = new Set(), preserveIds = new Set(), withCredentials = false) {
+function processFile(filePath, updatedSet = new Set(), preserveIds = new Set(), withCredentials = false, includeSnapshotRepo = false) {
   const ext      = path.extname(filePath).toLowerCase();
   const isKts    = filePath.endsWith('.gradle.kts');
   const isGradle = ext === '.gradle' || isKts;
@@ -25965,10 +26001,10 @@ function processFile(filePath, updatedSet = new Set(), preserveIds = new Set(), 
   let changed = false;
 
   if (isXml) {
-    newContent = updatePom(content, preserveIds);
+    newContent = updatePom(content, preserveIds, includeSnapshotRepo);
     changed    = newContent !== content;
   } else {
-    [newContent, changed] = updateGradle(content, isKts, withCredentials);
+    [newContent, changed] = updateGradle(content, isKts, withCredentials, includeSnapshotRepo);
   }
 
   if (!changed) return false;
@@ -26061,17 +26097,19 @@ function walkDir(root, callback) {
 
 async function run() {
   try {
-    const repository = core.getInput('repository', { required: true });
-    const branch     = core.getInput('branch',     { required: true });
-    const token      = core.getInput('token',      { required: true });
-    const commitMsg  = core.getInput('commit-message') || 'Updating repositories to commercial Broadcom repositories';
-    const gitName    = core.getInput('git-user-name')  || 'Spring Builds';
-    const gitEmail   = core.getInput('git-user-email') || 'svc.spring-builds@broadcom.com';
+    const repository      = core.getInput('repository',       { required: true });
+    const branch          = core.getInput('branch',           { required: true });
+    const token           = core.getInput('token',            { required: true });
+    const addSnapshotRepo = (core.getInput('add-snapshot-repo') || 'false').toLowerCase() === 'true';
+    const commitMsg       = core.getInput('commit-message') || 'Updating repositories to commercial Broadcom repositories';
+    const gitName         = core.getInput('git-user-name')  || 'Spring Builds';
+    const gitEmail        = core.getInput('git-user-email') || 'svc.spring-builds@broadcom.com';
     core.setSecret(token);
 
     core.info('=== Update Commercial Repositories ===');
-    core.info(`Repository: ${repository}`);
-    core.info(`Branch:     ${branch}`);
+    core.info(`Repository:         ${repository}`);
+    core.info(`Branch:             ${branch}`);
+    core.info(`Add snapshot repo:  ${addSnapshotRepo}`);
     core.info('');
 
     const repoDir = path.join(os.tmpdir(), '_repos_repo');
@@ -26101,7 +26139,7 @@ async function run() {
     core.info('Scanning for old repo.spring.io repository references...');
     let changed = 0;
     walkDir(repoDir, (filePath) => {
-      if (processFile(filePath, updatedByOverride)) changed++;
+      if (processFile(filePath, updatedByOverride, new Set(), false, addSnapshotRepo)) changed++;
     });
     core.info(`\nUpdated repository references in ${changed} file(s).`);
 
@@ -26136,6 +26174,7 @@ module.exports = {
   processFile,
   lookupProjectOverride,
   COMMERCIAL_REPOS,
+  SPRING_SNAPSHOT_REPO,
   OLD_SPRING_IO_RE,
 };
 

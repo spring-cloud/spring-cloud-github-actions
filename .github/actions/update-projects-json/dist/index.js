@@ -25683,17 +25683,32 @@ function parentBranch(branch) {
 /**
  * Determines which JDK list to copy into commercial.jdkVersions for the new branch.
  * Priority:
- *   1. For hotfix branches → oss.jdkVersions[parent .x branch]
- *                          → commercial.jdkVersions[parent .x branch] (parent already commercial)
- *   2. For regular branches → oss.jdkVersions[ossBranch]
- *   3. Fallback → commercial.jdkVersions['default'] or oss.jdkVersions['default'] or ['17','21']
+ *   1. For release/ branches with explicit ossBranch → (oss|commercial).jdkVersions[ossBranch]
+ *   2. For hotfix branches (tag-based, ossBranch empty) → oss.jdkVersions[parent .x branch]
+ *                                                       → commercial.jdkVersions[parent .x branch]
+ *                                                       → oss.jdkVersions[OSS default branch]
+ *   3. For regular branches → (oss|commercial).jdkVersions[ossBranch]
+ *   4. Fallback → commercial.jdkVersions['default'] or oss.jdkVersions['default'] or ['17','21']
+ *
+ * isCommercialSource: when true the source is a commercial repo; look in commercial.jdkVersions
+ * for the oss-branch lookup.
  */
-function resolveJdkVersions(entry, commercialBranch, ossBranch) {
+function resolveJdkVersions(entry, commercialBranch, ossBranch, isCommercialSource = false) {
   const ossJdk = ((entry.oss || {}).jdkVersions) || {};
   const commercialJdk = ((entry.commercial || {}).jdkVersions) || {};
   const ossDefaultBranches = ((entry.oss || {}).branches || {}).default || [];
 
   if (isHotfixBranch(commercialBranch)) {
+    // When oss-branch is explicitly provided (OSS/commercial release branch case), use it directly.
+    if (ossBranch) {
+      const srcJdk = isCommercialSource ? commercialJdk : ossJdk;
+      const srcLabel = isCommercialSource ? 'commercial' : 'oss';
+      if (srcJdk[ossBranch]) {
+        core.info(`  Release branch from '${ossBranch}' — using JDKs from ${srcLabel}.jdkVersions['${ossBranch}']: ${JSON.stringify(srcJdk[ossBranch])}`);
+        return [...srcJdk[ossBranch]];
+      }
+    }
+    // Hotfix from tag: use parent branch lookup.
     const p = parentBranch(commercialBranch);
     if (ossJdk[p]) {
       core.info(`  Hotfix branch — using JDKs from oss.jdkVersions['${p}']: ${JSON.stringify(ossJdk[p])}`);
@@ -25713,9 +25728,13 @@ function resolveJdkVersions(entry, commercialBranch, ossBranch) {
     }
   }
 
-  if (ossBranch && ossJdk[ossBranch]) {
-    core.info(`  Using JDKs from oss.jdkVersions['${ossBranch}']: ${JSON.stringify(ossJdk[ossBranch])}`);
-    return [...ossJdk[ossBranch]];
+  if (ossBranch) {
+    const srcJdk = isCommercialSource ? commercialJdk : ossJdk;
+    const srcLabel = isCommercialSource ? 'commercial' : 'oss';
+    if (srcJdk[ossBranch]) {
+      core.info(`  Using JDKs from ${srcLabel}.jdkVersions['${ossBranch}']: ${JSON.stringify(srcJdk[ossBranch])}`);
+      return [...srcJdk[ossBranch]];
+    }
   }
 
   const fallback = commercialJdk['default'] || ossJdk['default'] || ['17', '21'];
@@ -25744,12 +25763,17 @@ function dumpsPretty(data) {
  * Returns true if any changes were made.
  */
 function updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault) {
-  const projectName = ossRepo.split('/').pop();
+  const rawProjectName = ossRepo.split('/').pop();
+  // Strip -commercial suffix for projects.json lookup (projects are keyed without it).
+  const isCommercialSource = rawProjectName.endsWith('-commercial');
+  const projectName = isCommercialSource
+    ? rawProjectName.slice(0, -'-commercial'.length)
+    : rawProjectName;
 
   let entry;
   if (data[projectName] !== undefined) {
     entry = data[projectName];
-    core.info(`Using project entry: '${projectName}'`);
+    core.info(`Using project entry: '${projectName}'${isCommercialSource ? ' (commercial source)' : ''}`);
   } else {
     entry = data['defaults'];
     core.info(`No entry for '${projectName}', using 'defaults'`);
@@ -25791,7 +25815,7 @@ function updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault) 
   if (jdkMap[commercialBranch] !== undefined) {
     core.info(`commercial.jdkVersions['${commercialBranch}'] already exists — skipping.`);
   } else {
-    const jdks = resolveJdkVersions(entry, commercialBranch, ossBranch);
+    const jdks = resolveJdkVersions(entry, commercialBranch, ossBranch, isCommercialSource);
     jdkMap[commercialBranch] = jdks;
     core.info(`Set commercial.jdkVersions['${commercialBranch}'] = ${JSON.stringify(jdks)}.`);
     changed = true;
@@ -25886,10 +25910,9 @@ async function run() {
       return;
     }
 
-    const projectName = ossRepo.split('/').pop();
     await exec.exec('git', [
       '-C', repoDir, 'commit', '-m',
-      `Update projects.json: add ${projectName} commercial branch ${commercialBranch}`,
+      `Update projects.json: add ${ossRepo.split('/').pop()} commercial branch ${commercialBranch}`,
     ]);
     await exec.exec('git', ['-C', repoDir, 'push', 'origin', 'main']);
 

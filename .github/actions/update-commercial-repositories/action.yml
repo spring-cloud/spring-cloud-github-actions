@@ -12,6 +12,10 @@ inputs:
   token:
     description: 'GitHub token with contents: write permission on the repository'
     required: true
+  add-snapshot-repo:
+    description: 'When true, also add https://repo.spring.io/snapshot as a snapshot-only repository (no releases). Use when creating an OSS release branch that needs snapshot dependencies.'
+    required: false
+    default: 'false'
   commit-message:
     description: 'Commit message for the repository updates'
     required: false
