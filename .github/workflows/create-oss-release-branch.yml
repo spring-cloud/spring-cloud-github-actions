@@ -1,0 +1,328 @@
+name: Create OSS Release Branch
+
+# Creates a commercial release branch directly from an OSS source branch.
+#
+# Unlike create-hotfix-branch (which starts from a tag), this workflow creates
+# a release branch from an OSS branch (e.g. main) so that the full git history
+# is preserved and the branch can later be merged back into the OSS repo.
+#
+# The commercial repo is always the OSS repo with -commercial appended.
+# The release branch is named release/<version>, where <version> is derived by
+# stripping -SNAPSHOT from the root pom.xml version on the OSS branch
+# (e.g. pom version 5.0.0-SNAPSHOT → release/5.0.0).
+#
+# Initialisation steps (each committed with [skip actions]):
+#   1. Update CI/PR workflows to commercial equivalents
+#   2. Copy .settings.xml from the commercial repo default branch
+#   3. Replace OSS repo.spring.io references with commercial repos
+#      (and add https://repo.spring.io/snapshot for snapshot-only dependencies)
+#   4. Update distribution management to commercial Broadcom entries
+#   5. Update projects.json to register the new commercial release branch
+#
+# After initialisation:
+#   - A milestone is created in the OSS repo
+#   - release-train-join.yml and release-train-ready.yml are ensured in the branch
+#   - release-train-join.yml is triggered with deployment-destination=Maven Central
+#   - A final empty commit is pushed to trigger CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      oss_repo:
+        description: 'Open source repository name in the spring-cloud org (e.g. spring-cloud-config)'
+        required: true
+        type: string
+      oss_branch:
+        description: 'OSS branch to create the release branch from (e.g. main, 1.2.x)'
+        required: true
+        type: string
+      spring_release_train:
+        description: 'Spring release train this release is part of (e.g. 2026.1)'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA of this repo to copy release-train action files from. Defaults to the commit that triggered this workflow.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # Read root pom.xml from the OSS branch to derive the release version and
+  # commercial branch/repo names.
+  derive:
+    runs-on: ubuntu-latest
+    outputs:
+      release_version:    ${{ steps.derive.outputs.release_version }}
+      commercial_repo:    ${{ steps.derive.outputs.commercial_repo }}
+      commercial_project: ${{ steps.derive.outputs.commercial_project }}
+      commercial_branch:  ${{ steps.derive.outputs.commercial_branch }}
+    steps:
+      - name: Derive release version and commercial branch from pom.xml
+        id: derive
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          echo "Reading pom.xml from spring-cloud/${{ inputs.oss_repo }} at ${{ inputs.oss_branch }}..."
+          pom=$(gh api "repos/spring-cloud/${{ inputs.oss_repo }}/contents/pom.xml?ref=${{ inputs.oss_branch }}" \
+            --jq '.content' | tr -d '\n' | base64 -d)
+          echo "$pom" > /tmp/pom.xml
+
+          release_version=$(node -e "
+          const fs = require('fs');
+          const data = fs.readFileSync('/tmp/pom.xml', 'utf8');
+          const noParent = data.replace(/<parent>[\s\S]*?<\/parent>/g, '');
+          const m = noParent.match(/<version>([^<]+)<\/version>/);
+          if (!m) { process.stderr.write('No <version> found in pom.xml\n'); process.exit(1); }
+          process.stdout.write(m[1].replace(/-SNAPSHOT\$/, '') + '\n');
+          ")
+
+          COMMERCIAL_REPO="spring-cloud/${{ inputs.oss_repo }}-commercial"
+          COMMERCIAL_PROJECT="${{ inputs.oss_repo }}-commercial"
+          COMMERCIAL_BRANCH="release/${release_version}"
+
+          echo "release_version=${release_version}"       >> "$GITHUB_OUTPUT"
+          echo "commercial_repo=${COMMERCIAL_REPO}"       >> "$GITHUB_OUTPUT"
+          echo "commercial_project=${COMMERCIAL_PROJECT}" >> "$GITHUB_OUTPUT"
+          echo "commercial_branch=${COMMERCIAL_BRANCH}"   >> "$GITHUB_OUTPUT"
+
+          echo "OSS repo:           spring-cloud/${{ inputs.oss_repo }}"
+          echo "OSS branch:         ${{ inputs.oss_branch }}"
+          echo "Release version:    ${release_version}"
+          echo "Commercial repo:    ${COMMERCIAL_REPO}"
+          echo "Commercial branch:  ${COMMERCIAL_BRANCH}"
+
+  # Full clone of the OSS branch (preserving history) and push to the commercial
+  # repo as the new release branch.  No orphan — history is kept so the branch
+  # can be merged back into the OSS repo after the release.
+  create-branch:
+    needs: derive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone OSS branch and push to commercial repo as release branch
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          oss_repo="spring-cloud/${{ inputs.oss_repo }}"
+          commercial_repo="${{ needs.derive.outputs.commercial_repo }}"
+          commercial_branch="${{ needs.derive.outputs.commercial_branch }}"
+
+          echo "Cloning ${oss_repo}@${{ inputs.oss_branch }} (full history)..."
+          git clone --branch "${{ inputs.oss_branch }}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${oss_repo}.git" source-repo
+
+          echo "Pushing to ${commercial_repo} as ${commercial_branch}..."
+          cd source-repo
+          git remote add commercial \
+            "https://x-access-token:${GH_TOKEN}@github.com/${commercial_repo}.git"
+          git push commercial "HEAD:refs/heads/${commercial_branch}"
+
+          echo "Branch ${commercial_branch} created in ${commercial_repo}."
+
+  # Apply commercial initialisation steps to the new release branch.
+  # Each action commits with [skip actions] so CI is not triggered until the
+  # final empty commit pushed by the trigger-ci job.
+  update-branch:
+    needs: [derive, create-branch]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout spring-cloud-github-actions
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Update CI and PR workflows for release branch
+        uses: ./.github/actions/update-oss-workflows-to-commercial
+        with:
+          repository: ${{ needs.derive.outputs.commercial_repo }}
+          branch:     ${{ needs.derive.outputs.commercial_branch }}
+          token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Copy .settings.xml from commercial default branch
+        uses: ./.github/actions/copy-settings-xml
+        with:
+          repository:    ${{ needs.derive.outputs.commercial_repo }}
+          target-branch: ${{ needs.derive.outputs.commercial_branch }}
+          token:         ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Replace OSS repositories with commercial repos (and add snapshot repo)
+        uses: ./.github/actions/update-commercial-repositories
+        with:
+          repository:       ${{ needs.derive.outputs.commercial_repo }}
+          branch:           ${{ needs.derive.outputs.commercial_branch }}
+          add-snapshot-repo: 'true'
+          token:            ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update distribution management for commercial repo
+        uses: ./.github/actions/update-distribution-management
+        with:
+          repository: ${{ needs.derive.outputs.commercial_repo }}
+          branch:     ${{ needs.derive.outputs.commercial_branch }}
+          token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update projects.json with the new commercial release branch
+        uses: ./.github/actions/update-projects-json
+        with:
+          oss-repo:          spring-cloud/${{ inputs.oss_repo }}
+          oss-branch:        ${{ inputs.oss_branch }}
+          commercial-branch: ${{ needs.derive.outputs.commercial_branch }}
+          token:             ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+  # Create a milestone in the OSS repo (not the commercial repo) for the release version.
+  create-milestone:
+    needs: derive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout spring-cloud-github-actions
+        uses: actions/checkout@v4
+
+      - name: Create milestone in OSS repo
+        uses: ./.github/actions/create-milestone
+        with:
+          repo:    spring-cloud/${{ inputs.oss_repo }}
+          version: ${{ needs.derive.outputs.release_version }}
+          token:   ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+  # Check whether the OSS branch already contains the required release train workflow
+  # files.  If either is missing, run the generator against the commercial release
+  # branch to produce them before triggering release-train-join.yml.
+  ensure-workflows:
+    needs: [derive, update-branch]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for required release train workflows in OSS branch
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          oss_repo="spring-cloud/${{ inputs.oss_repo }}"
+          oss_branch="${{ inputs.oss_branch }}"
+          commercial_project="${{ needs.derive.outputs.commercial_project }}"
+          commercial_branch="${{ needs.derive.outputs.commercial_branch }}"
+
+          missing=false
+          for workflow in "release-train-join.yml" "release-train-ready.yml"; do
+            if gh api "repos/${oss_repo}/contents/.github/workflows/${workflow}?ref=${oss_branch}" --silent 2>/dev/null; then
+              echo "  ✓ ${workflow} present in OSS repo at ${oss_branch}"
+            else
+              echo "  ✗ ${workflow} missing from OSS repo at ${oss_branch}"
+              missing=true
+            fi
+          done
+          echo "needs-generation=${missing}" >> "$GITHUB_OUTPUT"
+
+          # Look up the primary JDK for this OSS branch from projects.json.
+          project_key="${{ inputs.oss_repo }}"
+          oss_branch="${{ inputs.oss_branch }}"
+          echo "JDK lookup: oss.jdkVersions['${oss_branch}'] in project '${project_key}'"
+
+          gh api repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json \
+            -X GET -f ref=main --jq '.content' | base64 -d > /tmp/projects.json
+
+          export PROJECT_KEY="${project_key}"
+          export OSS_BRANCH="${oss_branch}"
+          primary_jdk=$(node - << 'JSEOF'
+          const fs         = require('fs');
+          const projectKey = process.env.PROJECT_KEY;
+          const ossBranch  = process.env.OSS_BRANCH;
+          const projects   = JSON.parse(fs.readFileSync('/tmp/projects.json', 'utf8'));
+          const defaults   = projects.defaults || {};
+
+          function getJdks(pk, branch) {
+            const cfg    = (projects[pk] || {}).oss || {};
+            const jdkmap = cfg.jdkVersions || {};
+            if (jdkmap[branch]) return jdkmap[branch];
+            if (jdkmap['default']) {
+              process.stderr.write(`WARNING: '${branch}' not found in oss.jdkVersions for '${pk}' — using oss default.\n`);
+              return jdkmap['default'];
+            }
+            const defMap = (defaults.oss || {}).jdkVersions || {};
+            if (defMap[branch]) return defMap[branch];
+            const fallback = defMap['default'] || ['17', '21'];
+            process.stderr.write(`WARNING: '${branch}' not in projects.json for '${pk}' — using global default: ${JSON.stringify(fallback)}\n`);
+            return fallback;
+          }
+
+          const jdks = getJdks(projectKey, ossBranch);
+          process.stdout.write(jdks.includes('8') ? '8' : '17');
+          JSEOF
+          )
+          echo "primary-jdk=${primary_jdk}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$missing" == "false" ]]; then
+            echo "All required workflows are present — skipping generator."
+          else
+            echo "One or more required workflows are missing — generator will run (primary JDK: ${primary_jdk})."
+          fi
+
+      - name: Checkout spring-cloud-github-actions
+        if: steps.check.outputs.needs-generation == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Run workflow generator for commercial release branch
+        if: steps.check.outputs.needs-generation == 'true'
+        uses: ./.github/actions/generate-workflows-for-branch
+        with:
+          repo:        ${{ needs.derive.outputs.commercial_repo }}
+          branch:      ${{ needs.derive.outputs.commercial_branch }}
+          primary-jdk: ${{ steps.check.outputs.primary-jdk }}
+          token:       ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+  # Dispatch release-train-join.yml in the commercial repo and wait for it to
+  # complete before proceeding.  Maven Central is used as the deployment
+  # destination because this is an OSS project release.
+  trigger-release-train-join:
+    needs: [derive, ensure-workflows, create-milestone]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger release-train-join workflow and wait
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          commercial_project="${{ needs.derive.outputs.commercial_project }}"
+          commercial_branch="${{ needs.derive.outputs.commercial_branch }}"
+
+          echo "Triggering release-train-join.yml in spring-cloud/${commercial_project} on ${commercial_branch}..."
+          run_url=$(gh workflow run release-train-join.yml \
+            --repo "spring-cloud/${commercial_project}" \
+            --ref "${commercial_branch}" \
+            --field "deployment-destination=Maven Central" \
+            --field "release-train=${{ inputs.spring_release_train }}" \
+            --field "release-train-repository=spring-io/release-train")
+          echo "Dispatched workflow run. Waiting for $run_url to complete."
+          run_id=${run_url##*/}
+          watch_exit_code=0
+          gh run watch $run_id --repo "spring-cloud/${commercial_project}" --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
+          if [[ $watch_exit_code -eq 0 ]]; then
+            echo "Workflow run succeeded."
+          else
+            echo "Workflow run failed."
+          fi
+          exit $watch_exit_code
+
+  # Push a final empty commit (without [skip actions]) to trigger the CI
+  # pipeline on the newly initialised commercial release branch.
+  trigger-ci:
+    needs: [derive, trigger-release-train-join]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push empty commit to trigger CI
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
+          BRANCH="${{ needs.derive.outputs.commercial_branch }}"
+
+          git clone --single-branch --branch "$BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _trigger_repo
+
+          cd _trigger_repo
+          git config user.name  "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+          git commit --allow-empty -m "Initialize OSS release branch"
+          git push origin "$BRANCH"
+          echo "Empty commit pushed to trigger CI on ${COMMERCIAL_REPO}@${BRANCH}."
