@@ -16,17 +16,16 @@
   -->
 <!--
   Maven settings used exclusively on commercial OSS release branches
-  (release/<version> branches in *-commercial repos).
+  (release/VERSION branches in *-commercial repos).
 
   This file is placed at the repo root as release-ci-settings.xml during
-  branch initialization and is passed to Maven via
-    --settings release-ci-settings.xml
+  branch initialization and is passed to Maven via the settings flag
   by deploy.yml when the file is detected.  It is deleted by
   spring-release-train-project-ready before the release is finalised so it
   never appears in the OSS repo history.
 
   Credentials are read from environment variables set by the CI workflow:
-    COMMERCIAL_ARTIFACTORY_USERNAME / COMMERCIAL_ARTIFACTORY_PASSWORD
+  COMMERCIAL_ARTIFACTORY_USERNAME and COMMERCIAL_ARTIFACTORY_PASSWORD
 -->
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -41,6 +40,17 @@
 		</server>
 		<server>
 			<id>spring-commercial-release</id>
+			<username>${env.COMMERCIAL_ARTIFACTORY_USERNAME}</username>
+			<password>${env.COMMERCIAL_ARTIFACTORY_PASSWORD}</password>
+		</server>
+		<!--
+		  Provides credentials when a pom.xml distributionManagement still carries the
+		  OSS server id 'repo.spring.io' but deploy.yml has patched its URL to point at
+		  commercial Artifactory.  Maven looks up credentials by server id, so this entry
+		  ensures the upload is authenticated even before the id is renamed.
+		-->
+		<server>
+			<id>repo.spring.io</id>
 			<username>${env.COMMERCIAL_ARTIFACTORY_USERNAME}</username>
 			<password>${env.COMMERCIAL_ARTIFACTORY_PASSWORD}</password>
 		</server>

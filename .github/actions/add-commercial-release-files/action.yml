@@ -100,10 +100,10 @@ runs:
               DOCKERHUB_TOKEN: EXPR_secrets.DOCKERHUB_TOKEN_EXPR
         WORKFLOW_EOF
 
-        # Strip the 8 leading spaces introduced by the heredoc indentation,
-        # then substitute placeholders with real GitHub Actions expressions.
+        # Substitute placeholders with real values.
+        # Note: YAML already strips the block scalar's leading indentation before
+        # running this script, so no space-stripping sed pass is needed here.
         sed -i \
-          -e 's/^        //' \
           -e "s|RELEASE_BRANCH_PLACEHOLDER|${BRANCH}|g" \
           -e "s|EXPR_\(.*\)_EXPR|${D}${L} \1 ${R}|g" \
           .github/workflows/ci-release.yml
