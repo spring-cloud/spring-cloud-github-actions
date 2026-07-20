@@ -53,7 +53,7 @@ jobs:
             'Checkout project release branch',
             'Update project versions',
             'Verify no snapshot versions',
-            'Commit and push release version changes',
+            'Commit and push changes',
             'Trigger release-train-ready workflow',
           ];
           for (const expected of expectedSteps) {
