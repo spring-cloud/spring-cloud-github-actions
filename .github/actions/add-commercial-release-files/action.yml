@@ -59,43 +59,46 @@ runs:
         # Generates a dedicated CI workflow for this commercial release branch.
         # trigger-branch-ci dispatches this file in preference to ci.yml so the
         # original ci.yml never needs to be modified.
+        #
+        # Build the ${{ }} delimiter string character-by-character so the GitHub
+        # Actions YAML template parser does not try to evaluate expressions inside
+        # the heredoc (composite actions do not have access to the secrets context).
+        D='$' L='{{' R='}}'
+
         mkdir -p .github/workflows
         cat > .github/workflows/ci-release.yml << WORKFLOW_EOF
-        name: Spring Cloud CI Job (Commercial Release Branch)
+name: Spring Cloud CI Job (Commercial Release Branch)
 
-        on:
-          workflow_dispatch:
-            inputs:
-              branches:
-                description: "Which branch should be built (can be a comma-separated list of branches)"
-                required: true
-                default: '${BRANCH}'
-                type: string
-          push:
-            branches:
-              - ${BRANCH}
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: "Which branch should be built (can be a comma-separated list of branches)"
+        required: true
+        default: '${BRANCH}'
+        type: string
+  push:
+    branches:
+      - ${BRANCH}
 
-        permissions:
-          actions: write
-          contents: read
+permissions:
+  actions: write
+  contents: read
 
-        jobs:
-          deploy:
-            uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
-            with:
-              branches: \${{ inputs.branches }}
-              runs_on: ubuntu22-2-8
-            secrets:
-              ARTIFACTORY_USERNAME: \${{ secrets.ARTIFACTORY_USERNAME }}
-              ARTIFACTORY_PASSWORD: \${{ secrets.ARTIFACTORY_PASSWORD }}
-              COMMERCIAL_ARTIFACTORY_USERNAME: \${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
-              COMMERCIAL_ARTIFACTORY_PASSWORD: \${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
-              DOCKERHUB_USERNAME: \${{ secrets.DOCKERHUB_USERNAME }}
-              DOCKERHUB_TOKEN: \${{ secrets.DOCKERHUB_TOKEN }}
-        WORKFLOW_EOF
-
-        # Remove leading whitespace introduced by the heredoc indentation
-        sed -i 's/^        //' .github/workflows/ci-release.yml
+jobs:
+  deploy:
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
+    with:
+      branches: ${D}${L} inputs.branches ${R}
+      runs_on: ubuntu22-2-8
+    secrets:
+      ARTIFACTORY_USERNAME: ${D}${L} secrets.ARTIFACTORY_USERNAME ${R}
+      ARTIFACTORY_PASSWORD: ${D}${L} secrets.ARTIFACTORY_PASSWORD ${R}
+      COMMERCIAL_ARTIFACTORY_USERNAME: ${D}${L} secrets.COMMERCIAL_ARTIFACTORY_USERNAME ${R}
+      COMMERCIAL_ARTIFACTORY_PASSWORD: ${D}${L} secrets.COMMERCIAL_ARTIFACTORY_PASSWORD ${R}
+      DOCKERHUB_USERNAME: ${D}${L} secrets.DOCKERHUB_USERNAME ${R}
+      DOCKERHUB_TOKEN: ${D}${L} secrets.DOCKERHUB_TOKEN ${R}
+WORKFLOW_EOF
 
         echo "Generated .github/workflows/ci-release.yml"
 
