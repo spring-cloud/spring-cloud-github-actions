@@ -60,45 +60,53 @@ runs:
         # trigger-branch-ci dispatches this file in preference to ci.yml so the
         # original ci.yml never needs to be modified.
         #
-        # Build the ${{ }} delimiter string character-by-character so the GitHub
-        # Actions YAML template parser does not try to evaluate expressions inside
-        # the heredoc (composite actions do not have access to the secrets context).
+        # D/L/R build the ${{ }} delimiter character-by-character so the GitHub
+        # Actions YAML template parser never sees a literal "${{" in this file
+        # (composite actions cannot access the secrets context at parse time).
         D='$' L='{{' R='}}'
 
         mkdir -p .github/workflows
-        cat > .github/workflows/ci-release.yml << WORKFLOW_EOF
-name: Spring Cloud CI Job (Commercial Release Branch)
+        cat > .github/workflows/ci-release.yml << 'WORKFLOW_EOF'
+        name: Spring Cloud CI Job (Commercial Release Branch)
 
-on:
-  workflow_dispatch:
-    inputs:
-      branches:
-        description: "Which branch should be built (can be a comma-separated list of branches)"
-        required: true
-        default: '${BRANCH}'
-        type: string
-  push:
-    branches:
-      - ${BRANCH}
+        on:
+          workflow_dispatch:
+            inputs:
+              branches:
+                description: "Which branch should be built (can be a comma-separated list of branches)"
+                required: true
+                default: 'RELEASE_BRANCH_PLACEHOLDER'
+                type: string
+          push:
+            branches:
+              - RELEASE_BRANCH_PLACEHOLDER
 
-permissions:
-  actions: write
-  contents: read
+        permissions:
+          actions: write
+          contents: read
 
-jobs:
-  deploy:
-    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
-    with:
-      branches: ${D}${L} inputs.branches ${R}
-      runs_on: ubuntu22-2-8
-    secrets:
-      ARTIFACTORY_USERNAME: ${D}${L} secrets.ARTIFACTORY_USERNAME ${R}
-      ARTIFACTORY_PASSWORD: ${D}${L} secrets.ARTIFACTORY_PASSWORD ${R}
-      COMMERCIAL_ARTIFACTORY_USERNAME: ${D}${L} secrets.COMMERCIAL_ARTIFACTORY_USERNAME ${R}
-      COMMERCIAL_ARTIFACTORY_PASSWORD: ${D}${L} secrets.COMMERCIAL_ARTIFACTORY_PASSWORD ${R}
-      DOCKERHUB_USERNAME: ${D}${L} secrets.DOCKERHUB_USERNAME ${R}
-      DOCKERHUB_TOKEN: ${D}${L} secrets.DOCKERHUB_TOKEN ${R}
-WORKFLOW_EOF
+        jobs:
+          deploy:
+            uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
+            with:
+              branches: EXPR_inputs.branches_EXPR
+              runs_on: ubuntu22-2-8
+            secrets:
+              ARTIFACTORY_USERNAME: EXPR_secrets.ARTIFACTORY_USERNAME_EXPR
+              ARTIFACTORY_PASSWORD: EXPR_secrets.ARTIFACTORY_PASSWORD_EXPR
+              COMMERCIAL_ARTIFACTORY_USERNAME: EXPR_secrets.COMMERCIAL_ARTIFACTORY_USERNAME_EXPR
+              COMMERCIAL_ARTIFACTORY_PASSWORD: EXPR_secrets.COMMERCIAL_ARTIFACTORY_PASSWORD_EXPR
+              DOCKERHUB_USERNAME: EXPR_secrets.DOCKERHUB_USERNAME_EXPR
+              DOCKERHUB_TOKEN: EXPR_secrets.DOCKERHUB_TOKEN_EXPR
+        WORKFLOW_EOF
+
+        # Strip the 8 leading spaces introduced by the heredoc indentation,
+        # then substitute placeholders with real GitHub Actions expressions.
+        sed -i \
+          -e 's/^        //' \
+          -e "s|RELEASE_BRANCH_PLACEHOLDER|${BRANCH}|g" \
+          -e "s|EXPR_\(.*\)_EXPR|${D}${L} \1 ${R}|g" \
+          .github/workflows/ci-release.yml
 
         echo "Generated .github/workflows/ci-release.yml"
 
