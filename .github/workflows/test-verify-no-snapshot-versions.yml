@@ -28,7 +28,7 @@ jobs:
           cache-dependency-path: .github/actions/verify-no-snapshot-versions/package.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run unit tests
         run: npm test
@@ -145,7 +145,7 @@ jobs:
           cache-dependency-path: .github/actions/verify-no-snapshot-versions/package.json
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Rebuild dist
         run: npm run build
