@@ -60,9 +60,9 @@ runs:
         # trigger-branch-ci dispatches this file in preference to ci.yml so the
         # original ci.yml never needs to be modified.
         #
-        # D/L/R build the ${{ }} delimiter character-by-character so the GitHub
-        # Actions YAML template parser never sees a literal "${{" in this file
-        # (composite actions cannot access the secrets context at parse time).
+        # D/L/R split the GitHub Actions expression delimiter into three bash
+        # variables so the template parser never sees a literal dollar-brace-brace
+        # in this file (composite actions cannot access the secrets context).
         D='$' L='{{' R='}}'
 
         mkdir -p .github/workflows
