@@ -130,7 +130,9 @@ jobs:
           if [[ "${{ runner.debug }}" == "1" ]]; then
             MAVEN_FLAGS="-X"
           fi
-          echo "MAVEN_FLAGS=$MAVEN_FLAGS" >> $GITHUB_ENV
+          echo "MAVEN_FLAGS=$MAVEN_FLAGS"     >> $GITHUB_ENV
+          echo "MAVEN_SETTINGS="             >> $GITHUB_ENV
+          echo "MAVEN_DEPLOY_FLAGS="         >> $GITHUB_ENV
 
       - name: Set build configuration
         run: |
@@ -171,19 +173,33 @@ jobs:
             echo "ARTIFACTORY_PASSWORD=${{ secrets.ARTIFACTORY_PASSWORD }}" >> $GITHUB_ENV
           fi
 
+      - name: Configure release CI settings
+        run: |
+          # When release-ci-settings.xml is present (commercial OSS release branches),
+          # use it as the Maven settings file and override the snapshot deployment
+          # repository so that snapshots are published to commercial Broadcom Artifactory
+          # without any pom.xml changes.  MAVEN_SETTINGS and MAVEN_DEPLOY_FLAGS are
+          # already initialised to empty strings in the 'Set Maven flags' step so this
+          # step is a no-op for all other builds.
+          if [[ -f "release-ci-settings.xml" ]]; then
+            echo "MAVEN_SETTINGS=--settings release-ci-settings.xml" >> $GITHUB_ENV
+            echo "MAVEN_DEPLOY_FLAGS=-DaltSnapshotDeploymentRepository=spring-commercial-snapshot::default::https://usw1.packages.broadcom.com/artifactory/spring-enterprise-maven-dev-local" >> $GITHUB_ENV
+            echo "release-ci-settings.xml detected — commercial release CI settings applied."
+          fi
+
       - name: Build
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'false' }}
         run: |
           # Run Maven install for non-deploying JDK versions (no docs profile needed)
           echo "Building without deployment"
-          ./mvnw clean install -Pspring -B -U $MAVEN_FLAGS
+          ./mvnw clean install -Pspring -B -U $MAVEN_FLAGS $MAVEN_SETTINGS
 
       - name: Build and deploy
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
         run: |
           # Run Maven deploy for the designated JDK version (always includes docs profile)
           echo "Building with docs profile and deploying artifacts"
-          ./mvnw clean deploy -Pdocs,deploy,spring -B -U $MAVEN_FLAGS
+          ./mvnw clean deploy -Pdocs,deploy,spring -B -U $MAVEN_FLAGS $MAVEN_SETTINGS $MAVEN_DEPLOY_FLAGS
 
       - name: Custom build command
         if: ${{ inputs.custom_build_command != '' }}

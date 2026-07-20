@@ -1,0 +1,132 @@
+name: 'Add Commercial Release Files'
+description: >
+  Adds ci-release.yml and release-ci-settings.xml to a commercial OSS release
+  branch.  These two files replace all source-code modifications that were
+  previously committed during initialization (pom.xml repo changes, distribution
+  management changes, ci.yml edits).  Both files are deleted by
+  spring-release-train-project-ready before the release is finalised, so they
+  never appear in the OSS repo history.
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Commercial repository to add files to (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'Commercial release branch to add files to (e.g. release/5.0.3)'
+    required: true
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+  commit-message:
+    description: 'Commit message'
+    required: false
+    default: 'Add commercial release CI files [skip actions]'
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Add ci-release.yml and release-ci-settings.xml
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        REPO="${{ inputs.repository }}"
+        BRANCH="${{ inputs.branch }}"
+
+        echo "=== Add Commercial Release Files ==="
+        echo "Repository: $REPO"
+        echo "Branch:     $BRANCH"
+        echo ""
+
+        git clone --single-branch --branch "$BRANCH" \
+          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" _commercial_files_repo
+
+        cd _commercial_files_repo
+
+        git config user.name "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        # ── ci-release.yml ───────────────────────────────────────────────────────
+        # Generates a dedicated CI workflow for this commercial release branch.
+        # trigger-branch-ci dispatches this file in preference to ci.yml so the
+        # original ci.yml never needs to be modified.
+        mkdir -p .github/workflows
+        cat > .github/workflows/ci-release.yml << WORKFLOW_EOF
+        name: Spring Cloud CI Job (Commercial Release Branch)
+
+        on:
+          workflow_dispatch:
+            inputs:
+              branches:
+                description: "Which branch should be built (can be a comma-separated list of branches)"
+                required: true
+                default: '${BRANCH}'
+                type: string
+          push:
+            branches:
+              - ${BRANCH}
+
+        permissions:
+          actions: write
+          contents: read
+
+        jobs:
+          deploy:
+            uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
+            with:
+              branches: \${{ inputs.branches }}
+              runs_on: ubuntu22-2-8
+            secrets:
+              ARTIFACTORY_USERNAME: \${{ secrets.ARTIFACTORY_USERNAME }}
+              ARTIFACTORY_PASSWORD: \${{ secrets.ARTIFACTORY_PASSWORD }}
+              COMMERCIAL_ARTIFACTORY_USERNAME: \${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+              COMMERCIAL_ARTIFACTORY_PASSWORD: \${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+              DOCKERHUB_USERNAME: \${{ secrets.DOCKERHUB_USERNAME }}
+              DOCKERHUB_TOKEN: \${{ secrets.DOCKERHUB_TOKEN }}
+        WORKFLOW_EOF
+
+        # Remove leading whitespace introduced by the heredoc indentation
+        sed -i 's/^        //' .github/workflows/ci-release.yml
+
+        echo "Generated .github/workflows/ci-release.yml"
+
+        # ── release-ci-settings.xml ──────────────────────────────────────────────
+        # Copies the canonical commercial Maven settings template from the
+        # spring-cloud-github-actions workspace into the release branch root.
+        # deploy.yml uses --settings release-ci-settings.xml when this file is
+        # present, adding commercial repos via the 'spring' profile without any
+        # pom.xml changes.
+        SETTINGS_TEMPLATE="${GITHUB_WORKSPACE}/config/release-ci-settings.xml"
+        if [[ ! -f "$SETTINGS_TEMPLATE" ]]; then
+          echo "ERROR: $SETTINGS_TEMPLATE not found in spring-cloud-github-actions workspace."
+          exit 1
+        fi
+        cp "$SETTINGS_TEMPLATE" release-ci-settings.xml
+        echo "Copied config/release-ci-settings.xml → release-ci-settings.xml"
+
+        # ── Commit and push ──────────────────────────────────────────────────────
+        git add .github/workflows/ci-release.yml release-ci-settings.xml
+
+        if git diff --cached --quiet; then
+          echo "Files are already present and identical — nothing to commit."
+          exit 0
+        fi
+
+        git commit -m "${{ inputs.commit-message }}"
+        git push origin "$BRANCH"
+
+        echo ""
+        echo "Commercial release files committed to '${BRANCH}'."
+
+branding:
+  icon: 'package'
+  color: 'blue'

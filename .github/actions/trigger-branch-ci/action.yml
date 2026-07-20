@@ -31,13 +31,15 @@ runs:
 
         echo "$BRANCHES" | jq -r '.[]' | while read -r BRANCH; do
           echo "Dispatching CI for branch: $BRANCH"
-          if gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+          if gh workflow run ci-release.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
+            echo "Dispatched ci-release.yml for $BRANCH"
+          elif gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
             echo "Dispatched ci.yml for $BRANCH"
           elif gh workflow run ci.yaml --repo "$REPO" --ref "$BRANCH" 2>/dev/null; then
             echo "Dispatched ci.yaml for $BRANCH"
           else
-            echo "ERROR: Could not dispatch ci.yml or ci.yaml on branch $BRANCH"
-            echo "Ensure the workflow file exists on that branch and has 'workflow_dispatch' as a trigger"
+            echo "ERROR: Could not dispatch ci-release.yml, ci.yml, or ci.yaml on branch $BRANCH"
+            echo "Ensure a CI workflow file exists on that branch and has 'workflow_dispatch' as a trigger"
             exit 1
           fi
         done

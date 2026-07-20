@@ -138,30 +138,8 @@ jobs:
         with:
           ref: ${{ inputs.sha || github.sha }}
 
-      - name: Update CI and PR workflows for release branch
-        uses: ./.github/actions/update-oss-workflows-to-commercial
-        with:
-          repository: ${{ needs.derive.outputs.commercial_repo }}
-          branch:     ${{ needs.derive.outputs.commercial_branch }}
-          token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
-
-      - name: Copy .settings.xml from commercial default branch
-        uses: ./.github/actions/copy-settings-xml
-        with:
-          repository:    ${{ needs.derive.outputs.commercial_repo }}
-          target-branch: ${{ needs.derive.outputs.commercial_branch }}
-          token:         ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
-
-      - name: Replace OSS repositories with commercial repos (and add snapshot repo)
-        uses: ./.github/actions/update-commercial-repositories
-        with:
-          repository:       ${{ needs.derive.outputs.commercial_repo }}
-          branch:           ${{ needs.derive.outputs.commercial_branch }}
-          add-snapshot-repo: 'true'
-          token:            ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
-
-      - name: Update distribution management for commercial repo
-        uses: ./.github/actions/update-distribution-management
+      - name: Add commercial release CI files
+        uses: ./.github/actions/add-commercial-release-files
         with:
           repository: ${{ needs.derive.outputs.commercial_repo }}
           branch:     ${{ needs.derive.outputs.commercial_branch }}

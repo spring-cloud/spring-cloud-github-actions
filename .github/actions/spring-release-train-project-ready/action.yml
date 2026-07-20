@@ -105,7 +105,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.project }}
       run: |
-        for workflow in "ci.yml" "ci.yaml" "pr.yml" "pr.yaml"; do
+        for workflow in "ci.yml" "ci.yaml" "pr.yml" "pr.yaml" "ci-release.yml"; do
           if [[ -f ".github/workflows/${workflow}" ]]; then
             git rm ".github/workflows/${workflow}"
             echo "Staged .github/workflows/${workflow} for deletion."
@@ -113,6 +113,12 @@ runs:
             echo ".github/workflows/${workflow} not found — skipping."
           fi
         done
+        if [[ -f "release-ci-settings.xml" ]]; then
+          git rm "release-ci-settings.xml"
+          echo "Staged release-ci-settings.xml for deletion."
+        else
+          echo "release-ci-settings.xml not found — skipping."
+        fi
 
     - name: Verify no snapshot versions
       uses: ./.github/actions/verify-no-snapshot-versions
