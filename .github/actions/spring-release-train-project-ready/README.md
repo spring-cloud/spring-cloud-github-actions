@@ -9,7 +9,7 @@ This action orchestrates the steps required to mark a Spring Cloud project as re
 1. **Checkout** the `release/<project-version>` branch of `spring-cloud/<project>`
 2. **Update versions** using the `update-project-versions` action, resolving all dependency versions from the jenkins-releaser-config properties file for the given release train
 3. **Verify** that no pre-release versions (`-SNAPSHOT`, `-RC*`, `-M*`) remain in any Maven or Gradle build file
-4. **Commit and push** the version changes (if any) with the message `"Updating to release versions"`
+4. **Commit and push** the version changes (if any) with the message `"Release <project-version>"`
 5. **Trigger** the `release-train-ready.yml` workflow on the project's release branch
 
 If version verification fails (step 3), the action stops immediately — no commit, push, or workflow dispatch occurs.
