@@ -1,10 +1,10 @@
-name: Join Release Train
+name: Create Commercial Release Branch
 
 on:
   workflow_dispatch:
     inputs:
       project:
-        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config or spring-cloud-config-commercial)'
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config-commercial)'
         required: true
         type: string
       branch:
@@ -24,7 +24,7 @@ on:
   workflow_call:
     inputs:
       project:
-        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config or spring-cloud-config-commercial)'
+        description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config-commercial)'
         required: true
         type: string
       branch:
