@@ -1,4 +1,4 @@
-name: Create Hotfix Branch
+name: Create Hotfix Release Branch
 
 # Creates a commercial hotfix release branch directly from an OSS tag.
 #

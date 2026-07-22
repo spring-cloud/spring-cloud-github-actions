@@ -56,7 +56,7 @@ When the `ensure-workflows` step needs to generate `release-train-join.yml` and 
 This is useful if you need to ensure a specific version of the build/test action logic is deployed to the new branch:
 
 ```bash
-gh workflow run create-hotfix-branch.yml \
+gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
   -f oss_tag=v5.0.1 \
   -f spring_release_train=2026.1 \
@@ -68,7 +68,7 @@ gh workflow run create-hotfix-branch.yml \
 ### Manual dispatch (simplest — auto-computes everything)
 
 ```bash
-gh workflow run create-hotfix-branch.yml \
+gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
   -f oss_tag=v5.0.1 \
   -f spring_release_train=2026.1
@@ -79,7 +79,7 @@ This creates `spring-cloud/spring-cloud-foo-commercial` branch `release/5.0.1.1`
 ### With an explicit project version
 
 ```bash
-gh workflow run create-hotfix-branch.yml \
+gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
   -f oss_tag=v5.0.1 \
   -f spring_release_train=2026.1 \
@@ -89,7 +89,7 @@ gh workflow run create-hotfix-branch.yml \
 ### With dependency versions from a release train
 
 ```bash
-gh workflow run create-hotfix-branch.yml \
+gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
   -f oss_tag=v5.0.1 \
   -f spring_release_train=2026.1 \
@@ -99,7 +99,7 @@ gh workflow run create-hotfix-branch.yml \
 ### With explicit dependency versions (no release train lookup)
 
 ```bash
-gh workflow run create-hotfix-branch.yml \
+gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
   -f oss_tag=v5.0.1 \
   -f spring_release_train=2026.1 \
@@ -111,7 +111,7 @@ gh workflow run create-hotfix-branch.yml \
 ```yaml
 jobs:
   hotfix:
-    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/create-hotfix-branch.yml@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/create-hotfix-release-branch.yml@main
     with:
       oss_repo: spring-cloud-foo
       oss_tag: v5.0.1

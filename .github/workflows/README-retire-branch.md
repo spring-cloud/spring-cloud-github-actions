@@ -105,4 +105,4 @@ GitHub will reject any push attempts to it.
 ## Related workflows
 
 - [`create-commercial-branch.yml`](README-create-commercial-branch.md) — creates a new commercial branch
-- [`create-hotfix-branch.yml`](README-create-hotfix-branch.md) — creates a hotfix branch from an OSS tag
+- [`create-hotfix-release-branch.yml`](README-create-hotfix-branch.md) — creates a hotfix branch from an OSS tag

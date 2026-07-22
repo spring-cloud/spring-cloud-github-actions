@@ -2,7 +2,7 @@
 
 Composite action that copies release-train action files, runs the [github-actions-workflow-generator](https://github.com/spring-io/github-actions-workflow-generator) against a specific repository branch, and commits any changes.
 
-Used by both [`run-github-actions-workflow-generator.yml`](../../workflows/run-github-actions-workflow-generator.README.md) (via a matrix) and [`create-hotfix-branch.yml`](../../workflows/README-create-hotfix-branch.md) (for on-demand generation of a single branch).
+Used by both [`run-github-actions-workflow-generator.yml`](../../workflows/run-github-actions-workflow-generator.README.md) (via a matrix) and [`create-hotfix-release-branch.yml`](../../workflows/README-create-hotfix-branch.md) (for on-demand generation of a single branch).
 
 ## What It Does
 
