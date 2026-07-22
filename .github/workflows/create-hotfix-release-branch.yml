@@ -364,11 +364,16 @@ jobs:
           fi
           exit $watch_exit_code
 
+  # Collapse all [skip actions] initialization commits into a single commit and
+  # force push it (without [skip actions]) so the hotfix branch starts from one
+  # clean snapshot and CI is triggered now that the branch is fully initialised.
+  # The branch is an orphan (no OSS history to preserve), so the entire history
+  # is rewritten to a single root commit.
   trigger-ci:
     needs: [derive, trigger-release-train-join]
     runs-on: ubuntu-latest
     steps:
-      - name: Push empty commit to trigger CI
+      - name: Squash initialization commits and push to trigger CI
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
@@ -382,6 +387,16 @@ jobs:
           cd _trigger_repo
           git config user.name  "Spring Builds"
           git config user.email "svc.spring-builds@broadcom.com"
-          git commit --allow-empty -m "Initialize hotfix branch"
-          git push origin "$BRANCH"
-          echo "Empty commit pushed to trigger CI on ${COMMERCIAL_REPO}@${BRANCH}."
+
+          # Capture the current remote tip so the force push is guarded against a
+          # concurrent update to the branch.
+          REMOTE_SHA="$(git rev-parse HEAD)"
+
+          # Create a fresh single-commit history from the current tree. The orphan
+          # checkout keeps the working tree and index, so committing captures the
+          # fully initialised branch content as one root commit.
+          git checkout --orphan _squashed
+          git commit -m "Initialize hotfix branch"
+          git push --force-with-lease="${BRANCH}:${REMOTE_SHA}" \
+            origin "HEAD:refs/heads/${BRANCH}"
+          echo "Squashed initialization commits into a single commit on ${COMMERCIAL_REPO}@${BRANCH}."

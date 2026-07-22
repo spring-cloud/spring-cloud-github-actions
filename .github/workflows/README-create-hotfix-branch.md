@@ -10,7 +10,7 @@ Creates a commercial hotfix release branch directly from an OSS tag, applies all
 4. **Stamps the project version** — updates the project version in `pom.xml`, `gradle.properties`, and `build.gradle` files to `<current-version>.1-SNAPSHOT` (e.g. `5.0.1` → `5.0.1.1-SNAPSHOT`). Optionally updates dependency versions at the same time.
 5. **Ensures required workflows** — checks that `release-train-join.yml` and `release-train-ready.yml` are present on the new branch. If either is missing, runs the workflow generator for that single branch to create them (see [Workflow generator SHA](#workflow-generator-sha)).
 6. **Triggers release-train-join** — dispatches `release-train-join.yml` in the commercial repo and waits for it to complete. This step is skipped when `trigger_release_train_join` is set to `false`; the branch is still fully created and initialised.
-7. **Triggers CI** — pushes an empty commit to the new branch to start CI now that the branch is fully initialised.
+7. **Triggers CI** — squashes all `[skip actions]` initialisation commits into a single root commit and force pushes it (without `[skip actions]`) to start CI now that the branch is fully initialised.
 
 ## Inputs
 
