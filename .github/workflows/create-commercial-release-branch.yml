@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: ''
+      trigger-release-train-join:
+        description: 'Join the Spring release train after the branch is prepared. Uncheck to opt out.'
+        required: false
+        type: boolean
+        default: true
 
   workflow_call:
     inputs:
@@ -35,6 +40,11 @@ on:
         description: 'Spring release train to join (e.g. 2025.09)'
         required: true
         type: string
+      trigger-release-train-join:
+        description: 'Join the Spring release train after the branch is prepared. Set to false to opt out.'
+        required: false
+        type: boolean
+        default: true
     secrets:
       token:
         description: 'GitHub token with access to the project repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
@@ -183,7 +193,10 @@ jobs:
           commercial-branch: release/${{ steps.setup.outputs.release-version }}
           token:             ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
+      # Dispatch release-train-join.yml in the commercial repo and wait for it,
+      # unless the trigger-release-train-join input is set to false to opt out.
       - name: Trigger release-train-join workflow and wait
+        if: ${{ inputs['trigger-release-train-join'] }}
         env:
           GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |

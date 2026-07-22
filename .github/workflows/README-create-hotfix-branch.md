@@ -1,6 +1,6 @@
 # create-hotfix-branch
 
-Creates a commercial hotfix release branch directly from an OSS tag, applies all standard commercial branch initialisation steps, stamps the project version to a hotfix snapshot, ensures required release-train workflows are present, and triggers `release-train-join` in the commercial repo.
+Creates a commercial hotfix release branch directly from an OSS tag, applies all standard commercial branch initialisation steps, stamps the project version to a hotfix snapshot, ensures required release-train workflows are present, and (by default) triggers `release-train-join` in the commercial repo.
 
 ## What it does
 
@@ -9,7 +9,7 @@ Creates a commercial hotfix release branch directly from an OSS tag, applies all
 3. **Creates a milestone** — creates a milestone in the commercial repo for the hotfix version if one does not already exist.
 4. **Stamps the project version** — updates the project version in `pom.xml`, `gradle.properties`, and `build.gradle` files to `<current-version>.1-SNAPSHOT` (e.g. `5.0.1` → `5.0.1.1-SNAPSHOT`). Optionally updates dependency versions at the same time.
 5. **Ensures required workflows** — checks that `release-train-join.yml` and `release-train-ready.yml` are present on the new branch. If either is missing, runs the workflow generator for that single branch to create them (see [Workflow generator SHA](#workflow-generator-sha)).
-6. **Triggers release-train-join** — dispatches `release-train-join.yml` in the commercial repo and waits for it to complete.
+6. **Triggers release-train-join** — dispatches `release-train-join.yml` in the commercial repo and waits for it to complete. This step is skipped when `trigger_release_train_join` is set to `false`; the branch is still fully created and initialised.
 7. **Triggers CI** — pushes an empty commit to the new branch to start CI now that the branch is fully initialised.
 
 ## Inputs
@@ -23,6 +23,7 @@ Creates a commercial hotfix release branch directly from an OSS tag, applies all
 | `release_train_version` | no | — | Release train version (e.g. `2025.1.2` or `2025.1.2.1-snapshot`). When supplied, all dependency version properties are updated from the Spring Cloud release train. Mutually exclusive with `versions`. |
 | `versions` | no | — | JSON map of dependency versions to apply directly (e.g. `{"spring-boot":"3.3.0","spring-cloud-commons":"4.1.1"}`). Mutually exclusive with `release_train_version`. |
 | `sha` | no | Triggering commit | Commit SHA of this repo to copy release-train action files from when the workflow generator runs. See [Workflow generator SHA](#workflow-generator-sha). |
+| `trigger_release_train_join` | no | `true` | Whether to dispatch `release-train-join.yml` in the commercial repo after the branch is prepared. Set to `false` to create and initialise the branch without joining the release train. |
 
 When called as a reusable workflow (`workflow_call`), a `token` secret can also be supplied; if omitted the `GH_ACTIONS_REPO_TOKEN` organisation secret is used.
 
@@ -106,6 +107,18 @@ gh workflow run create-hotfix-release-branch.yml \
   -f versions='{"spring-boot":"3.3.5","spring-cloud-commons":"4.1.2"}'
 ```
 
+### Without triggering release-train-join
+
+Create and initialise the branch but opt out of joining the release train:
+
+```bash
+gh workflow run create-hotfix-release-branch.yml \
+  -f oss_repo=spring-cloud-foo \
+  -f oss_tag=v5.0.1 \
+  -f spring_release_train=2026.1 \
+  -f trigger_release_train_join=false
+```
+
 ### As a reusable workflow
 
 ```yaml
@@ -117,6 +130,7 @@ jobs:
       oss_tag: v5.0.1
       spring_release_train: '2026.1'
       release_train_version: '2025.1.2'
+      trigger_release_train_join: true
     secrets:
       token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 ```

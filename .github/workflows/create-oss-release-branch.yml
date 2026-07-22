@@ -23,6 +23,7 @@ name: Create OSS Release Branch
 #   - A milestone is created in the OSS repo
 #   - release-train-join.yml and release-train-ready.yml are ensured in the branch
 #   - release-train-join.yml is triggered with deployment-destination=Maven Central
+#     (unless the trigger_release_train_join input is set to false to opt out)
 #   - A final empty commit is pushed to trigger CI
 
 on:
@@ -45,6 +46,11 @@ on:
         required: false
         type: string
         default: ''
+      trigger_release_train_join:
+        description: 'Join the Spring release train after the branch is prepared. Uncheck to opt out.'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -263,6 +269,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger release-train-join workflow and wait
+        if: ${{ inputs.trigger_release_train_join }}
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
