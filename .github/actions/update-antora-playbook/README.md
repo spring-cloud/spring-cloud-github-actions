@@ -16,12 +16,18 @@ by the `operation` input (`add` by default, or `remove`).
    - `operation: remove` — removes the branch (no-op if not present).
 4. **Adjusts tag patterns** in `content.sources[].tags` so that release tags
    from the new branch are matched (**add only** — `remove` leaves tags
-   untouched):
+   untouched). First it builds a representative release tag for the branch and
+   tests it against the existing patterns with the same glob engine Antora uses
+   ([picomatch](https://www.npmjs.com/package/picomatch)); if an existing
+   pattern already matches, **no tag change is made**. This avoids appending
+   redundant entries when the playbook uses a broad expression the range logic
+   below doesn't recognise. Only when the representative tag is _not_ already
+   covered does it fall back to:
 
-   | Branch form | Expected tags | Strategy |
+   | Branch form | Representative tag | Strategy when not covered |
    |---|---|---|
-   | `X.Y.x` (standard) | `vX.Y.0`, `vX.Y.1`, `vX.Y.0-RC1`, … | Find the first positive pattern starting with `v{MIN..MAX}.`; expand the major range if `X` is outside it; expand the minor extglob `+({N..M})` if `Y` is outside it. |
-   | `X.Y.Z.x` (hotfix) | `vX.Y.Z.1`, `vX.Y.Z.2`, … | Add `vX.Y.Z.+([0-9])?(-{RC,M}*)` if no 4-part version pattern already exists. |
+   | `X.Y.x` (standard) | `vX.Y.0` | Find the first positive pattern starting with `v{MIN..MAX}.`; expand the major range if `X` is outside it, and/or expand the minor extglob `+({N..M})` if `Y` is outside it. If no range pattern exists, append `vX.+([0-9]).+([0-9])?(-{RC,M}*)`. |
+   | `X.Y.Z.x` (hotfix) | `vX.Y.Z.1` | Append `vX.Y.Z.+([0-9])?(-{RC,M}*)`. |
 
 5. **Commits and pushes** to `docs-build` only when changes were actually made.
 

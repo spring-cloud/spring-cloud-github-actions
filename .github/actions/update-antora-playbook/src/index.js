@@ -1,11 +1,12 @@
 'use strict';
 
-const core = require('@actions/core');
-const exec = require('@actions/exec');
-const fs   = require('fs');
-const path = require('path');
-const os   = require('os');
-const YAML = require('yaml');
+const core      = require('@actions/core');
+const exec      = require('@actions/exec');
+const fs        = require('fs');
+const path      = require('path');
+const os        = require('os');
+const YAML      = require('yaml');
+const picomatch = require('picomatch');
 const { Scalar } = YAML;
 
 // ── Branch parsing ────────────────────────────────────────────────────────────
@@ -70,16 +71,41 @@ function parseMinorExtglob(s, afterMajorDotPos) {
 }
 
 /**
- * Returns true when a positive tag pattern can match 4-part version strings (e.g. vX.Y.Z.N).
+ * Builds a representative release tag for a branch so it can be tested against
+ * the existing tag patterns. Standard branches produce a GA tag (vX.Y.0);
+ * hotfix branches produce a first-hotfix tag (vX.Y.Z.1).
  * Exported for unit testing.
  */
-function isFourPartPattern(s) {
-  if (s.startsWith('!')) return false;
-  if (/\?\(\./.test(s)) return true;
-  let tmp = s.replace(/\+\([^)]*\)/g, 'X');
-  tmp = tmp.replace(/\??\([^)]*\)/g, 'X');
-  tmp = tmp.replace(/\{[^}]*\}/g, 'X');
-  return (tmp.match(/\./g) || []).length >= 3;
+function representativeTag({ major, minor, patch }) {
+  return patch !== null
+    ? `v${major}.${minor}.${patch}.1`
+    : `v${major}.${minor}.0`;
+}
+
+/**
+ * Returns true when the given tag is already matched by one of the positive
+ * (non-'!') patterns in the tags sequence, using the same glob engine (picomatch)
+ * that Antora uses for refname matching. Negative ('!') patterns are exclusions
+ * and are ignored here — the question is only whether some pattern would match.
+ * Exported for unit testing.
+ */
+function tagAlreadyCovered(tagsSeq, tag) {
+  for (const item of tagsSeq.items) {
+    const pattern = String(item instanceof Scalar ? item.value : item);
+    if (pattern.startsWith('!')) continue;
+    let matched = false;
+    try {
+      matched = picomatch.isMatch(tag, pattern);
+    } catch (err) {
+      core.info(`Could not evaluate tag pattern '${pattern}': ${err.message}`);
+      matched = false;
+    }
+    if (matched) {
+      core.info(`Representative tag '${tag}' already matched by pattern '${pattern}'.`);
+      return true;
+    }
+  }
+  return false;
 }
 
 // ── Tag-pattern update logic ──────────────────────────────────────────────────
@@ -149,29 +175,39 @@ function updateStandardTags(tagsSeq, major, minor) {
     return true;
   }
 
-  // No range-based pattern found — append a generic one for this major version.
-  const newPat = `v${major}.+([0-9]).+([0-9])?(-{RC,M}*)`;
-  const sc     = new Scalar(newPat);
-  sc.type      = Scalar.QUOTE_SINGLE;
+  // No range-based pattern found — append a generic one for this major version,
+  // unless an identical pattern is already present (avoids duplicate entries when
+  // multiple branches share the same major and the fallback path is taken).
+  const newPat   = `v${major}.+([0-9]).+([0-9])?(-{RC,M}*)`;
+  const existing = tagsSeq.items.map(t => String(t instanceof Scalar ? t.value : t));
+  if (existing.includes(newPat)) {
+    core.info(`Tag pattern already present; not appending: '${newPat}'`);
+    return false;
+  }
+  const sc = new Scalar(newPat);
+  sc.type  = Scalar.QUOTE_SINGLE;
   tagsSeq.items.push(sc);
   core.info(`No range pattern found; appended: '${newPat}'`);
   return true;
 }
 
 /**
- * Ensures the tags YAMLSeq covers vMAJOR.MINOR.PATCH.N tags for a hotfix branch.
- * Appends a new 4-part pattern unless one already exists. Returns true when modified.
+ * Ensures the tags YAMLSeq covers vMAJOR.MINOR.PATCH.N tags for a hotfix branch
+ * by appending a dedicated 4-part pattern. Callers gate this behind
+ * tagAlreadyCovered(), so this only appends when the branch's tags are not
+ * already matched; the exact-duplicate guard is a final safety net. Returns
+ * true when modified.
  * Exported for unit testing.
  */
 function updateHotfixTags(tagsSeq, major, minor, patch) {
-  const patterns = tagsSeq.items.map(t => String(t instanceof Scalar ? t.value : t));
-  if (patterns.some(isFourPartPattern)) {
-    core.info('Hotfix tags already covered by an existing 4-part pattern.');
+  const newPat   = `v${major}.${minor}.${patch}.+([0-9])?(-{RC,M}*)`;
+  const existing = tagsSeq.items.map(t => String(t instanceof Scalar ? t.value : t));
+  if (existing.includes(newPat)) {
+    core.info(`Hotfix tag pattern already present; not appending: '${newPat}'`);
     return false;
   }
-  const newPat = `v${major}.${minor}.${patch}.+([0-9])?(-{RC,M}*)`;
-  const sc     = new Scalar(newPat);
-  sc.type      = Scalar.QUOTE_SINGLE;
+  const sc = new Scalar(newPat);
+  sc.type  = Scalar.QUOTE_SINGLE;
   tagsSeq.items.push(sc);
   core.info(`Appended hotfix tag pattern: '${newPat}'`);
   return true;
@@ -232,11 +268,20 @@ function updatePlaybook(fileContent, branch, repoUrl = '') {
     if (!tagsSeq) {
       core.info("No 'tags' field in source entry — skipping tag update.");
     } else {
-      const { major, minor, patch } = version;
-      const tagsChanged = patch !== null
-        ? updateHotfixTags(tagsSeq, major, minor, patch)
-        : updateStandardTags(tagsSeq, major, minor);
-      if (tagsChanged) changed = true;
+      // Test a representative release tag for this branch against the existing
+      // patterns first. If an existing pattern already matches it, no tag update
+      // is needed — this avoids appending redundant patterns when the playbook
+      // uses a broad expression the range-based logic doesn't recognise.
+      const repTag = representativeTag(version);
+      if (tagAlreadyCovered(tagsSeq, repTag)) {
+        core.info(`Tags already cover '${repTag}' — no tag pattern update needed.`);
+      } else {
+        const { major, minor, patch } = version;
+        const tagsChanged = patch !== null
+          ? updateHotfixTags(tagsSeq, major, minor, patch)
+          : updateStandardTags(tagsSeq, major, minor);
+        if (tagsChanged) changed = true;
+      }
     }
   }
 
@@ -408,7 +453,8 @@ module.exports = {
   findSource,
   parseMajorRange,
   parseMinorExtglob,
-  isFourPartPattern,
+  representativeTag,
+  tagAlreadyCovered,
   updateStandardTags,
   updateHotfixTags,
   updatePlaybook,

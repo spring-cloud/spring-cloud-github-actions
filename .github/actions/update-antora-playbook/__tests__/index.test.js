@@ -12,7 +12,8 @@ const {
   findSource,
   parseMajorRange,
   parseMinorExtglob,
-  isFourPartPattern,
+  representativeTag,
+  tagAlreadyCovered,
   updateStandardTags,
   updateHotfixTags,
   updatePlaybook,
@@ -78,23 +79,50 @@ describe('parseMinorExtglob', () => {
   });
 });
 
-// ── isFourPartPattern ─────────────────────────────────────────────────────────
+// ── representativeTag ─────────────────────────────────────────────────────────
 
-describe('isFourPartPattern', () => {
-  test('detects optional 4th segment via ?(.', () => {
-    expect(isFourPartPattern("v{4..9}.+({0..9}).+({0..9})?(.+({0..9}))?(-{RC,M}*)")).toBe(true);
+describe('representativeTag', () => {
+  test('builds a GA tag for a standard branch', () => {
+    expect(representativeTag({ major: 5, minor: 2, patch: null })).toBe('v5.2.0');
+    expect(representativeTag({ major: 2026, minor: 0, patch: null })).toBe('v2026.0.0');
   });
 
-  test('detects explicit 4-part pattern', () => {
-    expect(isFourPartPattern("v5.0.1.+([0-9])?(-{RC,M}*)")).toBe(true);
+  test('builds a first-hotfix tag for a hotfix branch', () => {
+    expect(representativeTag({ major: 5, minor: 0, patch: 1 })).toBe('v5.0.1.1');
+    expect(representativeTag({ major: 2025, minor: 0, patch: 2 })).toBe('v2025.0.2.1');
+  });
+});
+
+// ── tagAlreadyCovered ─────────────────────────────────────────────────────────
+
+describe('tagAlreadyCovered', () => {
+  function makeTagsSeq(patterns) {
+    const doc = YAML.parseDocument(`tags: [${patterns.map(p => `'${p}'`).join(', ')}]`);
+    return doc.getIn(['tags']);
+  }
+
+  test('matches a tag against a broad custom pattern the range parser ignores', () => {
+    const seq = makeTagsSeq(['v20{2..9}+({3..9}).+({0..9}).+({0..9})?(.+({0..9}))?(-{RC,M}*)']);
+    expect(tagAlreadyCovered(seq, 'v2025.0.0')).toBe(true);
+    expect(tagAlreadyCovered(seq, 'v2026.0.0')).toBe(true);
+    expect(tagAlreadyCovered(seq, 'v2025.0.2.1')).toBe(true);
   });
 
-  test('returns false for standard 3-part patterns', () => {
-    expect(isFourPartPattern("v{4..9}.+({0..9}).+({0..9})?(-{RC,M}*)")).toBe(false);
+  test('returns false when no positive pattern matches', () => {
+    const seq = makeTagsSeq(['v20{2..9}+({3..9}).+({0..9}).+({0..9})?(.+({0..9}))?(-{RC,M}*)']);
+    expect(tagAlreadyCovered(seq, 'v2030.0.0')).toBe(false);
   });
 
-  test('returns false for negative patterns', () => {
-    expect(isFourPartPattern("!v4.0.+([0-9])")).toBe(false);
+  test('matches against a standard range pattern', () => {
+    const seq = makeTagsSeq(['v{4..9}.+({0..3}).+({0..9})?(-{RC,M}*)']);
+    expect(tagAlreadyCovered(seq, 'v5.2.0')).toBe(true);
+    expect(tagAlreadyCovered(seq, 'v5.5.0')).toBe(false);
+    expect(tagAlreadyCovered(seq, 'v10.0.0')).toBe(false);
+  });
+
+  test('ignores negative (exclusion) patterns', () => {
+    const seq = makeTagsSeq(['!v2023.0.0-M1']);
+    expect(tagAlreadyCovered(seq, 'v2023.0.0-M1')).toBe(false);
   });
 });
 
@@ -144,6 +172,13 @@ describe('updateStandardTags', () => {
     expect(seq.items[1].value).toContain('v5.');
   });
 
+  test('does not append a duplicate generic pattern when one already exists', () => {
+    const seq = makeTagsSeq(["!v4.0.+([0-9])", "v5.+([0-9]).+([0-9])?(-{RC,M}*)"]);
+    const changed = updateStandardTags(seq, 5, 3);
+    expect(changed).toBe(false);
+    expect(seq.items.length).toBe(2);
+  });
+
   test('preserves QUOTE_SINGLE type on updated pattern', () => {
     const seq = makeTagsSeq(["v{4..9}.+({0..3}).+({0..9})?(-{RC,M}*)"]);
     updateStandardTags(seq, 10, 0);
@@ -168,11 +203,17 @@ describe('updateHotfixTags', () => {
     expect(last).toBe("v5.0.1.+([0-9])?(-{RC,M}*)");
   });
 
-  test('returns false when a 4-part pattern already exists', () => {
-    const seq = makeTagsSeq([
-      "v{4..9}.+({0..9}).+({0..9})?(.+({0..9}))?(-{RC,M}*)",
-    ]);
+  test('appends even when a different 4-part pattern already exists (coverage is decided by the caller)', () => {
+    const seq = makeTagsSeq(["v9.9.9.+([0-9])?(-{RC,M}*)"]);
+    const changed = updateHotfixTags(seq, 5, 0, 1);
+    expect(changed).toBe(true);
+    expect(seq.items.map(i => i.value)).toContain("v5.0.1.+([0-9])?(-{RC,M}*)");
+  });
+
+  test('returns false when the exact same hotfix pattern already exists', () => {
+    const seq = makeTagsSeq(["v5.0.1.+([0-9])?(-{RC,M}*)"]);
     expect(updateHotfixTags(seq, 5, 0, 1)).toBe(false);
+    expect(seq.items.length).toBe(1);
   });
 });
 
@@ -263,6 +304,48 @@ describe('updatePlaybook', () => {
     const { changed: c2 } = updatePlaybook(output || fixtureContent, 'feature-foo', '');
     // branch added but no tag update
     expect(c2).toBe(true);
+  });
+
+  // Regression: a broad custom pattern the range parser doesn't recognise still
+  // covers the branch's tags, so no redundant tag entry should be appended.
+  const CUSTOM = [
+    'content:',
+    '  sources:',
+    '    - url: https://github.com/spring-cloud/spring-cloud-release-commercial',
+    '      branches: [2025.0.x]',
+    "      tags: ['v20{2..9}+({3..9}).+({0..9}).+({0..9})?(.+({0..9}))?(-{RC,M}*)', '!v2023.0.0-M1']",
+    '',
+  ].join('\n');
+
+  test('does not append a redundant tag pattern when a broad pattern already covers the branch', () => {
+    const { changed, output } = updatePlaybook(
+      CUSTOM, '2026.0.x',
+      'https://github.com/spring-cloud/spring-cloud-release-commercial'
+    );
+    // Branch is added, but no 'v2026...' tag pattern is appended.
+    expect(changed).toBe(true);
+    expect(output).toContain('2026.0.x');
+    expect(output).not.toContain('v2026.+([0-9])');
+  });
+
+  test('appends a tag pattern when the broad pattern does not cover the branch', () => {
+    const { changed, output } = updatePlaybook(
+      CUSTOM, '2030.0.x',
+      'https://github.com/spring-cloud/spring-cloud-release-commercial'
+    );
+    expect(changed).toBe(true);
+    expect(output).toContain('v2030.+([0-9])');
+  });
+
+  test('does not append a redundant hotfix pattern when a broad pattern covers it', () => {
+    const { changed, output } = updatePlaybook(
+      CUSTOM, '2025.0.2.x',
+      'https://github.com/spring-cloud/spring-cloud-release-commercial'
+    );
+    // v2025.0.2.1 already matches the broad 4-part-capable pattern.
+    expect(output).not.toContain('v2025.0.2.+([0-9])');
+    // The only change (if any) is the branch entry, never a tag entry.
+    if (changed) expect(output).toContain('2025.0.2.x');
   });
 });
 
