@@ -1,8 +1,9 @@
 name: 'Update Antora Playbook'
 description: >
-  Adds a new commercial branch to the Antora playbook on the docs-build branch,
-  adjusting content.sources.branches and content.sources.tags so the branch
-  and its release tags are included in documentation builds.
+  Adds or removes a commercial branch in the Antora playbook on the docs-build
+  branch. On add, adjusts content.sources.branches and content.sources.tags so
+  the branch and its release tags are included in documentation builds. On
+  remove, drops the branch from content.sources.branches (tags are left as-is).
 author: 'Spring Cloud Team'
 
 inputs:
@@ -10,8 +11,12 @@ inputs:
     description: 'Commercial repository whose docs-build branch contains the Antora playbook (format: org/repo-name)'
     required: true
   branch:
-    description: 'New commercial branch to register in the playbook'
+    description: 'Commercial branch to add to or remove from the playbook'
     required: true
+  operation:
+    description: "Whether to 'add' the branch to the playbook or 'remove' it"
+    required: false
+    default: 'add'
   token:
     description: 'GitHub token with contents: write permission on the repository'
     required: true
@@ -20,9 +25,9 @@ inputs:
     required: false
     default: 'docs-build'
   commit-message:
-    description: 'Commit message for the playbook update'
+    description: 'Commit message for the playbook update. Defaults to an operation-specific message when empty.'
     required: false
-    default: 'Updating antora playbook for new branch [skip actions]'
+    default: ''
   git-user-name:
     description: 'Git author name for the commit'
     required: false

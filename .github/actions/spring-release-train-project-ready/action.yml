@@ -3,6 +3,8 @@ description: >
   Checks out a Spring Cloud project release branch, updates dependency versions from the
   release train, verifies no pre-release versions remain, commits and pushes the changes,
   then triggers the project's release-train-ready.yml workflow and waits for it to complete.
+  Finally removes the release branch from the Antora playbook (docs-build branch) and from
+  projects.json.
 author: 'Spring Cloud Team'
 
 inputs:
@@ -160,6 +162,14 @@ runs:
           echo "Workflow run failed."
         fi
         exit $watch_exit_code
+
+    - name: Remove release branch from Antora playbook
+      uses: ./.github/actions/update-antora-playbook
+      with:
+        repository: spring-cloud/${{ inputs.project }}
+        branch: release/${{ inputs.project-version }}
+        operation: remove
+        token: ${{ inputs.token }}
 
     - name: Remove release branch from projects.json
       shell: bash

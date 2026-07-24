@@ -16,6 +16,7 @@ const {
   updateStandardTags,
   updateHotfixTags,
   updatePlaybook,
+  removeBranchFromPlaybook,
 } = require('../src/index');
 
 const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'antora-playbook.yml');
@@ -262,5 +263,76 @@ describe('updatePlaybook', () => {
     const { changed: c2 } = updatePlaybook(output || fixtureContent, 'feature-foo', '');
     // branch added but no tag update
     expect(c2).toBe(true);
+  });
+});
+
+// ── removeBranchFromPlaybook ──────────────────────────────────────────────────
+
+describe('removeBranchFromPlaybook', () => {
+  let fixtureContent;
+
+  beforeEach(() => {
+    fixtureContent = fs.readFileSync(FIXTURE_PATH, 'utf-8');
+  });
+
+  test('removes an existing branch from the matching source', () => {
+    const { changed, output } = removeBranchFromPlaybook(
+      fixtureContent, '4.3.x',
+      'https://github.com/spring-cloud/spring-cloud-config-commercial'
+    );
+    expect(changed).toBe(true);
+    // The removed branch is gone from the branches list, the others remain.
+    expect(output).not.toContain("'4.3.x'");
+    expect(output).toMatch(/branches: \[ ?main, '4\.2\.x' ?\]/);
+  });
+
+  test('is a no-op when the branch is not present', () => {
+    const { changed, output } = removeBranchFromPlaybook(
+      fixtureContent, '9.9.x',
+      'https://github.com/spring-cloud/spring-cloud-config-commercial'
+    );
+    expect(changed).toBe(false);
+    expect(output).toBe(fixtureContent);
+  });
+
+  test('leaves tags untouched when removing a branch', () => {
+    const { output } = removeBranchFromPlaybook(
+      fixtureContent, '4.3.x',
+      'https://github.com/spring-cloud/spring-cloud-config-commercial'
+    );
+    // Tag patterns are preserved exactly.
+    expect(output).toContain('v{4..9}.+({0..3}).+({0..9})?(-{RC,M}*)');
+    expect(output).toContain('!v4.0.+([0-9]).+([0-9])?(-{RC,M}*)');
+  });
+
+  test('preserves flow-style brackets on branches sequence', () => {
+    const { output } = removeBranchFromPlaybook(
+      fixtureContent, '4.3.x',
+      'https://github.com/spring-cloud/spring-cloud-config-commercial'
+    );
+    expect(output).toMatch(/branches: \[/);
+  });
+
+  test('falls back to first source when URL not found', () => {
+    const { changed, output } = removeBranchFromPlaybook(fixtureContent, '4.3.x', '');
+    expect(changed).toBe(true);
+    expect(output).not.toContain("'4.3.x'");
+    expect(output).toMatch(/branches: \[ ?main, '4\.2\.x' ?\]/);
+  });
+
+  test('handles no content.sources gracefully', () => {
+    const noSources = 'site:\n  title: Test\n';
+    const { changed } = removeBranchFromPlaybook(noSources, '4.3.x', '');
+    expect(changed).toBe(false);
+  });
+
+  test('preserves unrelated parts of the file', () => {
+    const { output } = removeBranchFromPlaybook(
+      fixtureContent, '4.3.x',
+      'https://github.com/spring-cloud/spring-cloud-config-commercial'
+    );
+    expect(output).toContain('Spring Cloud Config');
+    expect(output).toContain('ui:');
+    expect(output).toContain('ui-bundle.zip');
   });
 });

@@ -1,6 +1,6 @@
 # Spring Release Train Project Ready Action
 
-A composite GitHub Action that prepares a Spring Cloud project for release train readiness. It checks out the project's release branch, updates all dependency versions from the release train, verifies no pre-release versions remain, commits and pushes the changes, and then triggers the project's `release-train-ready.yml` workflow.
+A composite GitHub Action that prepares a Spring Cloud project for release train readiness. It checks out the project's release branch, updates all dependency versions from the release train, verifies no pre-release versions remain, commits and pushes the changes, triggers the project's `release-train-ready.yml` workflow, and then removes the release branch from the Antora playbook and `projects.json`.
 
 ## Description
 
@@ -11,6 +11,8 @@ This action orchestrates the steps required to mark a Spring Cloud project as re
 3. **Verify** that no pre-release versions (`-SNAPSHOT`, `-RC*`, `-M*`) remain in any Maven or Gradle build file
 4. **Commit and push** the version changes (if any) with the message `"Release <project-version>"`
 5. **Trigger** the `release-train-ready.yml` workflow on the project's release branch
+6. **Remove from Antora playbook** — removes `release/<project-version>` from `content.sources.branches` in the `antora-playbook.yml` on the repo's `docs-build` branch (no-op when the docs-build branch, playbook, or branch entry is absent)
+7. **Remove from projects.json** — removes the release branch from the project's `commercial` entry in this repo's `config/projects.json`
 
 If version verification fails (step 3), the action stops immediately — no commit, push, or workflow dispatch occurs.
 

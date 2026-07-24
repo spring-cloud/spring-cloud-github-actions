@@ -25897,6 +25897,51 @@ function updatePlaybook(fileContent, branch, repoUrl = '') {
   return { changed: true, output: doc.toString({ lineWidth: 0 }) };
 }
 
+/**
+ * Parses the Antora playbook content and removes the branch from the matching
+ * source's content.sources.branches list. Tag patterns are left untouched.
+ * Returns { changed: boolean, output: string }.
+ * Exported for unit testing.
+ */
+function removeBranchFromPlaybook(fileContent, branch, repoUrl = '') {
+  const doc = YAML.parseDocument(fileContent);
+
+  const contentNode = doc.getIn(['content']);
+  if (!contentNode) {
+    core.info('No content node found in playbook — nothing to remove.');
+    return { changed: false, output: fileContent };
+  }
+
+  const sourcesSeq = contentNode.get('sources');
+  if (!sourcesSeq || !sourcesSeq.items || sourcesSeq.items.length === 0) {
+    core.info('No content.sources found in playbook — nothing to remove.');
+    return { changed: false, output: fileContent };
+  }
+
+  const source = findSource(sourcesSeq, repoUrl);
+
+  const branchesSeq = source.get('branches');
+  if (!branchesSeq || !branchesSeq.items || branchesSeq.items.length === 0) {
+    core.info('No content.sources.branches found in source — nothing to remove.');
+    return { changed: false, output: fileContent };
+  }
+
+  const idx = branchesSeq.items.findIndex(
+    b => String(b instanceof Scalar ? b.value : b) === branch
+  );
+
+  if (idx === -1) {
+    core.info(`Branch '${branch}' not present in content.sources.branches — nothing to remove.`);
+    return { changed: false, output: fileContent };
+  }
+
+  branchesSeq.items.splice(idx, 1);
+  const remaining = branchesSeq.items.map(b => String(b instanceof Scalar ? b.value : b));
+  core.info(`Removed '${branch}' from content.sources.branches → [${remaining.join(', ')}]`);
+
+  return { changed: true, output: doc.toString({ lineWidth: 0 }) };
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 async function run() {
@@ -25904,15 +25949,26 @@ async function run() {
     const repository    = core.getInput('repository', { required: true });
     const branch        = core.getInput('branch',     { required: true });
     const token         = core.getInput('token',      { required: true });
+    const operation     = (core.getInput('operation') || 'add').toLowerCase();
     const docsBuildBranch = core.getInput('docs-build-branch') || 'docs-build';
-    const commitMsg     = core.getInput('commit-message') || 'Updating antora playbook for new branch';
     const gitName       = core.getInput('git-user-name')  || 'Spring Builds';
     const gitEmail      = core.getInput('git-user-email') || 'svc.spring-builds@broadcom.com';
     core.setSecret(token);
 
-    core.info('=== Update Antora Playbook ===');
+    if (operation !== 'add' && operation !== 'remove') {
+      core.setFailed(`Invalid operation '${operation}' — must be 'add' or 'remove'.`);
+      return;
+    }
+
+    const defaultCommitMsg = operation === 'remove'
+      ? 'Removing branch from antora playbook [skip actions]'
+      : 'Updating antora playbook for new branch [skip actions]';
+    const commitMsg = core.getInput('commit-message') || defaultCommitMsg;
+
+    core.info(`=== ${operation === 'remove' ? 'Remove branch from' : 'Update'} Antora Playbook ===`);
     core.info(`Repository:        ${repository}`);
-    core.info(`New branch:        ${branch}`);
+    core.info(`Branch:            ${branch}`);
+    core.info(`Operation:         ${operation}`);
     core.info(`Docs-build branch: ${docsBuildBranch}`);
     core.info('');
 
@@ -25967,7 +26023,9 @@ async function run() {
 
     const fileContent = fs.readFileSync(playbookFile, 'utf-8');
     const repoUrl     = `https://github.com/${repository}`;
-    const { changed, output } = updatePlaybook(fileContent, branch, repoUrl);
+    const { changed, output } = operation === 'remove'
+      ? removeBranchFromPlaybook(fileContent, branch, repoUrl)
+      : updatePlaybook(fileContent, branch, repoUrl);
 
     if (!changed) return;
 
@@ -25988,7 +26046,7 @@ async function run() {
     await exec.exec('git', ['-C', repoDir, 'push', 'origin', docsBuildBranch]);
 
     core.info('');
-    core.info(`Antora playbook updated on '${docsBuildBranch}'.`);
+    core.info(`Antora playbook ${operation === 'remove' ? 'branch removed' : 'updated'} on '${docsBuildBranch}'.`);
   } catch (err) {
     core.setFailed(`Action failed: ${err.message}`);
   }
@@ -26003,6 +26061,7 @@ module.exports = {
   updateStandardTags,
   updateHotfixTags,
   updatePlaybook,
+  removeBranchFromPlaybook,
 };
 
 if (require.main === require.cache[eval('__filename')]) {

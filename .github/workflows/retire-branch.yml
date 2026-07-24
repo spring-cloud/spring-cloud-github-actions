@@ -121,7 +121,21 @@ jobs:
           fi
 
       # -----------------------------------------------------------------------
-      # 3. Lock the branch via a repository ruleset so no further commits can
+      # 3. Remove the branch from the Antora playbook on the docs-build branch
+      #    so it is no longer included in documentation builds. This is a no-op
+      #    when the docs-build branch, the playbook, or the branch entry is
+      #    absent (the action guards each case internally).
+      # -----------------------------------------------------------------------
+      - name: Remove branch from Antora playbook
+        uses: ./.github/actions/update-antora-playbook
+        with:
+          repository: ${{ format('spring-cloud/{0}', inputs.repo) }}
+          branch:     ${{ inputs.branch }}
+          operation:  remove
+          token:      ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 4. Lock the branch via a repository ruleset so no further commits can
       #    be pushed to it.  All retired branches are accumulated under a single
       #    ruleset named "Retired Branch Lock" so they are easy to audit.
       # -----------------------------------------------------------------------

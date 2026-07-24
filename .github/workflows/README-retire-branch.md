@@ -10,7 +10,11 @@ Retires a branch that is no longer actively maintained by:
    `dependabot.yml` whose `target-branch` matches the retiring branch and
    commits the change to the default branch. If no entries remain after
    removal, the `dependabot.yml` file is deleted entirely.
-3. **Locking the branch** — sets `lock_branch: true` on the branch via the
+3. **Removing the branch from the Antora playbook** — removes the branch from
+   `content.sources.branches` in `antora-playbook.yml` on the repo's
+   `docs-build` branch so it is no longer included in documentation builds.
+   No-op when the docs-build branch, playbook, or branch entry is absent.
+4. **Locking the branch** — sets `lock_branch: true` on the branch via the
    GitHub Branch Protection API, preventing any further commits from being
    pushed. Existing protection rules (required checks, required reviews, etc.)
    are preserved; only `lock_branch` is added/updated.
@@ -91,6 +95,18 @@ where `dependabot.yml` is read by GitHub) and uses `yq` to delete every
 - If entries are removed and none remain → deletes the file.
 - Changes are committed with the message:
   `Remove Dependabot entries for retired branch <branch>`
+
+### Remove branch from Antora playbook
+
+Runs the [`update-antora-playbook`](../actions/update-antora-playbook/README.md)
+action with `operation: remove`, which clones the `docs-build` branch and drops
+the branch from `content.sources.branches` in `antora-playbook.yml`.
+
+- If the `docs-build` branch does not exist → emits a warning and skips.
+- If no `antora-playbook.yml` / `antora-playbook.yaml` is found → warns and skips.
+- If the branch is not present in `content.sources.branches` → logs a message
+  and skips (no commit).
+- Tag patterns are left untouched.
 
 ### Lock branch
 

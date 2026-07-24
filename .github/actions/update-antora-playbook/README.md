@@ -1,8 +1,9 @@
 # update-antora-playbook
 
-Registers a new commercial branch in the Antora playbook that lives on the
-`docs-build` branch of a commercial repository, so documentation builds
-automatically include the new branch and its release tags.
+Adds or removes a commercial branch in the Antora playbook that lives on the
+`docs-build` branch of a commercial repository, so documentation builds include
+(or stop including) the branch and its release tags. The direction is controlled
+by the `operation` input (`add` by default, or `remove`).
 
 ## What it does
 
@@ -10,10 +11,12 @@ automatically include the new branch and its release tags.
    action emits a visible warning annotation and exits without failing.
 2. **Finds `antora-playbook.yml` / `antora-playbook.yaml`** in the root of the
    `docs-build` branch — same graceful warning if absent.
-3. **Adds the branch** to `content.sources[].branches` (skips if already
-   present).
+3. **Adds or removes the branch** in `content.sources[].branches`:
+   - `operation: add` — adds the branch (skips if already present).
+   - `operation: remove` — removes the branch (no-op if not present).
 4. **Adjusts tag patterns** in `content.sources[].tags` so that release tags
-   from the new branch are matched:
+   from the new branch are matched (**add only** — `remove` leaves tags
+   untouched):
 
    | Branch form | Expected tags | Strategy |
    |---|---|---|
@@ -30,12 +33,13 @@ using the [`yaml`](https://www.npmjs.com/package/yaml) Node.js package.
 | Input | Required | Default | Description |
 |---|---|---|---|
 | `repository` | yes | — | Commercial repository in `org/repo-name` format |
-| `branch` | yes | — | New commercial branch to register |
+| `branch` | yes | — | Commercial branch to add to or remove from the playbook |
+| `operation` | no | `add` | `add` to register the branch, `remove` to drop it |
 | `token` | yes | — | GitHub token with `contents: write` on the repository |
 | `docs-build-branch` | no | `docs-build` | Branch holding the Antora playbook |
-| `commit-message` | no | `Updating antora playbook for new branch` | Commit message |
-| `git-user-name` | no | `github-actions[bot]` | Git author name |
-| `git-user-email` | no | `github-actions[bot]@users.noreply.github.com` | Git author email |
+| `commit-message` | no | operation-specific | Commit message; defaults to an add/remove-specific message when empty |
+| `git-user-name` | no | `Spring Builds` | Git author name |
+| `git-user-email` | no | `svc.spring-builds@broadcom.com` | Git author email |
 
 ## Usage
 
@@ -45,6 +49,18 @@ using the [`yaml`](https://www.npmjs.com/package/yaml) Node.js package.
   with:
     repository: spring-cloud/spring-cloud-contract-commercial
     branch: 4.3.x
+    token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+```
+
+To remove a branch (e.g. when it is retired or released), set `operation: remove`:
+
+```yaml
+- name: Remove branch from Antora playbook
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-antora-playbook@main
+  with:
+    repository: spring-cloud/spring-cloud-contract-commercial
+    branch: release/4.3.1.1
+    operation: remove
     token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 ```
 
