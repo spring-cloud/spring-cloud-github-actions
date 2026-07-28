@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: spring-cloud/spring-cloud-github-Why iactions/.github/workflows/deploy.yml@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
     with:
       branches: ${{ inputs.branches }}
       runs_on: ${{ inputs.runs_on }}

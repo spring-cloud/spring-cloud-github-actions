@@ -1,0 +1,277 @@
+name: Deploy Docs (Reusable)
+
+# Reusable workflow called by the `deploy-docs.yml` workflow that lives on the
+# `docs-build` branch of each Spring Cloud project, for both OSS and commercial
+# repositories.
+#
+# OSS vs commercial is detected automatically from the repository name via the
+# is-commercial-repo action. The only behavioral differences are:
+#   * the runner (commercial builds use a larger self-hosted runner)
+#   * the publish step (OSS rsyncs to the docs host and busts the Cloudflare
+#     cache; commercial uploads to a GCS bucket)
+#
+# See README-deploy-docs.md for full documentation.
+
+on:
+  workflow_call:
+    inputs:
+      build_refname:
+        description: 'Git refname to build (e.g. 4.3.x). Empty builds every branch and tag in the Antora playbook. Currently honored for OSS repositories only.'
+        required: false
+        type: string
+      java_version:
+        description: 'JDK version used to run Antora'
+        required: false
+        type: string
+        default: '17'
+      java_distribution:
+        description: 'The Java distribution to use for the JDK'
+        required: false
+        type: string
+        default: 'temurin'
+      runs_on:
+        description: 'Runner override. Defaults to ubuntu22-2-8 for commercial repositories and ubuntu-latest otherwise.'
+        required: false
+        type: string
+      build_command:
+        description: 'Command used to generate the site'
+        required: false
+        type: string
+        default: './mvnw --no-transfer-progress -B antora -Pdocs'
+      timeout_minutes:
+        description: 'Timeout for the Antora build step'
+        required: false
+        type: number
+        default: 60
+      context_root:
+        description: 'Context root used when busting the Cloudflare cache (OSS only). Defaults to the repository name with any -commercial suffix removed.'
+        required: false
+        type: string
+      site_path:
+        description: 'Path to the generated Antora site'
+        required: false
+        type: string
+        default: 'target/antora/site'
+      commercial_docs_host:
+        description: 'GCS bucket to publish commercial docs to. Defaults to the COMMERCIAL_DOCS_HOST repository/organization variable.'
+        required: false
+        type: string
+
+    secrets:
+      # Declared as optional so callers may either pass secrets explicitly or
+      # use `secrets: inherit`. Each repository only supplies the ones that
+      # apply to it: OSS repositories have the DOCS_*/CLOUDFLARE_* secrets,
+      # commercial repositories have the COMMERCIAL_* secrets.
+      GRADLE_ENTERPRISE_SECRET_ACCESS_KEY:
+        required: false
+      GH_ACTIONS_REPO_TOKEN:
+        description: 'Token Antora uses to clone content sources. Required when the playbook references a private repository.'
+        required: false
+      ARTIFACTORY_USERNAME:
+        required: false
+      ARTIFACTORY_PASSWORD:
+        required: false
+      COMMERCIAL_ARTIFACTORY_USERNAME:
+        required: false
+      COMMERCIAL_ARTIFACTORY_PASSWORD:
+        required: false
+      DOCS_USERNAME:
+        required: false
+      DOCS_HOST:
+        required: false
+      DOCS_SSH_KEY:
+        required: false
+      DOCS_SSH_HOST_KEY:
+        required: false
+      CLOUDFLARE_ZONE_ID:
+        required: false
+      CLOUDFLARE_CACHE_TOKEN:
+        required: false
+      COMMERCIAL_DOCS_GCP_BUCKET_JSON:
+        required: false
+
+permissions: read-all
+
+jobs:
+  setup:
+    if: github.repository_owner == 'spring-cloud'
+    runs-on: ubuntu-latest
+    outputs:
+      commercial: ${{ steps.is-commercial.outputs.commercial }}
+      base-repo-name: ${{ steps.is-commercial.outputs.base-repo-name }}
+    steps:
+      - name: Check if commercial repository
+        id: is-commercial
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/is-commercial-repo@main
+
+  deploy-docs:
+    needs: setup
+    runs-on: ${{ inputs.runs_on || (needs.setup.outputs.commercial == 'true' && 'ubuntu22-2-8' || 'ubuntu-latest') }}
+    env:
+      GRADLE_ENTERPRISE_SECRET_ACCESS_KEY: ${{ secrets.GRADLE_ENTERPRISE_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 5
+
+      - name: Set up JDK ${{ inputs.java_version }}
+        uses: actions/setup-java@v5
+        with:
+          java-version: ${{ inputs.java_version }}
+          distribution: ${{ inputs.java_distribution }}
+
+      # Restricts the Antora build to a single ref instead of rebuilding every
+      # branch and tag listed in the playbook. The partial-build-extension
+      # bundled with @springio/antora-extensions picks up BUILD_REFNAME and
+      # BUILD_VERSION from the environment.
+      - name: Set up refname build
+        if: needs.setup.outputs.commercial != 'true' && inputs.build_refname != ''
+        env:
+          BUILD_REFNAME: ${{ inputs.build_refname }}
+        run: |
+          set -euo pipefail
+
+          git fetch --depth 1 "https://github.com/${GITHUB_REPOSITORY}" "$BUILD_REFNAME"
+          echo "BUILD_REFNAME=$BUILD_REFNAME" >> "$GITHUB_ENV"
+
+          # Read the project version straight out of the fetched ref without
+          # checking it out. A module that omits <version> inherits it from its
+          # parent, so fall back to the parent version before giving up.
+          BUILD_VERSION=$(git cat-file --textconv FETCH_HEAD:pom.xml | python3 -c "
+          import sys, xml.etree.ElementTree as xml
+          ns = '{http://maven.apache.org/POM/4.0.0}'
+          root = xml.parse(sys.stdin).getroot()
+          version = root.find(ns + 'version')
+          if version is None:
+              parent = root.find(ns + 'parent')
+              version = parent.find(ns + 'version') if parent is not None else None
+          print(version.text.strip() if version is not None and version.text else '')
+          ")
+
+          if [[ -z "$BUILD_VERSION" ]]; then
+            echo "::error::Unable to determine the project version from pom.xml on ref '${BUILD_REFNAME}'"
+            exit 1
+          fi
+
+          echo "Building docs for ${BUILD_REFNAME} (version ${BUILD_VERSION})"
+          echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
+
+      # Antora reads ~/.git-credentials directly when cloning the content
+      # sources in the playbook. Only needed when a source is a private
+      # repository, so this is a no-op when no token is available.
+      - name: Setup Git Credentials for Antora
+        env:
+          GH_ACTIONS_REPO_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_ACTIONS_REPO_TOKEN}" ]]; then
+            echo "GH_ACTIONS_REPO_TOKEN is not set - Antora will clone content sources anonymously."
+            exit 0
+          fi
+
+          echo "https://${GH_ACTIONS_REPO_TOKEN}:@github.com" >> ~/.git-credentials
+          echo "Configured ~/.git-credentials for Antora."
+
+      # Only include servers we actually have credentials for. Writing an entry
+      # with a blank username would hand Maven empty credentials for a server it
+      # would otherwise contact anonymously.
+      - name: Determine Maven servers
+        id: maven-servers
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          COMMERCIAL_ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+          COMMERCIAL_ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          SERVERS='[]'
+
+          add_server() {
+            local id="$1" username="$2" password="$3"
+
+            if [[ -z "$username" ]]; then
+              echo "No credentials available for '${id}' - omitting it from settings.xml"
+              return
+            fi
+
+            echo "Adding server '${id}' to settings.xml"
+            SERVERS=$(jq -c --arg id "$id" --arg username "$username" --arg password "$password" \
+              '. + [{id: $id, username: $username, password: $password}]' <<< "$SERVERS")
+          }
+
+          add_server 'repo.spring.io' "$ARTIFACTORY_USERNAME" "$ARTIFACTORY_PASSWORD"
+          add_server 'spring-commercial-snapshot' "$COMMERCIAL_ARTIFACTORY_USERNAME" "$COMMERCIAL_ARTIFACTORY_PASSWORD"
+          add_server 'spring-commercial-release' "$COMMERCIAL_ARTIFACTORY_USERNAME" "$COMMERCIAL_ARTIFACTORY_PASSWORD"
+
+          echo "servers=$SERVERS" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Maven settings
+        if: steps.maven-servers.outputs.servers != '[]'
+        uses: s4u/maven-settings-action@894661b3ddae382f1ae8edbeab60987e08cf0788
+        with:
+          servers: ${{ steps.maven-servers.outputs.servers }}
+
+      - name: Run Antora
+        timeout-minutes: ${{ inputs.timeout_minutes }}
+        run: |
+          set -o pipefail
+          ${{ inputs.build_command }}
+
+      # Present only when the project uses the inject-collector-cache-config
+      # Antora extension.
+      - name: Copy the cache to be included in the site
+        env:
+          SITE_PATH: ${{ inputs.site_path }}
+        run: |
+          set -euo pipefail
+
+          CACHE_DIR='build/antora/inject-collector-cache-config-extension/.cache'
+
+          if [[ ! -d "$CACHE_DIR" ]]; then
+            echo "No collector cache at ${CACHE_DIR} - nothing to copy."
+            exit 0
+          fi
+
+          cp -rf "$CACHE_DIR" "${SITE_PATH}/"
+          echo "Copied ${CACHE_DIR} into ${SITE_PATH}/."
+
+      # ---------------------------------------------------------------------
+      # Publish - OSS
+      # ---------------------------------------------------------------------
+      - name: Publish Docs
+        if: needs.setup.outputs.commercial != 'true'
+        uses: spring-io/spring-doc-actions/rsync-antora-reference@v0.0.22
+        with:
+          docs-username: ${{ secrets.DOCS_USERNAME }}
+          docs-host: ${{ secrets.DOCS_HOST }}
+          docs-ssh-key: ${{ secrets.DOCS_SSH_KEY }}
+          docs-ssh-host-key: ${{ secrets.DOCS_SSH_HOST_KEY }}
+          site-path: ${{ inputs.site_path }}
+
+      - name: Bust Cloudflare Cache
+        if: needs.setup.outputs.commercial != 'true'
+        uses: spring-io/spring-doc-actions/bust-cloudflare-antora-cache@v0.0.22
+        with:
+          context-root: ${{ inputs.context_root || needs.setup.outputs.base-repo-name }}
+          cloudflare-zone-id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          cloudflare-cache-token: ${{ secrets.CLOUDFLARE_CACHE_TOKEN }}
+
+      # ---------------------------------------------------------------------
+      # Publish - commercial
+      # ---------------------------------------------------------------------
+      - name: 'Authenticate to ${{ inputs.commercial_docs_host || vars.COMMERCIAL_DOCS_HOST }}'
+        if: needs.setup.outputs.commercial == 'true'
+        uses: 'google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093' # v3.0.0
+        with:
+          credentials_json: ${{ secrets.COMMERCIAL_DOCS_GCP_BUCKET_JSON }}
+
+      - name: 'Upload to ${{ inputs.commercial_docs_host || vars.COMMERCIAL_DOCS_HOST }}'
+        if: needs.setup.outputs.commercial == 'true'
+        uses: 'google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a' # v3.0.0
+        with:
+          path: '${{ inputs.site_path }}/'
+          destination: '${{ inputs.commercial_docs_host || vars.COMMERCIAL_DOCS_HOST }}/${{ needs.setup.outputs.base-repo-name }}/reference'
+          parent: false
