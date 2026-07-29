@@ -1,0 +1,1285 @@
+name: Post Release
+
+# Performs the chores that follow a Spring Cloud release train, in order:
+#
+#   1. setup                   — read the jenkins-releaser-config properties file, validate, filter
+#   2. verify-tags             — every project version must have a v<version> tag (hard gate)
+#   3. milestones-and-releases — close the release milestone, publish the GitHub release
+#   4. next-snapshot-config    — write the next <train>-snapshot.properties file
+#   5. new-milestones          — open a milestone for each new snapshot version
+#   6. merge-back-and-update   — merge release/<version> back into .x, bump to snapshots, push
+#   7. summary                 — one report covering everything above
+#
+# Every mutating step is gated on existence rather than on any attempt to work out whether a
+# project was really part of this train. A version carried over from an earlier release already
+# has its release and a closed milestone, so those steps become no-ops on their own.
+#
+# Hotfix releases (a 4-segment release_version, e.g. 2025.1.2.1) stop after step 3: there is no
+# next snapshot train, and no branch to merge a hotfix back into.
+#
+# See README-post-release.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Spring Cloud release train version that was just released (e.g. 2025.1.2, or 2025.1.2.1 for a commercial hotfix)'
+        required: true
+        type: string
+      commercial:
+        description: 'Was this a commercial release? Ignored when projects is supplied - the -commercial suffix on the project names decides.'
+        required: false
+        type: boolean
+        default: false
+      projects:
+        description: 'Comma-separated list of projects to run against, including the -commercial suffix where applicable (e.g. spring-cloud-config,spring-cloud-build). Must be all OSS or all commercial. When empty, every project in the properties file is processed.'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run, if checked nothing is created, committed or pushed, but you can see what would happen'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      count: ${{ steps.parse.outputs.count }}
+      hotfix: ${{ steps.parse.outputs.hotfix }}
+      commercial: ${{ steps.parse.outputs.commercial }}
+      release-repo: ${{ steps.parse.outputs.release-repo }}
+      props-file: ${{ steps.parse.outputs.props-file }}
+      next-version: ${{ steps.parse.outputs.next-version }}
+      next-file: ${{ steps.parse.outputs.next-file }}
+      entries: ${{ steps.parse.outputs.entries }}
+    steps:
+      - name: Parse releaser config and build matrix
+        id: parse
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          COMMERCIAL: ${{ inputs.commercial }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const releaseVersion = (process.env.RELEASE_VERSION || '').trim();
+          const projectsRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const commercialInput = (process.env.COMMERCIAL || 'false') === 'true';
+
+          const fail = (...msg) => { for (const m of msg) console.error(m); process.exit(1); };
+
+          // Pre-release qualifiers are rejected rather than half-handled: bumping the patch of
+          // something like 2025.1.0-RC1 produces a version nobody wants, and post-release chores
+          // are not run for milestones or release candidates anyway.
+          if (!/^\d+(\.\d+){2,3}$/.test(releaseVersion)) {
+            fail(`ERROR: release_version must be a plain numeric version with 3 or 4 segments ` +
+              `(e.g. 2025.1.2 or 2025.1.2.1); got '${releaseVersion}'.`);
+          }
+
+          // A 4-segment version is a commercial hotfix: only steps 1-3 apply to it.
+          const hotfix = releaseVersion.split('.').length === 4;
+
+          // ── projects filter ─────────────────────────────────────────────────────────
+          // Commerciality comes from the names, not from the commercial input, because the
+          // names are what the caller actually typed. That derived value also selects which
+          // properties file is read, which is why a mixed list cannot be allowed: one
+          // release_version cannot address both the OSS train (2025.1.2) and the commercial
+          // one (2025.1.2.1), so a mix would silently resolve every project to a wrong version.
+          const names = projectsRaw ? projectsRaw.split(',').map(s => s.trim()) : [];
+          if (projectsRaw && names.some(n => !n)) {
+            fail('ERROR: projects contains an empty entry - check for a stray or trailing comma.');
+          }
+
+          let commercial = commercialInput;
+          if (names.length) {
+            const suffixed = names.filter(n => n.endsWith('-commercial'));
+            const unsuffixed = names.filter(n => !n.endsWith('-commercial'));
+            if (suffixed.length && unsuffixed.length) {
+              fail(
+                'ERROR: projects mixes commercial and OSS projects.',
+                `  commercial: ${suffixed.join(', ')}`,
+                `  oss:        ${unsuffixed.join(', ')}`,
+                'A run targets one release train, so every project must be the same type.');
+            }
+            commercial = suffixed.length > 0;
+            if (commercial !== commercialInput) {
+              console.log(`Note: the commercial input (${commercialInput}) is ignored when ` +
+                `projects is supplied; derived commercial=${commercial} from the project names.`);
+            }
+          }
+
+          const releaseRepo = commercial
+            ? 'spring-cloud/spring-cloud-release-commercial'
+            : 'spring-cloud/spring-cloud-release';
+          const propsFile = releaseVersion.replace(/\./g, '_') + '.properties';
+
+          // ── read the properties file ────────────────────────────────────────────────
+          console.log(`Reading ${propsFile} from ${releaseRepo}@jenkins-releaser-config...`);
+          let content;
+          try {
+            const b64 = execFileSync('gh', ['api',
+              `repos/${releaseRepo}/contents/${propsFile}?ref=jenkins-releaser-config`,
+              '--jq', '.content'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+            content = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+          } catch (err) {
+            fail(`ERROR: could not read ${propsFile} from ${releaseRepo}@jenkins-releaser-config.`,
+              'Check that release_version matches a properties file on that branch, and that the',
+              'token has read access to the repository.');
+          }
+
+          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
+          const entries = [];
+          for (const line of content.split('\n')) {
+            const m = line.match(ENTRY_RE);
+            if (m) entries.push({ key: m[1].trim(), version: m[2].trim() });
+          }
+          if (!entries.length) {
+            fail(`ERROR: ${propsFile} contains no releaser.fixed-versions[...] entries.`);
+          }
+          console.log(`Found ${entries.length} version entries.`);
+
+          // spring-boot lives in the properties file but is not a Spring Cloud repository, so it
+          // has no tag, milestone or release of ours. It is still bumped in the snapshot file.
+          const NON_REPO_KEYS = new Set(['spring-boot']);
+
+          let wanted = null;
+          if (names.length) {
+            wanted = new Set(names.map(n => n.replace(/-commercial$/, '')));
+            const known = new Set(entries.map(e => e.key));
+            const unknown = [...wanted].filter(k => !known.has(k));
+            if (unknown.length) {
+              fail(`ERROR: not found in ${propsFile}: ${unknown.join(', ')}`,
+                `Known projects: ${[...known].sort().join(', ')}`);
+            }
+            const nonRepo = [...wanted].filter(k => NON_REPO_KEYS.has(k));
+            if (nonRepo.length) {
+              fail(`ERROR: ${nonRepo.join(', ')} is not a Spring Cloud project repository ` +
+                'and cannot be targeted directly.');
+            }
+          }
+
+          const matrix = entries
+            .filter(e => !NON_REPO_KEYS.has(e.key))
+            .filter(e => !wanted || wanted.has(e.key))
+            .map(e => ({
+              project: e.key,
+              repo: commercial ? `spring-cloud/${e.key}-commercial` : `spring-cloud/${e.key}`,
+              ossRepo: `spring-cloud/${e.key}`,
+              version: e.version,
+              tag: `v${e.version}`,
+            }))
+            .sort((a, b) => a.project.localeCompare(b.project));
+
+          // ── next snapshot train version ─────────────────────────────────────────────
+          const bump = v => {
+            const parts = v.split('.');
+            const last = parts[parts.length - 1];
+            if (!/^\d+$/.test(last)) return null;
+            parts[parts.length - 1] = String(Number(last) + 1);
+            return parts.join('.');
+          };
+
+          let nextVersion = '';
+          let nextFile = '';
+          if (!hotfix) {
+            const unbumpable = entries.filter(e => bump(e.version) === null);
+            if (unbumpable.length) {
+              fail('ERROR: these versions do not end in a numeric segment and cannot be bumped:',
+                ...unbumpable.map(e => `  ${e.key}=${e.version}`));
+            }
+            nextVersion = bump(releaseVersion);
+            nextFile = nextVersion.replace(/\./g, '_') + '-snapshot.properties';
+          }
+
+          console.log('');
+          console.log(`commercial:      ${commercial}`);
+          console.log(`hotfix:          ${hotfix}`);
+          console.log(`release repo:    ${releaseRepo}`);
+          console.log(`properties file: ${propsFile}`);
+          if (!hotfix) console.log(`next snapshot:   ${nextVersion} (${nextFile})`);
+          console.log('');
+          console.log(`Projects to process: ${matrix.length}`);
+          for (const e of matrix) console.log(`  ${e.repo} @ ${e.tag}`);
+
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `matrix=${JSON.stringify({ include: matrix })}\n`);
+          fs.appendFileSync(out, `count=${matrix.length}\n`);
+          fs.appendFileSync(out, `hotfix=${hotfix}\n`);
+          fs.appendFileSync(out, `commercial=${commercial}\n`);
+          fs.appendFileSync(out, `release-repo=${releaseRepo}\n`);
+          fs.appendFileSync(out, `props-file=${propsFile}\n`);
+          fs.appendFileSync(out, `next-version=${nextVersion}\n`);
+          fs.appendFileSync(out, `next-file=${nextFile}\n`);
+          fs.appendFileSync(out, `entries=${JSON.stringify(entries)}\n`);
+          JSEOF
+
+  # ── Hard gate ────────────────────────────────────────────────────────────────────────
+  # One job rather than a matrix so an incomplete release produces a single consolidated
+  # failure naming every missing tag, instead of N separately-red matrix legs.
+  verify-tags:
+    name: Verify Tags
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.verify.outputs.matrix }}
+    steps:
+      - name: Verify a tag exists for every project version
+        id: verify
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          MATRIX: ${{ needs.setup.outputs.matrix }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const entries = JSON.parse(process.env.MATRIX).include;
+          const commercial = process.env.COMMERCIAL === 'true';
+
+          // matching-refs returns an array, so an exact comparison is required: a plain
+          // git/refs/tags/v5.0.2 lookup also prefix-matches v5.0.20.
+          const tagExists = (repo, tag) => {
+            try {
+              const refs = execFileSync('gh', ['api',
+                `repos/${repo}/git/matching-refs/tags/${tag}`, '--jq', '.[].ref'],
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              return refs.split('\n').map(r => r.trim()).includes(`refs/tags/${tag}`);
+            } catch (err) {
+              return false;
+            }
+          };
+
+          const resolved = [];
+          const missing = [];
+
+          for (const e of entries) {
+            if (tagExists(e.repo, e.tag)) {
+              console.log(`✓ ${e.repo} ${e.tag}`);
+              resolved.push({ ...e, resolvedIn: commercial ? 'commercial' : 'oss' });
+              continue;
+            }
+
+            // A commercial project with no tag of its own has had no commercial release since
+            // the last OSS one - its properties entry carries the plain OSS version (e.g.
+            // spring-cloud-bus=5.0.2 in 2025_1_2_1.properties). The OSS tag satisfies the gate,
+            // but there is nothing in the commercial repo to attach a release to.
+            if (commercial && tagExists(e.ossRepo, e.tag)) {
+              console.log(`✓ ${e.ossRepo} ${e.tag} (no commercial tag - OSS fallback)`);
+              resolved.push({ ...e, resolvedIn: 'oss-fallback' });
+              continue;
+            }
+
+            console.log(`✗ ${e.repo} ${e.tag} - MISSING`);
+            missing.push(e);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include: resolved })}\n`);
+
+          if (missing.length) {
+            console.error('');
+            console.error(`ERROR: ${missing.length} tag(s) do not exist:`);
+            for (const e of missing) {
+              const where = commercial ? `${e.repo} or ${e.ossRepo}` : e.repo;
+              console.error(`  ${e.tag} (${e.project}) - not found in ${where}`);
+            }
+            console.error('');
+            console.error('The release is not complete. Nothing else has been touched.');
+            process.exit(1);
+          }
+
+          console.log('');
+          console.log(`All ${resolved.length} tags verified.`);
+          JSEOF
+
+  milestones-and-releases:
+    name: "Milestone + Release — ${{ matrix.project }}"
+    needs: [setup, verify-tags]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.verify-tags.outputs.matrix) }}
+    steps:
+      - name: Close milestone and create release
+        id: run
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          VERSION: ${{ matrix.version }}
+          TAG: ${{ matrix.tag }}
+          RESOLVED_IN: ${{ matrix.resolvedIn }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+          ENTRIES: ${{ needs.setup.outputs.entries }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const project = process.env.PROJECT;
+          const repo = process.env.REPO;
+          const version = process.env.VERSION;
+          const tag = process.env.TAG;
+          const resolvedIn = process.env.RESOLVED_IN;
+          const commercial = process.env.COMMERCIAL === 'true';
+          const dryRun = process.env.DRY_RUN === 'true';
+          const entries = JSON.parse(process.env.ENTRIES);
+
+          const gh = (args, input) => execFileSync('gh', args,
+            { encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] });
+
+          // ── a. close the milestone ──────────────────────────────────────────────────
+          // Milestone titles are bare version numbers, no v prefix - the same lookup the
+          // create-milestone action does. Never fails the job: a version carried over from an
+          // earlier train already has a closed milestone, and some projects have none at all.
+          let milestone = 'not-found';
+          try {
+            const list = JSON.parse(gh(['api', `repos/${repo}/milestones?state=all&per_page=100`]));
+            const found = list.find(m => m.title === version);
+            if (!found) {
+              console.log(`Milestone '${version}' not found in ${repo}.`);
+            } else if (found.state === 'closed') {
+              console.log(`Milestone '${version}' (#${found.number}) is already closed.`);
+              milestone = 'already-closed';
+            } else if (dryRun) {
+              console.log(`[dry run] would close milestone '${version}' (#${found.number}).`);
+              milestone = 'would-close';
+            } else {
+              gh(['api', `repos/${repo}/milestones/${found.number}`,
+                '--method', 'PATCH', '--field', 'state=closed']);
+              console.log(`Closed milestone '${version}' (#${found.number}).`);
+              milestone = 'closed';
+            }
+          } catch (err) {
+            console.log(`Could not read milestones for ${repo}: ${err.message}`);
+            milestone = 'error';
+          }
+
+          // ── b. create the release ───────────────────────────────────────────────────
+          const createRelease = () => {
+            if (resolvedIn === 'oss-fallback') {
+              // The tag only exists in the OSS repo, so there is nothing here to release. The
+              // OSS run of this workflow owns that release.
+              console.log(`No ${tag} in ${repo} - release skipped (satisfied by the OSS tag).`);
+              return { release: 'no-tag-oss-fallback', releaseUrl: '' };
+            }
+
+            let existing = null;
+            try {
+              existing = JSON.parse(gh(['api', `repos/${repo}/releases/tags/${tag}`]));
+            } catch (err) { /* no release yet */ }
+
+            if (existing) {
+              console.log(`Release ${tag} already exists: ${existing.html_url}`);
+              return { release: 'already-exists', releaseUrl: existing.html_url };
+            }
+
+            const generated = JSON.parse(gh(['api', `repos/${repo}/releases/generate-notes`,
+              '--method', 'POST', '--field', `tag_name=${tag}`]));
+            let body = generated.body || '';
+
+            // Commercial release notes are read by people without access to the private repo,
+            // so the PR links and contributor handles are noise. Strip them, matching what the
+            // existing commercial releases look like.
+            if (commercial) {
+              body = body.replace(/ by @\S+ in https?:\/\/\S+/g, '');
+              const kept = [];
+              let skipping = false;
+              for (const line of body.split('\n')) {
+                if (/^##\s/.test(line)) skipping = /contributors/i.test(line);
+                if (skipping) continue;
+                if (/^\*\*Full Changelog\*\*:/.test(line)) continue;
+                kept.push(line);
+              }
+              body = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+            }
+
+            // The release train's own release lists what shipped in the BOM, taken from the
+            // same properties file the rest of this workflow runs on. spring-cloud-release is
+            // left out of its own list: the hand-written bodies name a "Spring Cloud Starter
+            // Build" repository that does not exist, so including it would emit a dead link.
+            if (project === 'spring-cloud-release') {
+              const titleCase = k =>
+                k.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+              // On a commercial train some entries carry the plain OSS version because that
+              // project had no commercial release, and the commercial repo has no such tag. The
+              // link has to follow the tag that actually exists or the release body ships 404s.
+              const linkRepo = e => {
+                if (!commercial) return `spring-cloud/${e.key}`;
+                const commercialRepo = `spring-cloud/${e.key}-commercial`;
+                try {
+                  const refs = gh(['api',
+                    `repos/${commercialRepo}/git/matching-refs/tags/v${e.version}`,
+                    '--jq', '.[].ref']);
+                  if (refs.split('\n').map(r => r.trim()).includes(`refs/tags/v${e.version}`)) {
+                    return commercialRepo;
+                  }
+                } catch (err) { /* fall through to the OSS repo */ }
+                return `spring-cloud/${e.key}`;
+              };
+
+              const included = entries
+                .filter(e => e.key !== 'spring-boot' && e.key !== 'spring-cloud-release')
+                .map(e => ` - ${titleCase(e.key)} \`${e.version}\` ` +
+                  `([issues](https://github.com/${linkRepo(e)}/releases/tag/v${e.version}))`);
+              body = `## What's Included\n${included.join('\n')}\n\n${body}`;
+            }
+
+            // Release titles are inconsistent across the org and this reproduces rather than
+            // normalizes them: OSS projects use the bare version, while spring-cloud-release
+            // and every commercial repo use a v prefix.
+            const name = (commercial || project === 'spring-cloud-release') ? tag : version;
+
+            if (dryRun) {
+              console.log(`[dry run] would create release '${name}' for ${tag} in ${repo}:`);
+              console.log('---');
+              console.log(body);
+              console.log('---');
+              return { release: 'would-create', releaseUrl: '' };
+            }
+
+            // Via --input rather than repeated --field, so a body containing newlines,
+            // backticks or quotes cannot be mangled on the way through.
+            fs.writeFileSync('payload.json', JSON.stringify({ tag_name: tag, name, body }));
+            const created = JSON.parse(gh(['api', `repos/${repo}/releases`,
+              '--method', 'POST', '--input', 'payload.json']));
+            console.log(`Created release ${created.html_url}`);
+            return { release: 'created', releaseUrl: created.html_url };
+          };
+
+          let release = 'skipped';
+          let releaseUrl = '';
+          let failure = null;
+          try {
+            const result = createRelease();
+            release = result.release;
+            releaseUrl = result.releaseUrl;
+          } catch (err) {
+            console.error(`ERROR: ${err.message}`);
+            release = 'error';
+            failure = err;
+          }
+
+          // Written before exiting on failure, so a project that blew up still gets a row in
+          // the summary rather than silently vanishing from the table.
+          const safe = `${repo}`.replace(/\//g, '-');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `safe-name=${safe}\n`);
+          fs.writeFileSync(`result-milestones-${safe}.json`, JSON.stringify({
+            phase: 'milestones-and-releases',
+            project, repo, version, tag, resolvedIn, milestone, release, releaseUrl,
+          }));
+
+          if (failure) process.exit(1);
+          JSEOF
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-milestones-${{ steps.run.outputs.safe-name || matrix.project }}
+          path: result-milestones-*.json
+          if-no-files-found: ignore
+
+  next-snapshot-config:
+    name: Next Snapshot Config
+    needs: [setup, verify-tags]
+    if: needs.setup.outputs.hotfix != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.write.outputs.status }}
+      available: ${{ steps.write.outputs.available }}
+      versions: ${{ steps.write.outputs.versions }}
+    steps:
+      - name: Write the next snapshot properties file
+        id: write
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          RELEASE_REPO: ${{ needs.setup.outputs.release-repo }}
+          PROPS_FILE: ${{ needs.setup.outputs.props-file }}
+          NEXT_FILE: ${{ needs.setup.outputs.next-file }}
+          NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const releaseRepo = process.env.RELEASE_REPO;
+          const propsFile = process.env.PROPS_FILE;
+          const nextFile = process.env.NEXT_FILE;
+          const nextVersion = process.env.NEXT_VERSION;
+          const dryRun = process.env.DRY_RUN === 'true';
+          const BRANCH = 'jenkins-releaser-config';
+
+          const gh = args => execFileSync('gh', args,
+            { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+          const readFile = file => {
+            try {
+              const b64 = gh(['api',
+                `repos/${releaseRepo}/contents/${file}?ref=${BRANCH}`, '--jq', '.content']);
+              return Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+            } catch (err) { return null; }
+          };
+
+          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
+          const parse = text => {
+            const map = {};
+            for (const line of text.split('\n')) {
+              const m = line.match(ENTRY_RE);
+              if (m) map[m[1].trim()] = m[2].trim();
+            }
+            return map;
+          };
+
+          let status;
+          let content = readFile(nextFile);
+
+          if (content !== null) {
+            // Already seeded - by an earlier run of this workflow, or by hand. Read it and leave
+            // it alone. This is what lets a projects-filtered repair run work, and makes
+            // re-running a full train safe.
+            console.log(`${nextFile} already exists on ${releaseRepo}@${BRANCH} - not rewriting.`);
+            status = 'already-exists';
+          } else {
+            const source = readFile(propsFile);
+            if (source === null) {
+              console.error(`ERROR: could not re-read ${propsFile}.`);
+              process.exit(1);
+            }
+
+            const bump = v => {
+              const parts = v.split('.');
+              parts[parts.length - 1] = String(Number(parts[parts.length - 1]) + 1);
+              return parts.join('.');
+            };
+
+            // Rewrite in place so line order and any non-fixed-versions lines survive. Every
+            // entry is bumped, including spring-boot, and including projects this run is not
+            // otherwise touching - the file is train-wide and update-project-versions needs the
+            // complete map to update each project's dependency versions.
+            content = source.split('\n').map(line => {
+              const m = line.match(ENTRY_RE);
+              if (!m) return line;
+              return `releaser.fixed-versions[${m[1]}]=${bump(m[2].trim())}-SNAPSHOT`;
+            }).join('\n');
+
+            console.log(`Generated ${nextFile}:`);
+            console.log('---');
+            console.log(content);
+            console.log('---');
+
+            if (dryRun) {
+              console.log('[dry run] not committing.');
+              status = 'would-create';
+            } else {
+              fs.writeFileSync('payload.json', JSON.stringify({
+                message: `Adding ${nextVersion} snapshot versions`,
+                content: Buffer.from(content, 'utf8').toString('base64'),
+                branch: BRANCH,
+              }));
+              gh(['api', `repos/${releaseRepo}/contents/${nextFile}`,
+                '--method', 'PUT', '--input', 'payload.json']);
+              console.log(`Committed ${nextFile} to ${releaseRepo}@${BRANCH}.`);
+              status = 'created';
+            }
+          }
+
+          // update-project-versions resolves versions over raw.githubusercontent.com, which is
+          // CDN-cached, so a file committed seconds ago may not be served yet. Wait for it - but
+          // only when this job actually wrote something.
+          let available = status === 'already-exists';
+          if (status === 'created') {
+            const url = `https://raw.githubusercontent.com/${releaseRepo}/${BRANCH}/${nextFile}`;
+            console.log(`Waiting for ${url} to be served...`);
+            for (let attempt = 1; attempt <= 30; attempt++) {
+              // The commercial release repo is private, so raw needs the same bearer token
+              // update-project-versions sends.
+              const code = execFileSync('curl', ['-s', '-o', '/dev/null',
+                '-w', '%{http_code}', '-H', 'Cache-Control: no-cache',
+                '-H', `Authorization: Bearer ${process.env.GH_TOKEN}`, url],
+                { encoding: 'utf8' }).trim();
+              if (code === '200') {
+                console.log(`Served after ${attempt} attempt(s).`);
+                available = true;
+                break;
+              }
+              console.log(`Attempt ${attempt}: raw returned ${code}, waiting 10s...`);
+              execFileSync('sleep', ['10']);
+            }
+            if (!available) {
+              console.log('WARNING: the raw URL never served the new file. Version updates will ' +
+                'be skipped rather than applied from a stale file - re-run this workflow with ' +
+                'the same inputs once the CDN catches up.');
+            }
+          }
+
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `status=${status}\n`);
+          fs.appendFileSync(out, `available=${available}\n`);
+          fs.appendFileSync(out, `versions=${JSON.stringify(parse(content))}\n`);
+          fs.writeFileSync('result-snapshot-config.json', JSON.stringify({
+            phase: 'next-snapshot-config',
+            releaseRepo, nextFile, nextVersion, status, available,
+          }));
+          JSEOF
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-snapshot-config
+          path: result-snapshot-config.json
+          if-no-files-found: ignore
+
+  new-milestones:
+    name: "New Milestone — ${{ matrix.project }}"
+    needs: [setup, verify-tags, next-snapshot-config]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.verify-tags.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Done as a separate read-only step so a dry run can report what would happen. The
+      # create-milestone action performs the same check itself, so this is also what keeps the
+      # non-dry-run path idempotent for versions carried over from an earlier train.
+      - name: Resolve the new milestone title
+        id: resolve
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+        run: |
+          set -euo pipefail
+
+          TITLE=$(echo "$VERSIONS" | jq -r --arg k "$PROJECT" '.[$k] // ""' | sed 's/-SNAPSHOT$//')
+          if [[ -z "$TITLE" ]]; then
+            echo "No snapshot version for ${PROJECT} - nothing to create."
+            echo "title=" >> "$GITHUB_OUTPUT"
+            echo "exists=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New milestone title: ${TITLE}"
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+
+          # Piped through jq rather than gh's --jq, which takes no --arg. Same shape as the
+          # lookup in the create-milestone action.
+          NUMBER=$(gh api "repos/${REPO}/milestones?state=all&per_page=100" 2>/dev/null \
+            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .number' || echo "")
+          if [[ -n "$NUMBER" ]]; then
+            echo "Milestone '${TITLE}' already exists (#${NUMBER})."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create milestone
+        if: steps.resolve.outputs.exists == 'false' && inputs.dry_run != true
+        uses: ./.github/actions/create-milestone
+        with:
+          repo: ${{ matrix.repo }}
+          version: ${{ steps.resolve.outputs.title }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Record result
+        if: always()
+        id: record
+        env:
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          TITLE: ${{ steps.resolve.outputs.title }}
+          EXISTS: ${{ steps.resolve.outputs.exists }}
+          OUTCOME: ${{ steps.resolve.outcome }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          SAFE="${REPO//\//-}"
+          echo "safe-name=${SAFE}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$OUTCOME" != "success" ]]; then
+            STATUS="error"
+          elif [[ -z "${TITLE:-}" ]]; then
+            STATUS="no-version"
+          elif [[ "$EXISTS" == "true" ]]; then
+            STATUS="already-exists"
+          elif [[ "$DRY_RUN" == "true" ]]; then
+            STATUS="would-create"
+          else
+            STATUS="created"
+          fi
+
+          jq -n \
+            --arg phase "new-milestones" \
+            --arg project "$PROJECT" \
+            --arg repo "$REPO" \
+            --arg title "${TITLE:-}" \
+            --arg status "$STATUS" \
+            '{phase: $phase, project: $project, repo: $repo, title: $title, status: $status}' \
+            > "result-newmilestone-${SAFE}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-newmilestone-${{ steps.record.outputs.safe-name || matrix.project }}
+          path: result-newmilestone-*.json
+          if-no-files-found: ignore
+
+  # ── Merge back, bump versions, nudge Dependabot ──────────────────────────────────────
+  # All of these share one matrix leg per project, and one clone. That is required rather
+  # than tidy: a project whose release branch will not merge cleanly has to skip everything
+  # that follows, and per-step conditionals are the only way to express that.
+  merge-back-and-update:
+    name: "Merge Back + Bump — ${{ matrix.project }}"
+    needs: [setup, verify-tags, next-snapshot-config]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.verify-tags.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Do not persist this repository's GITHUB_TOKEN as a git extraheader; it would
+          # override the credentials baked into the target repo's remote URL below.
+          persist-credentials: false
+
+      # ── 6a. resolve the branch to work on ─────────────────────────────────────────────
+      - name: Resolve target branch
+        id: branch
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+          VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const project = process.env.PROJECT;
+          const repo = process.env.REPO;
+          const commercial = process.env.COMMERCIAL === 'true';
+          const versions = JSON.parse(process.env.VERSIONS);
+
+          const out = process.env.GITHUB_OUTPUT;
+          const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
+          const stop = (status, message) => {
+            console.log(message);
+            emit('status', status);
+            emit('branch', '');
+            process.exit(0);
+          };
+
+          const snapshot = versions[project];
+          if (!snapshot) stop('no-version', `No snapshot version for ${project}.`);
+
+          // Drop the last segment and append .x. Works for both lines: OSS 5.0.3 -> 5.0.x, and
+          // 3-part commercial 4.2.8 -> 4.2.x.
+          const plain = snapshot.replace(/-SNAPSHOT$/, '');
+          const parts = plain.split('.');
+          const target = parts.slice(0, -1).join('.') + '.x';
+
+          const branchExists = branch => {
+            try {
+              execFileSync('gh', ['api', `repos/${repo}/branches/${branch}`, '--jq', '.name'],
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              return true;
+            } catch (err) { return false; }
+          };
+
+          if (branchExists(target)) {
+            console.log(`Target branch: ${target}`);
+            emit('status', 'ok');
+            emit('branch', target);
+            process.exit(0);
+          }
+
+          // Commercial repos have no main branch at all - spring-cloud-config-commercial's
+          // default is 4.3.x - so there is no sane fallback to make.
+          if (commercial) {
+            stop('branch-not-found',
+              `ERROR: ${repo} has no ${target} branch, and commercial repos have no main to ` +
+              'fall back to. Skipping this project.');
+          }
+
+          if (!branchExists('main')) {
+            stop('branch-not-found', `ERROR: ${repo} has neither ${target} nor main.`);
+          }
+
+          // Falling back to main is only safe if main really is the line this version belongs
+          // to - otherwise we would bump an unrelated major.minor to these versions.
+          const expected = parts.slice(0, 2).join('.');
+          let pom;
+          try {
+            const b64 = execFileSync('gh', ['api',
+              `repos/${repo}/contents/pom.xml?ref=main`, '--jq', '.content'],
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+            pom = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+          } catch (err) {
+            stop('branch-not-found', `ERROR: no ${target} branch and could not read pom.xml on main.`);
+          }
+
+          // The root <version> is the project's own; fall back to <parent><version> when the
+          // root pom inherits it.
+          const withoutParent = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
+          let m = withoutParent.match(/<version>([^<]+)<\/version>/);
+          if (!m) {
+            const parent = pom.match(/<parent>[\s\S]*?<\/parent>/);
+            if (parent) m = parent[0].match(/<version>([^<]+)<\/version>/);
+          }
+          const pomVersion = m ? m[1].trim() : '';
+
+          if (!pomVersion.startsWith(`${expected}.`)) {
+            stop('version-mismatch',
+              `ERROR: ${repo} has no ${target} branch, and main is at '${pomVersion}', which is ` +
+              `not on the ${expected} line. Refusing to bump main to ${snapshot}.`);
+          }
+
+          console.log(`No ${target} branch; main is at ${pomVersion} - using main.`);
+          emit('status', 'ok');
+          emit('branch', 'main');
+          JSEOF
+
+      # ── 6b. merge release/<version> back into the .x branch ──────────────────────────
+      - name: Merge release branch back
+        id: merge
+        if: steps.branch.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          VERSION: ${{ matrix.version }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          set -uo pipefail
+
+          RELEASE_BRANCH="release/${VERSION}"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+          git clone --quiet "$REMOTE" --branch "$BRANCH" project
+          cd project
+          git config user.name "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+
+          if ! git ls-remote --exit-code --heads origin "refs/heads/${RELEASE_BRANCH}" >/dev/null 2>&1; then
+            # Expected for a version carried over from an earlier train, for an OSS-fallback
+            # entry, and for a release branch that was already merged and deleted.
+            echo "No ${RELEASE_BRANCH} branch in ${REPO} - nothing to merge."
+            echo "status=no-release-branch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --quiet origin "refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+
+          if git merge-base --is-ancestor "origin/${RELEASE_BRANCH}" HEAD; then
+            echo "${RELEASE_BRANCH} is already merged into ${BRANCH}."
+            echo "status=already-merged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge --no-edit -m "Merge ${RELEASE_BRANCH} into ${BRANCH}" "origin/${RELEASE_BRANCH}"; then
+            echo "Merged ${RELEASE_BRANCH} into ${BRANCH}."
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A conflict needs a human. Abort so the clone is left clean, and stop this project
+          # here - the version bump must not be layered on top of an unresolved merge.
+          echo "::error::Cannot merge ${RELEASE_BRANCH} into ${BRANCH} in ${REPO} without conflicts."
+          git merge --abort || true
+          echo "status=merge-conflict" >> "$GITHUB_OUTPUT"
+
+      # ── 6c. apply the new snapshot versions ──────────────────────────────────────────
+      # release-train-version rather than the explicit versions input: only that path applies
+      # project-version-substitutions, which is what maps spring-cloud-dependencies-parent to
+      # spring-cloud-build, verifierVersion to spring-cloud-contract, and so on.
+      - name: Apply new snapshot versions
+        id: bump
+        # The available check keeps a dry run honest: nothing was committed, so there is no
+        # snapshot file to resolve versions from and this is reported as skipped, not failed.
+        if: |
+          needs.next-snapshot-config.outputs.available == 'true' &&
+          (steps.merge.outputs.status == 'merged' ||
+           steps.merge.outputs.status == 'already-merged' ||
+           steps.merge.outputs.status == 'no-release-branch')
+        continue-on-error: true
+        uses: ./.github/actions/update-project-versions
+        with:
+          release-train-version: ${{ needs.setup.outputs.next-version }}-SNAPSHOT
+          commercial: ${{ needs.setup.outputs.commercial }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          directory: project
+
+      # ── 6d. one push carrying the merge commit and the version bump ──────────────────
+      - name: Commit and push
+        id: push
+        if: steps.bump.outcome == 'success'
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
+          MERGE_STATUS: ${{ steps.merge.outputs.status }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          cd project
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No version changes to commit."
+          else
+            # Deliberately no [skip actions] here, unlike most workflows in this repo: the
+            # whole point of pushing the new snapshot versions is to start CI on them.
+            git commit --quiet -m "Updating project versions to ${NEXT_VERSION}-SNAPSHOT"
+            echo "Committed the version bump."
+          fi
+
+          # Counting commits rather than diffing trees: a merge commit is worth pushing even
+          # when it happens to leave the tree identical.
+          AHEAD=$(git rev-list --count "origin/${BRANCH}..HEAD")
+          if [[ "$AHEAD" == "0" ]]; then
+            echo "Nothing to push - ${BRANCH} is already up to date."
+            echo "status=nothing-to-push" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Commits to push:"
+          git --no-pager log --oneline "origin/${BRANCH}..HEAD"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[dry run] not pushing to ${REPO}@${BRANCH}."
+            echo "status=would-push" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Merge commit and version bump go up together: one CI run, and a failure anywhere
+          # above leaves the branch untouched so the whole leg can simply be re-run.
+          git push --quiet origin "HEAD:refs/heads/${BRANCH}"
+          echo "Pushed to ${REPO}@${BRANCH}."
+          echo "status=pushed" >> "$GITHUB_OUTPUT"
+
+      # ── 6e. ask Dependabot to re-evaluate its open PRs ───────────────────────────────
+      # There is no public API to trigger a Dependabot run, so the supported route is the
+      # comment command. Dependabot re-runs and closes any PR whose bump the push above
+      # already satisfied.
+      - name: Recreate Dependabot PRs
+        id: dependabot
+        if: steps.push.outputs.status == 'pushed'
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          ENTRIES: ${{ needs.setup.outputs.entries }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const repo = process.env.REPO;
+          const branch = process.env.BRANCH;
+          const entries = JSON.parse(process.env.ENTRIES);
+
+          let prs = [];
+          try {
+            prs = JSON.parse(execFileSync('gh', ['pr', 'list',
+              '--repo', repo, '--author', 'app/dependabot', '--base', branch,
+              '--state', 'open', '--limit', '100', '--json', 'number,title'],
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+          } catch (err) {
+            console.log(`Could not list Dependabot PRs for ${repo}@${branch}: ${err.message}`);
+          }
+
+          console.log(`${prs.length} open Dependabot PR(s) against ${repo}@${branch}.`);
+
+          // Only nudge PRs that actually concern something this release moved - matched on both
+          // the project name and one of the released versions, so an unrelated bump is left be.
+          const matched = prs.filter(pr =>
+            entries.some(e => pr.title.includes(e.key) && pr.title.includes(e.version)));
+
+          let commented = 0;
+          for (const pr of matched) {
+            console.log(`#${pr.number}: ${pr.title}`);
+            try {
+              execFileSync('gh', ['pr', 'comment', String(pr.number),
+                '--repo', repo, '--body', '@dependabot recreate'],
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              commented++;
+            } catch (err) {
+              console.log(`  could not comment: ${err.message}`);
+            }
+          }
+
+          console.log(`Commented on ${commented} of ${matched.length} matching PR(s).`);
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `open=${prs.length}\n`);
+          fs.appendFileSync(out, `matched=${matched.length}\n`);
+          fs.appendFileSync(out, `commented=${commented}\n`);
+          JSEOF
+
+      - name: Record result
+        if: always()
+        id: record
+        env:
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          VERSION: ${{ matrix.version }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          BRANCH_STATUS: ${{ steps.branch.outputs.status }}
+          MERGE_STATUS: ${{ steps.merge.outputs.status }}
+          BUMP_OUTCOME: ${{ steps.bump.outcome }}
+          PUSH_STATUS: ${{ steps.push.outputs.status }}
+          DEPENDABOT_OPEN: ${{ steps.dependabot.outputs.open }}
+          DEPENDABOT_MATCHED: ${{ steps.dependabot.outputs.matched }}
+          DEPENDABOT_COMMENTED: ${{ steps.dependabot.outputs.commented }}
+        run: |
+          set -euo pipefail
+
+          SAFE="${REPO//\//-}"
+          echo "safe-name=${SAFE}" >> "$GITHUB_OUTPUT"
+
+          jq -n \
+            --arg phase "merge-back-and-update" \
+            --arg project "$PROJECT" \
+            --arg repo "$REPO" \
+            --arg version "$VERSION" \
+            --arg branch "${BRANCH:-}" \
+            --arg branchStatus "${BRANCH_STATUS:-skipped}" \
+            --arg mergeStatus "${MERGE_STATUS:-skipped}" \
+            --arg bumpOutcome "${BUMP_OUTCOME:-skipped}" \
+            --arg pushStatus "${PUSH_STATUS:-skipped}" \
+            --arg dependabotOpen "${DEPENDABOT_OPEN:-}" \
+            --arg dependabotMatched "${DEPENDABOT_MATCHED:-}" \
+            --arg dependabotCommented "${DEPENDABOT_COMMENTED:-}" \
+            '{phase: $phase, project: $project, repo: $repo, version: $version,
+              branch: $branch, branchStatus: $branchStatus, mergeStatus: $mergeStatus,
+              bumpOutcome: $bumpOutcome, pushStatus: $pushStatus,
+              dependabotOpen: $dependabotOpen, dependabotMatched: $dependabotMatched,
+              dependabotCommented: $dependabotCommented}' \
+            > "result-mergeback-${SAFE}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-mergeback-${{ steps.record.outputs.safe-name || matrix.project }}
+          path: result-mergeback-*.json
+          if-no-files-found: ignore
+
+  summary:
+    name: Summary
+    needs: [setup, verify-tags, milestones-and-releases, next-snapshot-config, new-milestones, merge-back-and-update]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+          HOTFIX: ${{ needs.setup.outputs.hotfix }}
+          NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+          const hotfix = (process.env.HOTFIX || 'false') === 'true';
+          const commercial = (process.env.COMMERCIAL || 'false') === 'true';
+          const releaseVersion = process.env.RELEASE_VERSION || '';
+          const nextVersion = process.env.NEXT_VERSION || '';
+          const filter = (process.env.PROJECTS_FILTER || '').trim();
+
+          let all = [];
+          try {
+            all = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const byPhase = p => all.filter(r => r.phase === p)
+            .sort((a, b) => (a.project || '').localeCompare(b.project || ''));
+
+          const mr = byPhase('milestones-and-releases');
+          const nm = byPhase('new-milestones');
+          const mb = byPhase('merge-back-and-update');
+          const sc = all.find(r => r.phase === 'next-snapshot-config');
+
+          const L = [];
+          L.push(dryRun ? '## Post-release summary (dry run — nothing was changed)'
+                        : '## Post-release summary');
+          L.push('');
+          L.push(`Release **${releaseVersion}** · ${commercial ? 'commercial' : 'OSS'}` +
+            (hotfix ? ' · **hotfix** (steps after the release are skipped)' : '') +
+            (filter ? ` · filtered to \`${filter}\`` : ''));
+          L.push('');
+
+          // Anything that already existed is deliberately a no-op, so "done" and "was already
+          // done" have to read differently - otherwise a run that changed nothing looks
+          // identical to one that did all the work.
+          const ICON = {
+            closed: '✅', created: '✅', pushed: '✅', merged: '✅',
+            'would-close': '🔎', 'would-create': '🔎', 'would-push': '🔎',
+            'already-closed': '➖', 'already-exists': '➖', 'already-merged': '➖',
+            'nothing-to-push': '➖', 'no-release-branch': '➖',
+            'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
+            skipped: '⏭️', 'merge-conflict': '❌', 'branch-not-found': '❌',
+            'version-mismatch': '❌', error: '❌', failure: '❌',
+          };
+          const icon = s => ICON[s] || '❔';
+
+          if (mr.length) {
+            L.push('### Milestones closed and releases published');
+            L.push('');
+            L.push('| Project | Version | Milestone | Release |');
+            L.push('|---|---|---|---|');
+            for (const r of mr) {
+              const rel = r.releaseUrl ? `[${r.release}](${r.releaseUrl})` : r.release;
+              L.push(`| \`${r.project}\` | ${r.version} | ${icon(r.milestone)} ${r.milestone} | ` +
+                `${icon(r.release)} ${rel} |`);
+            }
+            L.push('');
+          }
+
+          if (sc) {
+            L.push('### Next snapshot config');
+            L.push('');
+            L.push(`${icon(sc.status)} \`${sc.nextFile}\` on \`${sc.releaseRepo}\`` +
+              `@\`jenkins-releaser-config\` — **${sc.status}**`);
+            if (sc.status === 'already-exists') {
+              L.push('');
+              L.push('The file was already present, so it was read rather than rewritten.');
+            }
+            L.push('');
+          }
+
+          if (nm.length) {
+            L.push(`### New milestones${nextVersion ? ` for ${nextVersion}` : ''}`);
+            L.push('');
+            L.push('| Project | Milestone | Status |');
+            L.push('|---|---|---|');
+            for (const r of nm) {
+              L.push(`| \`${r.project}\` | ${r.title || '—'} | ${icon(r.status)} ${r.status} |`);
+            }
+            L.push('');
+          }
+
+          if (mb.length) {
+            L.push('### Merge back and version bump');
+            L.push('');
+            L.push('| Project | Branch | Merge | Bump | Push | Dependabot |');
+            L.push('|---|---|---|---|---|---|');
+            for (const r of mb) {
+              const branch = r.branch ? `\`${r.branch}\`` : `${icon(r.branchStatus)} ${r.branchStatus}`;
+              const dep = r.dependabotMatched
+                ? `${r.dependabotCommented}/${r.dependabotMatched} of ${r.dependabotOpen}`
+                : '—';
+              L.push(`| \`${r.project}\` | ${branch} | ${icon(r.mergeStatus)} ${r.mergeStatus} | ` +
+                `${icon(r.bumpOutcome)} ${r.bumpOutcome} | ${icon(r.pushStatus)} ${r.pushStatus} | ${dep} |`);
+            }
+            L.push('');
+          }
+
+          const blocked = mb.filter(r => r.mergeStatus === 'merge-conflict');
+          const branchFailed = mb.filter(r =>
+            r.branchStatus === 'branch-not-found' || r.branchStatus === 'version-mismatch');
+          const noMilestone = mr.filter(r => r.milestone === 'not-found');
+          const ossFallback = mr.filter(r => r.resolvedIn === 'oss-fallback');
+          const noReleaseBranch = mb.filter(r => r.mergeStatus === 'no-release-branch');
+
+          if (blocked.length) {
+            L.push('### ❌ Blocked on a manual merge');
+            L.push('');
+            L.push('These release branches could not be merged back without conflicts. The merge was');
+            L.push('aborted and nothing else was done for them — resolve each one by hand, then');
+            L.push('re-run this workflow with `projects` set to just those projects.');
+            L.push('');
+            for (const r of blocked) {
+              L.push(`- \`${r.repo}\` — merge \`release/${r.version}\` into \`${r.branch}\``);
+            }
+            L.push('');
+          }
+
+          if (branchFailed.length) {
+            L.push('### ❌ No branch to update');
+            L.push('');
+            for (const r of branchFailed) {
+              L.push(`- \`${r.repo}\` — ${r.branchStatus}`);
+            }
+            L.push('');
+          }
+
+          if (noMilestone.length) {
+            L.push('### ❔ No milestone found to close');
+            L.push('');
+            for (const r of noMilestone) L.push(`- \`${r.repo}\` — no milestone \`${r.version}\``);
+            L.push('');
+          }
+
+          if (ossFallback.length) {
+            L.push('### ⏭️ Satisfied by the OSS tag');
+            L.push('');
+            L.push('No commercial release since the last OSS one, so there is no commercial tag to');
+            L.push('attach a release to. The OSS run owns these.');
+            L.push('');
+            for (const r of ossFallback) L.push(`- \`${r.project}\` \`${r.version}\``);
+            L.push('');
+          }
+
+          if (noReleaseBranch.length) {
+            L.push('### ➖ No release branch to merge');
+            L.push('');
+            for (const r of noReleaseBranch) {
+              L.push(`- \`${r.repo}\` — no \`release/${r.version}\` branch`);
+            }
+            L.push('');
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
+          console.log(L.join('\n'));
+
+          // A blocked merge or an unusable branch means a project was left half-done, which has
+          // to be a red run rather than a green one with a note buried in the table.
+          if (blocked.length || branchFailed.length) {
+            console.error(`\n${blocked.length + branchFailed.length} project(s) need attention.`);
+            process.exit(1);
+          }
+          JSEOF
