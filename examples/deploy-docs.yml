@@ -35,5 +35,5 @@ jobs:
       # java_version: '17'
       # build_command: './mvnw --no-transfer-progress -B antora -Pdocs'
       # runs_on: 'ubuntu-latest'
-      # context_root: 'spring-cloud-gateway'
+      # context_root: 'spring-cloud-<project>'
     secrets: inherit

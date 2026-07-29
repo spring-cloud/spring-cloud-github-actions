@@ -1,0 +1,281 @@
+name: Rollout Deploy Docs Workflow
+
+# Pushes the shared deploy-docs caller (examples/deploy-docs.yml) to the
+# docs-build branch of every Spring Cloud project in config/projects.json.
+#
+# Defaults to a dry run. Set dry_run to false to actually commit and push.
+#
+# See README-rollout-deploy-docs.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names to run against (e.g. spring-cloud-build,spring-cloud-config). When empty, all projects in projects.json are processed.'
+        required: false
+        type: string
+        default: ''
+      repo_type:
+        description: 'Which repository flavors to update'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      dry_run:
+        description: 'Render and diff without committing or pushing'
+        required: false
+        type: boolean
+        default: true
+      actions_ref:
+        description: 'Ref of spring-cloud-github-actions the generated caller should point at'
+        required: false
+        type: string
+        default: 'main'
+      branch:
+        description: 'Branch holding the docs build'
+        required: false
+        type: string
+        default: 'docs-build'
+      commit_message:
+        description: 'Commit message. Keep [skip actions] unless you want each push to trigger a docs build.'
+        required: false
+        type: string
+        default: 'Use shared deploy-docs workflow [skip actions]'
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+      skipped: ${{ steps.build-matrix.outputs.skipped }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type }}
+          DOCS_BRANCH: ${{ inputs.branch }}
+        run: |
+          node - << 'JSEOF'
+          const { execFileSync } = require('child_process');
+          const fs = require('fs');
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const filter = filterRaw
+            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
+            : new Set();
+
+          const repoType = (process.env.REPO_TYPE || 'both').trim();
+          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
+          const docsBranch = (process.env.DOCS_BRANCH || 'docs-build').trim();
+
+          // Collect candidate repositories from projects.json.
+          const candidates = [];
+          for (const [projectKey, config] of Object.entries(projects)) {
+            if (projectKey === 'defaults') continue;
+            if (filter.size > 0 && !filter.has(projectKey)) continue;
+            for (const typeKey of typeKeys) {
+              if (!config[typeKey]) continue;
+              candidates.push({
+                repo: typeKey === 'commercial'
+                  ? `spring-cloud/${projectKey}-commercial`
+                  : `spring-cloud/${projectKey}`,
+                type: typeKey,
+              });
+            }
+          }
+
+          // Only keep repositories that actually have a docs build branch.
+          // Everything dropped is listed explicitly rather than silently
+          // disappearing from the matrix.
+          const entries = [];
+          const skipped = [];
+          for (const candidate of candidates) {
+            try {
+              execFileSync('gh', [
+                'api', `repos/${candidate.repo}/branches/${docsBranch}`, '--jq', '.name',
+              ], { encoding: 'utf8', stdio: 'pipe' });
+              entries.push(candidate);
+            } catch (err) {
+              skipped.push(candidate.repo);
+            }
+          }
+
+          entries.sort((a, b) => a.repo.localeCompare(b.repo));
+
+          console.log(`Repositories with a '${docsBranch}' branch: ${entries.length}`);
+          for (const entry of entries) console.log(`  ${entry.repo} (${entry.type})`);
+          if (skipped.length) {
+            console.log(`\nSkipped - no '${docsBranch}' branch (or not accessible): ${skipped.length}`);
+            for (const repo of skipped) console.log(`  ${repo}`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include: entries })}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${entries.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `skipped=${JSON.stringify(skipped)}\n`);
+          JSEOF
+
+  sync:
+    name: "Sync — ${{ matrix.repo }}"
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync deploy-docs workflow
+        id: sync
+        uses: ./.github/actions/sync-deploy-docs-workflow
+        with:
+          repository:     ${{ matrix.repo }}
+          branch:         ${{ inputs.branch }}
+          actions-ref:    ${{ inputs.actions_ref }}
+          dry-run:        ${{ inputs.dry_run }}
+          commit-message: ${{ inputs.commit_message }}
+          token:          ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Record result
+        if: always()
+        id: record
+        env:
+          REPO: ${{ matrix.repo }}
+          TYPE: ${{ matrix.type }}
+          CHANGED: ${{ steps.sync.outputs.changed }}
+          STATUS: ${{ steps.sync.outputs.status }}
+          OUTCOME: ${{ steps.sync.outcome }}
+        run: |
+          set -euo pipefail
+          safe="${REPO//\//-}"
+          echo "safe-name=${safe}" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg repo "$REPO" \
+            --arg type "$TYPE" \
+            --arg status "${STATUS:-failed}" \
+            --arg outcome "$OUTCOME" \
+            --argjson changed "${CHANGED:-false}" \
+            '{repo: $repo, type: $type, status: $status, outcome: $outcome, changed: $changed}' \
+            > "result-${safe}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ steps.record.outputs.safe-name }}
+          path: result-${{ steps.record.outputs.safe-name }}.json
+
+  summary:
+    name: Summary
+    needs: [setup, sync]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          SKIPPED: ${{ needs.setup.outputs.skipped }}
+          DOCS_BRANCH: ${{ inputs.branch }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) => a.repo.localeCompare(b.repo));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+          const icon = r => r.outcome !== 'success' ? '❌'
+            : r.status === 'unchanged' ? '➖'
+            : r.status === 'skipped-no-branch' ? '⏭️'
+            : '✅';
+
+          const lines = [];
+          lines.push(dryRun ? '## Rollout summary (dry run — nothing pushed)' : '## Rollout summary');
+          lines.push('');
+          lines.push('| | Repository | Type | Result |');
+          lines.push('|---|---|---|---|');
+          for (const r of results) {
+            lines.push(`| ${icon(r)} | \`${r.repo}\` | ${r.type} | ${r.outcome !== 'success' ? 'failed' : r.status} |`);
+          }
+          lines.push('');
+
+          const failed = results.filter(r => r.outcome !== 'success');
+          const changed = results.filter(r => r.outcome === 'success' && r.changed);
+          const unchanged = results.filter(r => r.status === 'unchanged');
+
+          lines.push(`**${results.length}** repositories processed — ` +
+            `**${changed.length}** ${dryRun ? 'would change' : 'changed'}, ` +
+            `**${unchanged.length}** already up to date, ` +
+            `**${failed.length}** failed.`);
+
+          if (failed.length) {
+            lines.push('');
+            lines.push('Failed: ' + failed.map(r => `\`${r.repo}\``).join(', '));
+          }
+
+          // Repositories dropped before the matrix was built never produce a
+          // result artifact, so carry them through from the setup job rather
+          // than leaving them buried in that job's log.
+          let skipped = [];
+          try {
+            skipped = JSON.parse(process.env.SKIPPED || '[]');
+          } catch (err) {
+            console.log(`Could not parse skipped list: ${err.message}`);
+          }
+
+          const docsBranch = process.env.DOCS_BRANCH || 'docs-build';
+          lines.push('');
+          lines.push(`### Skipped — no \`${docsBranch}\` branch`);
+          lines.push('');
+          if (skipped.length) {
+            lines.push('| | Repository |');
+            lines.push('|---|---|');
+            for (const repo of skipped.slice().sort()) lines.push(`| ⏭️ | \`${repo}\` |`);
+            lines.push('');
+            lines.push(`**${skipped.length}** repositories were not processed.`);
+          } else {
+            lines.push(`None — every repository in \`projects.json\` has a \`${docsBranch}\` branch.`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          console.log(lines.join('\n'));
+
+          if (failed.length) process.exit(1);
+          JSEOF
