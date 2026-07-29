@@ -16,7 +16,7 @@ on:
         type: string
         default: ''
       repo_type:
-        description: 'Which repository flavors to update'
+        description: 'Update commercial, oss, or both?'
         required: false
         type: choice
         default: 'both'
@@ -25,17 +25,17 @@ on:
           - oss
           - commercial
       dry_run:
-        description: 'Render and diff without committing, pushing, or enabling'
+        description: 'Dry run, if checked no changes will be committed, but you can see what would be updated'
         required: false
         type: boolean
         default: true
       enable_workflow:
-        description: 'Enable the Deploy Docs workflow where it is disabled. GitHub keys a workflow by path, so this also re-enables the same-named trigger workflow on the source branches.'
+        description: 'Enable the Deploy Docs workflow if it is disabled'
         required: false
         type: boolean
         default: true
       actions_ref:
-        description: 'Ref of spring-cloud-github-actions the generated caller should point at'
+        description: 'Tag or SHA of the shared deploy-docs workflow from this repo to use'
         required: false
         type: string
         default: 'main'
