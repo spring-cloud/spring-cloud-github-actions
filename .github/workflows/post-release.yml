@@ -100,10 +100,12 @@ jobs:
           // properties file is read, which is why a mixed list cannot be allowed: one
           // release_version cannot address both the OSS train (2025.1.2) and the commercial
           // one (2025.1.2.1), so a mix would silently resolve every project to a wrong version.
-          const names = projectsRaw ? projectsRaw.split(',').map(s => s.trim()) : [];
-          if (projectsRaw && names.some(n => !n)) {
-            fail('ERROR: projects contains an empty entry - check for a stray or trailing comma.');
-          }
+          // Empty entries are dropped, not rejected: a trailing comma has only one sensible
+          // reading, and this is how ci-status-report.yml:74 and rollout-deploy-docs.yml:84
+          // parse the same input.
+          const names = projectsRaw
+            ? projectsRaw.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
 
           let commercial = commercialInput;
           if (names.length) {

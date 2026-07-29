@@ -74,6 +74,7 @@ projects: spring-cloud-config-commercial,spring-cloud-gateway-commercial
   This is a correctness requirement rather than a convenience check: the derived type selects *which properties file is read*, and one `release_version` cannot name both the OSS train (`2025.1.2`) and the commercial one (`2025.1.2.1`). A mixed list would silently read the wrong file and resolve every project to a wrong version.
 - The properties-file key is the name with `-commercial` stripped — keys are always bare (`releaser.fixed-versions[spring-cloud-config]`) even in the commercial file.
 - A listed project that is not in the properties file fails the run, naming it and listing the known projects, rather than silently doing nothing.
+- Empty entries are dropped, so a trailing comma (`spring-cloud-config,`) is accepted — matching how [ci-status-report](README-ci-status-report.md) and [rollout-deploy-docs](README-rollout-deploy-docs.md) parse the same input.
 
 **The filter does not apply to step 4.** The snapshot properties file is train-wide and stays complete: `update-project-versions` needs the *whole* versions map to update each project's dependency versions, so a file containing only the filtered projects would produce wrong POMs. Step 4 always writes every entry; only the repo-facing steps are filtered.
 
