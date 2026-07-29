@@ -22,9 +22,13 @@ inputs:
     description: 'GitHub token with contents: write permission on the repository'
     required: true
   dry-run:
-    description: 'Render and diff the change without committing or pushing'
+    description: 'Render and diff the change without committing, pushing, or enabling'
     required: false
     default: 'false'
+  enable-workflow:
+    description: 'Enable the deploy-docs workflow if it is disabled. Note that GitHub keys a workflow by path, so this also re-enables the trigger workflow of the same name on the source branches.'
+    required: false
+    default: 'true'
   commit-message:
     description: 'Commit message. Keep [skip actions] unless you intend the push to trigger a docs build.'
     required: false
@@ -43,8 +47,11 @@ outputs:
     description: 'true if the workflow file was created or updated'
     value: ${{ steps.sync.outputs.changed }}
   status:
-    description: 'One of: created, updated, unchanged, skipped-no-branch, skipped-no-workflow-dir'
+    description: 'One of: created, updated, unchanged, skipped-no-branch'
     value: ${{ steps.sync.outputs.status }}
+  workflow-state:
+    description: 'Result of the enable step: enabled, already-active, would-enable (...), not-registered, or not-checked'
+    value: ${{ steps.sync.outputs.workflow-state }}
 
 runs:
   using: 'composite'
@@ -59,6 +66,7 @@ runs:
         TEMPLATE_PATH: ${{ inputs.template-path }}
         ACTIONS_REF: ${{ inputs.actions-ref }}
         DRY_RUN: ${{ inputs.dry-run }}
+        ENABLE_WORKFLOW: ${{ inputs.enable-workflow }}
         COMMIT_MESSAGE: ${{ inputs.commit-message }}
         GIT_USER_NAME: ${{ inputs.git-user-name }}
         GIT_USER_EMAIL: ${{ inputs.git-user-email }}
@@ -106,6 +114,7 @@ runs:
           echo "No '${BRANCH}' branch in ${REPO} - nothing to do."
           echo 'changed=false' >> "$GITHUB_OUTPUT"
           echo 'status=skipped-no-branch' >> "$GITHUB_OUTPUT"
+          echo 'workflow-state=not-checked' >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -131,35 +140,76 @@ runs:
 
         if git diff --cached --quiet; then
           echo "${TARGET_FILE} on '${BRANCH}' is already up to date."
-          echo 'changed=false' >> "$GITHUB_OUTPUT"
-          echo 'status=unchanged' >> "$GITHUB_OUTPUT"
-          exit 0
+          CHANGED='false'
+          STATUS='unchanged'
+        else
+          echo "--- diff ---"
+          git --no-pager diff --cached
+          echo "--- end diff ---"
+
+          CHANGED='true'
+
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            echo ""
+            echo "Dry run - not committing or pushing. Would have ${STATUS} ${TARGET_FILE}."
+          else
+            # The caller workflow triggers on `push` to this branch, so the
+            # commit message must keep a skip token unless a docs build is
+            # wanted.
+            if [[ "$COMMIT_MESSAGE" != *'[skip actions]'* && "$COMMIT_MESSAGE" != *'[skip ci]'* ]]; then
+              echo "::warning::Commit message has no skip token - this push will trigger a docs build in ${REPO}."
+            fi
+
+            git commit --quiet -m "$COMMIT_MESSAGE"
+            git push --quiet origin "$BRANCH"
+            echo "${TARGET_FILE} ${STATUS} on '${BRANCH}' in ${REPO}."
+          fi
         fi
 
-        echo "--- diff ---"
-        git --no-pager diff --cached
-        echo "--- end diff ---"
+        # ---------------------------------------------------------------------
+        # Enable the workflow.
+        #
+        # Runs even when the file was already up to date, since a correct file
+        # in a disabled workflow still never builds. GitHub keys a workflow by
+        # its path, so this single entity also covers the trigger workflow of
+        # the same name on the source branches.
+        # ---------------------------------------------------------------------
+        WORKFLOW_STATE='not-checked'
 
-        if [[ "$DRY_RUN" == 'true' ]]; then
-          echo ""
-          echo "Dry run - not committing or pushing. Would have ${STATUS} ${TARGET_FILE}."
-          echo 'changed=true' >> "$GITHUB_OUTPUT"
-          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
-          exit 0
+        if [[ "$ENABLE_WORKFLOW" == 'true' ]]; then
+          WORKFLOW_ID="$(gh api "repos/${REPO}/actions/workflows" --paginate \
+            --jq ".workflows[] | select(.path == \"${TARGET_FILE}\") | .id" 2>/dev/null | head -1 || true)"
+
+          if [[ -z "$WORKFLOW_ID" ]]; then
+            # A newly created file is not registered until GitHub indexes it.
+            echo "::warning::No workflow registered at ${TARGET_FILE} in ${REPO} yet - cannot check its state. Re-run the rollout to enable it."
+            WORKFLOW_STATE='not-registered'
+          else
+            CURRENT_STATE="$(gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}" --jq '.state')"
+            echo "Workflow ${WORKFLOW_ID} state: ${CURRENT_STATE}"
+
+            if [[ "$CURRENT_STATE" == 'active' ]]; then
+              WORKFLOW_STATE='already-active'
+            elif [[ "$DRY_RUN" == 'true' ]]; then
+              echo "Dry run - would enable workflow ${WORKFLOW_ID} (currently ${CURRENT_STATE})."
+              WORKFLOW_STATE="would-enable (${CURRENT_STATE})"
+            else
+              gh api -X PUT "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/enable" --silent
+              VERIFIED="$(gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}" --jq '.state')"
+              if [[ "$VERIFIED" == 'active' ]]; then
+                echo "Enabled workflow ${WORKFLOW_ID} in ${REPO} (was ${CURRENT_STATE})."
+                WORKFLOW_STATE='enabled'
+              else
+                echo "::error::Tried to enable workflow ${WORKFLOW_ID} in ${REPO} but it is still '${VERIFIED}'."
+                exit 1
+              fi
+            fi
+          fi
         fi
 
-        # The caller workflow triggers on `push` to this branch, so the commit
-        # message must keep a skip token unless a docs build is wanted.
-        if [[ "$COMMIT_MESSAGE" != *'[skip actions]'* && "$COMMIT_MESSAGE" != *'[skip ci]'* ]]; then
-          echo "::warning::Commit message has no skip token - this push will trigger a docs build in ${REPO}."
-        fi
-
-        git commit --quiet -m "$COMMIT_MESSAGE"
-        git push --quiet origin "$BRANCH"
-
-        echo "${TARGET_FILE} ${STATUS} on '${BRANCH}' in ${REPO}."
-        echo 'changed=true' >> "$GITHUB_OUTPUT"
+        echo "changed=${CHANGED}" >> "$GITHUB_OUTPUT"
         echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+        echo "workflow-state=${WORKFLOW_STATE}" >> "$GITHUB_OUTPUT"
 
 branding:
   icon: 'upload-cloud'

@@ -13,6 +13,16 @@ It:
 3. **Renders and syncs** the caller to each one via the [sync-deploy-docs-workflow](../actions/sync-deploy-docs-workflow/action.yml) action
 4. **Writes a summary table** to the job summary and fails if any repository failed
 
+## Enabling disabled workflows
+
+A correct workflow file in a disabled workflow still never builds. At the time this was written **30 of the 32 repositories had `Deploy Docs` in state `disabled_manually`** — every project except `spring-cloud-build` and `spring-cloud-build-commercial`. So the rollout enables the workflow by default (`enable_workflow`, default `true`).
+
+The enable step runs **even when the file was already up to date**, since those are independent conditions, and it re-reads the state afterwards to confirm the change took effect rather than trusting the API call.
+
+> **This has a wider blast radius than the docs build alone.** GitHub identifies a workflow by its *path*, not by branch. `.github/workflows/deploy-docs.yml` exists both on `docs-build` (the docs build) and on every source branch (the trigger that dispatches it) — and they are a single workflow entity sharing one enable/disable state. Enabling it therefore also re-enables the trigger.
+>
+> Set `enable_workflow: false` to sync the files and leave workflow state alone.
+
 ## Safety
 
 - **`dry_run` defaults to `true`.** The default run renders the file, prints a full diff per repository, and pushes nothing. Set it to `false` only once the diffs look right.
@@ -26,7 +36,8 @@ It:
 |-------|-------------|----------|------|
 | `projects` | Comma-separated project names (e.g. `spring-cloud-build,spring-cloud-config`). Empty processes every project. | No | string |
 | `repo_type` | Which flavors to update: `both`, `oss`, or `commercial` | No | choice (default: `both`) |
-| `dry_run` | Render and diff without committing or pushing | No | boolean (default: `true`) |
+| `dry_run` | Render and diff without committing, pushing, or enabling | No | boolean (default: `true`) |
+| `enable_workflow` | Enable the `Deploy Docs` workflow where it is disabled. See the section above — this also re-enables the same-named trigger workflow on the source branches. | No | boolean (default: `true`) |
 | `actions_ref` | Ref of `spring-cloud-github-actions` the generated caller points at. Useful for staging a change on a branch first. | No | string (default: `main`) |
 | `branch` | Branch holding the docs build | No | string (default: `docs-build`) |
 | `commit_message` | Commit message. Keep `[skip actions]` unless you want each push to trigger a docs build. | No | string |
@@ -55,7 +66,3 @@ Because the commit message carries `[skip actions]`, step 4 does not rebuild any
 ## Repositories covered
 
 Every project in `projects.json` with an `oss` and/or `commercial` section that has a `docs-build` branch. Projects without one — currently `spring-cloud-cloudfoundry-commercial` and `spring-cloud-sleuth-commercial`, both legacy `3.1.x`-only — are listed in the setup log and skipped.
-
-## What this does *not* cover
-
-The **trigger** `deploy-docs.yml` that lives on each source branch (`main`, `4.3.x`, …) and dispatches the docs build. It is unchanged by this rollout. OSS and commercial versions differ only in the token they use (`GITHUB_TOKEN` vs `GH_ACTIONS_REPO_TOKEN`) and an extra `contents: read` permission, so centralizing it may not pay for itself — but note that a commercial branch created from an OSS branch by [initialize-commercial-branch](initialize-commercial-branch.yml) inherits the OSS version, which is worth verifying separately.

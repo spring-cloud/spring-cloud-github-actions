@@ -25,7 +25,12 @@ on:
           - oss
           - commercial
       dry_run:
-        description: 'Render and diff without committing or pushing'
+        description: 'Render and diff without committing, pushing, or enabling'
+        required: false
+        type: boolean
+        default: true
+      enable_workflow:
+        description: 'Enable the Deploy Docs workflow where it is disabled. GitHub keys a workflow by path, so this also re-enables the same-named trigger workflow on the source branches.'
         required: false
         type: boolean
         default: true
@@ -152,12 +157,13 @@ jobs:
         id: sync
         uses: ./.github/actions/sync-deploy-docs-workflow
         with:
-          repository:     ${{ matrix.repo }}
-          branch:         ${{ inputs.branch }}
-          actions-ref:    ${{ inputs.actions_ref }}
-          dry-run:        ${{ inputs.dry_run }}
-          commit-message: ${{ inputs.commit_message }}
-          token:          ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          repository:      ${{ matrix.repo }}
+          branch:          ${{ inputs.branch }}
+          actions-ref:     ${{ inputs.actions_ref }}
+          dry-run:         ${{ inputs.dry_run }}
+          enable-workflow: ${{ inputs.enable_workflow }}
+          commit-message:  ${{ inputs.commit_message }}
+          token:           ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Record result
         if: always()
@@ -167,6 +173,7 @@ jobs:
           TYPE: ${{ matrix.type }}
           CHANGED: ${{ steps.sync.outputs.changed }}
           STATUS: ${{ steps.sync.outputs.status }}
+          WORKFLOW_STATE: ${{ steps.sync.outputs.workflow-state }}
           OUTCOME: ${{ steps.sync.outcome }}
         run: |
           set -euo pipefail
@@ -176,9 +183,10 @@ jobs:
             --arg repo "$REPO" \
             --arg type "$TYPE" \
             --arg status "${STATUS:-failed}" \
+            --arg workflowState "${WORKFLOW_STATE:-unknown}" \
             --arg outcome "$OUTCOME" \
             --argjson changed "${CHANGED:-false}" \
-            '{repo: $repo, type: $type, status: $status, outcome: $outcome, changed: $changed}' \
+            '{repo: $repo, type: $type, status: $status, workflowState: $workflowState, outcome: $outcome, changed: $changed}' \
             > "result-${safe}.json"
 
       - name: Upload result
@@ -229,21 +237,35 @@ jobs:
           const lines = [];
           lines.push(dryRun ? '## Rollout summary (dry run — nothing pushed)' : '## Rollout summary');
           lines.push('');
-          lines.push('| | Repository | Type | Result |');
-          lines.push('|---|---|---|---|');
+          lines.push('| | Repository | Type | File | Workflow |');
+          lines.push('|---|---|---|---|---|');
           for (const r of results) {
-            lines.push(`| ${icon(r)} | \`${r.repo}\` | ${r.type} | ${r.outcome !== 'success' ? 'failed' : r.status} |`);
+            const workflow = r.workflowState === 'enabled' ? '🔓 enabled'
+              : r.workflowState === 'already-active' ? 'active'
+              : r.workflowState || 'unknown';
+            lines.push(`| ${icon(r)} | \`${r.repo}\` | ${r.type} | ` +
+              `${r.outcome !== 'success' ? 'failed' : r.status} | ${workflow} |`);
           }
           lines.push('');
 
           const failed = results.filter(r => r.outcome !== 'success');
           const changed = results.filter(r => r.outcome === 'success' && r.changed);
           const unchanged = results.filter(r => r.status === 'unchanged');
+          const enabled = results.filter(r => r.workflowState === 'enabled');
+          const wouldEnable = results.filter(r => (r.workflowState || '').startsWith('would-enable'));
 
           lines.push(`**${results.length}** repositories processed — ` +
             `**${changed.length}** ${dryRun ? 'would change' : 'changed'}, ` +
             `**${unchanged.length}** already up to date, ` +
             `**${failed.length}** failed.`);
+
+          const enableCount = dryRun ? wouldEnable.length : enabled.length;
+          if (enableCount) {
+            lines.push('');
+            lines.push(`**${enableCount}** disabled workflows ${dryRun ? 'would be' : 'were'} enabled. ` +
+              'GitHub keys a workflow by path, so this also re-enables the same-named ' +
+              'trigger workflow on the source branches.');
+          }
 
           if (failed.length) {
             lines.push('');
