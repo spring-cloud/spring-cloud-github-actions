@@ -109,8 +109,33 @@ runs:
           exit 1
         fi
 
-        if ! git ls-remote --exit-code --heads \
-              "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$BRANCH" > /dev/null 2>&1; then
+        # actions/checkout writes an `http.https://github.com/.extraheader`
+        # credential into the *local* git config of the repository it checks
+        # out, and that header takes precedence over credentials embedded in a
+        # remote URL. Running from inside that checkout would authenticate
+        # every git call below as the caller's GITHUB_TOKEN rather than the
+        # token given to this action - which succeeds for public repositories
+        # and fails for private ones. Work from outside the checkout instead.
+        WORKDIR="$(mktemp -d)"
+        cd "$WORKDIR"
+
+        REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+        # Without --exit-code, ls-remote returns 0 and prints nothing when the
+        # branch is absent, so a non-zero status here means the repository was
+        # unreachable (bad or under-scoped token, network, renamed repo). Those
+        # are reported as errors rather than silently as "no branch".
+        set +e
+        HEADS="$(git ls-remote --heads "$REMOTE_URL" "refs/heads/${BRANCH}" 2>&1)"
+        LS_RC=$?
+        set -e
+
+        if [[ $LS_RC -ne 0 ]]; then
+          echo "::error::Could not read ${REPO}: ${HEADS//${GH_TOKEN}/<token>}"
+          exit 1
+        fi
+
+        if [[ -z "$HEADS" ]]; then
           echo "No '${BRANCH}' branch in ${REPO} - nothing to do."
           echo 'changed=false' >> "$GITHUB_OUTPUT"
           echo 'status=skipped-no-branch' >> "$GITHUB_OUTPUT"
@@ -118,9 +143,8 @@ runs:
           exit 0
         fi
 
-        WORKDIR="$(mktemp -d)"
         git clone --quiet --depth 1 --single-branch --branch "$BRANCH" \
-          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "${WORKDIR}/repo"
+          "$REMOTE_URL" "${WORKDIR}/repo"
 
         cd "${WORKDIR}/repo"
 
