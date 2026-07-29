@@ -39,9 +39,9 @@ The enable step runs **even when the file was already up to date**, since those 
 | `dry_run` | Render and diff without committing, pushing, or enabling | No | boolean (default: `true`) |
 | `enable_workflow` | Enable the `Deploy Docs` workflow where it is disabled. See the section above — this also re-enables the same-named trigger workflow on the source branches. | No | boolean (default: `true`) |
 | `actions_ref` | Ref of `spring-cloud-github-actions` the generated caller points at. Useful for staging a change on a branch first. | No | string (default: `main`) |
-| `branch` | Branch holding the docs build | No | string (default: `docs-build`) |
-| `commit_message` | Commit message. Keep `[skip actions]` unless you want each push to trigger a docs build. | No | string |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
+
+The docs build branch (`docs-build`) and the commit message are fixed by the [sync-deploy-docs-workflow](../actions/sync-deploy-docs-workflow/action.yml) action's defaults. Override them there if you ever need to.
 
 ## The template is the source of truth
 
@@ -50,7 +50,7 @@ The deployed file is rendered from [`examples/deploy-docs.yml`](../../examples/d
 1. Drops the example-only header comment (everything before the first `name:` line)
 2. Prepends a generated-by banner warning against editing the file directly
 3. Points the `uses:` line at `actions_ref`
-4. Points the `push:` trigger at `branch`
+4. Points the `push:` trigger at the docs build branch
 
 To change what every project gets, edit `examples/deploy-docs.yml` and re-run the rollout.
 

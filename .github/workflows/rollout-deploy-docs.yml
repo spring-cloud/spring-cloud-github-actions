@@ -39,16 +39,6 @@ on:
         required: false
         type: string
         default: 'main'
-      branch:
-        description: 'Branch holding the docs build'
-        required: false
-        type: string
-        default: 'docs-build'
-      commit_message:
-        description: 'Commit message. Keep [skip actions] unless you want each push to trigger a docs build.'
-        required: false
-        type: string
-        default: 'Use shared deploy-docs workflow [skip actions]'
       token:
         description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
@@ -81,7 +71,7 @@ jobs:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           PROJECTS_FILTER: ${{ inputs.projects }}
           REPO_TYPE: ${{ inputs.repo_type }}
-          DOCS_BRANCH: ${{ inputs.branch }}
+          DOCS_BRANCH: 'docs-build'
         run: |
           node - << 'JSEOF'
           const { execFileSync } = require('child_process');
@@ -168,11 +158,9 @@ jobs:
         uses: ./.github/actions/sync-deploy-docs-workflow
         with:
           repository:      ${{ matrix.repo }}
-          branch:          ${{ inputs.branch }}
           actions-ref:     ${{ inputs.actions_ref }}
           dry-run:         ${{ inputs.dry_run }}
           enable-workflow: ${{ inputs.enable_workflow }}
-          commit-message:  ${{ inputs.commit_message }}
           token:           ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Record result
@@ -223,7 +211,7 @@ jobs:
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           SKIPPED: ${{ needs.setup.outputs.skipped }}
-          DOCS_BRANCH: ${{ inputs.branch }}
+          DOCS_BRANCH: 'docs-build'
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
