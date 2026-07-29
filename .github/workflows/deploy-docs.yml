@@ -109,6 +109,16 @@ jobs:
     runs-on: ${{ inputs.runs_on || (needs.setup.outputs.commercial == 'true' && 'ubuntu22-2-8' || 'ubuntu-latest') }}
     env:
       GRADLE_ENTERPRISE_SECRET_ACCESS_KEY: ${{ secrets.GRADLE_ENTERPRISE_SECRET_ACCESS_KEY }}
+      # Antora's collector extension runs a *second* Maven build inside each
+      # collected tag checkout, and those checkouts ship a .mvn/maven.config
+      # that forces `--settings ${session.rootDirectory}/.settings.xml`. That
+      # file resolves credentials from the environment, so the settings.xml
+      # written to ~/.m2 below never applies to it. Export the credentials
+      # under the names those files reference.
+      ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+      ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+      COMMERCIAL_ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+      COMMERCIAL_ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
