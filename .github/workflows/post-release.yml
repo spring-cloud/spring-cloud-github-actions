@@ -905,17 +905,100 @@ jobs:
             exit 0
           fi
 
-          if git merge --no-edit -m "Merge ${RELEASE_BRANCH} into ${BRANCH}" "origin/${RELEASE_BRANCH}"; then
-            echo "Merged ${RELEASE_BRANCH} into ${BRANCH}."
-            echo "status=merged" >> "$GITHUB_OUTPUT"
-            exit 0
+          # The release branch has its CI and PR workflows deleted on purpose when it is created
+          # (see spring-release-train-project-ready), so merging it back would carry that
+          # deletion onto the maintenance branch and leave it with no CI. Keep a copy of
+          # whatever this branch has, outside the clone so the merge cannot touch it.
+          BACKUP=$(mktemp -d)
+          SAVED=()
+          for f in ci.yml ci.yaml pr.yml pr.yaml; do
+            if [[ -f ".github/workflows/${f}" ]]; then
+              cp ".github/workflows/${f}" "${BACKUP}/${f}"
+              SAVED+=("$f")
+              echo "Saved .github/workflows/${f}"
+            else
+              echo ".github/workflows/${f} not on ${BRANCH} - skipping."
+            fi
+          done
+
+          AUTO_RESOLVED=()
+          if ! git merge --no-edit -m "Merge ${RELEASE_BRANCH} into ${BRANCH}" "origin/${RELEASE_BRANCH}"; then
+            # ls-files --unmerged reads the index stages directly, so it lists modify/delete
+            # conflicts as reliably as content conflicts. Read with a loop rather than mapfile,
+            # which does not exist in bash 3.2 and so cannot be exercised outside a runner.
+            CONFLICTED=()
+            while IFS= read -r p; do
+              [[ -n "$p" ]] && CONFLICTED+=("$p")
+            done < <(git ls-files --unmerged | awk '{print $4}' | sort -u)
+            echo "Conflicting paths: ${CONFLICTED[*]:-none}"
+
+            # A conflict on a ci/pr workflow file is the predictable one: the release branch
+            # deleted the file and this branch has changed it since, so git cannot decide. The
+            # maintenance branch's version is always the one to keep, so resolve it here rather
+            # than blocking the project on a merge a human would resolve the same way.
+            REMAINING=()
+            for p in ${CONFLICTED[@]+"${CONFLICTED[@]}"}; do
+              case "$p" in
+                .github/workflows/ci.yml|.github/workflows/ci.yaml|.github/workflows/pr.yml|.github/workflows/pr.yaml)
+                  # HEAD is still the .x tip mid-merge, so HEAD:<path> is this branch's version.
+                  # Absent from HEAD means this branch had deleted it - keep it deleted.
+                  if git cat-file -e "HEAD:${p}" 2>/dev/null; then
+                    git show "HEAD:${p}" > "$p"
+                    git add "$p"
+                    echo "Auto-resolved ${p} - kept the ${BRANCH} version."
+                  else
+                    git rm -f --quiet --ignore-unmatch "$p"
+                    echo "Auto-resolved ${p} - not on ${BRANCH}, left deleted."
+                  fi
+                  AUTO_RESOLVED+=("$p")
+                  ;;
+                *)
+                  REMAINING+=("$p")
+                  ;;
+              esac
+            done
+
+            if [[ ${#REMAINING[@]} -gt 0 ]]; then
+              # Anything else needs a human. Abort so the clone is left clean, and stop this
+              # project here - the version bump must not be layered on an unresolved merge.
+              echo "::error::Cannot merge ${RELEASE_BRANCH} into ${BRANCH} in ${REPO} without conflicts."
+              git merge --abort || true
+              echo "status=merge-conflict" >> "$GITHUB_OUTPUT"
+              echo "conflicts=${REMAINING[*]}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            git commit --quiet --no-edit
+            echo "auto-resolved=${AUTO_RESOLVED[*]:-}" >> "$GITHUB_OUTPUT"
           fi
 
-          # A conflict needs a human. Abort so the clone is left clean, and stop this project
-          # here - the version bump must not be layered on top of an unresolved merge.
-          echo "::error::Cannot merge ${RELEASE_BRANCH} into ${BRANCH} in ${REPO} without conflicts."
-          git merge --abort || true
-          echo "status=merge-conflict" >> "$GITHUB_OUTPUT"
+          echo "Merged ${RELEASE_BRANCH} into ${BRANCH}."
+
+          # Restore only what the merge actually removed. A workflow file the release branch
+          # modified rather than deleted is a real change and is left alone.
+          RESTORED=()
+          if [[ ${#SAVED[@]} -gt 0 ]]; then
+            for f in "${SAVED[@]}"; do
+              if [[ ! -f ".github/workflows/${f}" ]]; then
+                mkdir -p .github/workflows
+                cp "${BACKUP}/${f}" ".github/workflows/${f}"
+                git add ".github/workflows/${f}"
+                RESTORED+=("$f")
+                echo "Restored .github/workflows/${f} - the merge removed it."
+              fi
+            done
+          fi
+
+          if [[ ${#RESTORED[@]} -gt 0 ]]; then
+            # A separate commit rather than amending the merge, so the log shows plainly that
+            # these files came back and why.
+            git commit --quiet -m "Restoring ${RESTORED[*]} removed by the ${RELEASE_BRANCH} merge"
+            echo "restored=${RESTORED[*]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "The merge removed no ci/pr workflow files - nothing to restore."
+          fi
+
+          echo "status=merged" >> "$GITHUB_OUTPUT"
 
       # ── 6c. apply the new snapshot versions ──────────────────────────────────────────
       # release-train-version rather than the explicit versions input: only that path applies
@@ -1054,6 +1137,9 @@ jobs:
           BRANCH: ${{ steps.branch.outputs.branch }}
           BRANCH_STATUS: ${{ steps.branch.outputs.status }}
           MERGE_STATUS: ${{ steps.merge.outputs.status }}
+          MERGE_RESTORED: ${{ steps.merge.outputs.restored }}
+          MERGE_AUTO_RESOLVED: ${{ steps.merge.outputs.auto-resolved }}
+          MERGE_CONFLICTS: ${{ steps.merge.outputs.conflicts }}
           BUMP_OUTCOME: ${{ steps.bump.outcome }}
           PUSH_STATUS: ${{ steps.push.outputs.status }}
           DEPENDABOT_OPEN: ${{ steps.dependabot.outputs.open }}
@@ -1073,6 +1159,9 @@ jobs:
             --arg branch "${BRANCH:-}" \
             --arg branchStatus "${BRANCH_STATUS:-skipped}" \
             --arg mergeStatus "${MERGE_STATUS:-skipped}" \
+            --arg restored "${MERGE_RESTORED:-}" \
+            --arg autoResolved "${MERGE_AUTO_RESOLVED:-}" \
+            --arg conflicts "${MERGE_CONFLICTS:-}" \
             --arg bumpOutcome "${BUMP_OUTCOME:-skipped}" \
             --arg pushStatus "${PUSH_STATUS:-skipped}" \
             --arg dependabotOpen "${DEPENDABOT_OPEN:-}" \
@@ -1080,6 +1169,7 @@ jobs:
             --arg dependabotCommented "${DEPENDABOT_COMMENTED:-}" \
             '{phase: $phase, project: $project, repo: $repo, version: $version,
               branch: $branch, branchStatus: $branchStatus, mergeStatus: $mergeStatus,
+              restored: $restored, autoResolved: $autoResolved, conflicts: $conflicts,
               bumpOutcome: $bumpOutcome, pushStatus: $pushStatus,
               dependabotOpen: $dependabotOpen, dependabotMatched: $dependabotMatched,
               dependabotCommented: $dependabotCommented}' \
@@ -1205,17 +1295,36 @@ jobs:
           if (mb.length) {
             L.push('### Merge back and version bump');
             L.push('');
-            L.push('| Project | Branch | Merge | Bump | Push | Dependabot |');
-            L.push('|---|---|---|---|---|---|');
+            L.push('| Project | Branch | Merge | CI files restored | Bump | Push | Dependabot |');
+            L.push('|---|---|---|---|---|---|---|');
             for (const r of mb) {
               const branch = r.branch ? `\`${r.branch}\`` : `${icon(r.branchStatus)} ${r.branchStatus}`;
               const dep = r.dependabotMatched
                 ? `${r.dependabotCommented}/${r.dependabotMatched} of ${r.dependabotOpen}`
                 : '—';
+              // Restored (the merge deleted it cleanly) and auto-resolved (the merge conflicted
+              // on it) are both "this branch's version was kept", so they share one column.
+              const names = s => s.trim().split(/\s+/)
+                .map(f => `\`${f.replace(/^\.github\/workflows\//, '')}\``);
+              const kept = [
+                ...(r.restored ? names(r.restored) : []),
+                ...(r.autoResolved ? names(r.autoResolved).map(n => `${n} (conflict)`) : []),
+              ];
               L.push(`| \`${r.project}\` | ${branch} | ${icon(r.mergeStatus)} ${r.mergeStatus} | ` +
-                `${icon(r.bumpOutcome)} ${r.bumpOutcome} | ${icon(r.pushStatus)} ${r.pushStatus} | ${dep} |`);
+                `${kept.length ? kept.join(', ') : '—'} | ${icon(r.bumpOutcome)} ${r.bumpOutcome} | ` +
+                `${icon(r.pushStatus)} ${r.pushStatus} | ${dep} |`);
             }
             L.push('');
+
+            const restoredAny = mb.filter(r => r.restored);
+            const autoAny = mb.filter(r => r.autoResolved);
+            if (restoredAny.length || autoAny.length) {
+              L.push(`\`ci\`/\`pr\` workflow files kept from the maintenance branch — ` +
+                `**${restoredAny.length}** project(s) had them restored after the merge deleted ` +
+                `them, **${autoAny.length}** had a conflict on them auto-resolved in favour of ` +
+                'the maintenance branch.');
+              L.push('');
+            }
           }
 
           const blocked = mb.filter(r => r.mergeStatus === 'merge-conflict');
@@ -1234,6 +1343,12 @@ jobs:
             L.push('');
             for (const r of blocked) {
               L.push(`- \`${r.repo}\` — merge \`release/${r.version}\` into \`${r.branch}\``);
+              // ci/pr workflow conflicts are resolved automatically, so anything listed here is
+              // genuinely something only a human can decide.
+              if (r.conflicts && r.conflicts.trim()) {
+                const paths = r.conflicts.trim().split(/\s+/);
+                L.push(`  - conflicting: ${paths.map(p => `\`${p}\``).join(', ')}`);
+              }
             }
             L.push('');
           }

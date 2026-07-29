@@ -119,6 +119,24 @@ The commit each tag points at lives on a `release/<version>` branch, which has t
 
 The merge commit and the version-bump commit go up in a **single push**: one CI run per project, and if anything fails in between, nothing is pushed and the branch is left untouched so the whole project can simply be re-run. The `release/<version>` branch is left in place, not deleted.
 
+### CI and PR workflow files are preserved across the merge
+
+When a release branch is created, [spring-release-train-project-ready](../actions/spring-release-train-project-ready/README.md) **deletes** `ci.yml`, `ci.yaml`, `pr.yml`, `pr.yaml` (and `ci-release.yml`, `release-ci-settings.xml`) from it, so the release branch does not run normal CI. Merging that branch back would carry the deletion onto the maintenance branch and leave it with no CI at all.
+
+This is not hypothetical — `spring-cloud-config-commercial`'s `4.3.x` has `ci.yml` and `pr.yml` today, and `release/4.3.5` has neither.
+
+So, around the merge:
+
+1. **Before merging**, the `.x` branch's copies of `ci.yml`, `ci.yaml`, `pr.yml` and `pr.yaml` are saved outside the clone. A file that is not on the branch is logged and skipped.
+2. **After a clean merge**, any of those files the merge *removed* is restored and committed as a separate commit — `Restoring ci.yml pr.yml removed by the release/4.3.5 merge` — so the log shows plainly that they came back and why.
+3. A file the release branch **modified** rather than deleted is left alone; that is a real change worth keeping.
+
+The summary's merge-back table has a **CI files restored** column, and notes how many projects needed a restore.
+
+Only `ci` and `pr` are handled. `ci-release.yml` and `release-ci-settings.xml` are also deleted from release branches but are **not** restored — they are release-branch scaffolding rather than something the maintenance branch needs.
+
+If the merge conflicts on one of these files — because the release branch deleted it and the `.x` branch has since modified it, which git cannot resolve on its own — the project is blocked like any other conflict. The summary lists the conflicting paths and calls this case out specifically, since the resolution is almost always "keep the `.x` branch's version".
+
 The version-bump commit message deliberately **omits `[skip actions]`**, unlike most workflows in this repo — the point of pushing new snapshot versions is to start CI on them.
 
 ## Dependabot
