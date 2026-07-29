@@ -444,7 +444,21 @@ jobs:
                 .filter(e => e.key !== 'spring-boot' && e.key !== 'spring-cloud-release')
                 .map(e => ` - ${titleCase(e.key)} \`${e.version}\` ` +
                   `([issues](https://github.com/${linkRepo(e)}/releases/tag/v${e.version}))`);
-              body = `## What's Included\n${included.join('\n')}\n\n${body}`;
+              // Trailing trim matters here: when the generated notes are empty (see below) this
+              // would otherwise leave the list followed by blank lines.
+              body = `## What's Included\n${included.join('\n')}\n\n${body}`.trim() + '\n';
+            }
+
+            // Commercial branches are orphaned from each other, so the first tag on a new line
+            // has no predecessor to diff against and generate-notes returns nothing but a
+            // Full Changelog link - which the sanitize step above then strips, leaving an empty
+            // body. Publish a placeholder instead; the changes get written up by hand.
+            // Checked after What's Included is prepended, so the release train's own list is
+            // never displaced by the placeholder.
+            if (!body.trim()) {
+              body = `Released from tag ${tag}.\n`;
+              console.log('Generated notes were empty (no predecessor tag on this line) - ' +
+                'using a placeholder body.');
             }
 
             // Release titles are inconsistent across the org and this reproduces rather than

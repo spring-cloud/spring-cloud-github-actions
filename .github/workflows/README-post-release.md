@@ -96,7 +96,23 @@ Release bodies come from GitHub's own generator (`POST /repos/{repo}/releases/ge
 
 Release **titles** are deliberately not normalized: OSS projects use the bare version (`5.0.4`) while `spring-cloud-release` and every commercial repo use a `v` prefix (`v2025.1.2`, `v4.2.8`), matching what already exists in each.
 
-Two details of the `What's Included` list, both there to avoid shipping dead links in a release body:
+### When there are no notes to generate
+
+Commercial branches are created as **orphan branches** with no history shared between lines, so the first tag on a new line has no predecessor to diff against. `generate-notes` then returns nothing but a `**Full Changelog**` link, which sanitization strips — leaving an empty body.
+
+In that case the release body becomes a placeholder:
+
+```
+Released from tag v5.0.4.1.
+```
+
+The actual changes are written up by hand for these releases. This is checked *after* `What's Included` is prepended, so the release train's own release keeps its version list rather than being replaced by the placeholder.
+
+Once a line has more than one tag this resolves itself — `v4.2.9`, which follows `v4.2.8` on the same line, generates a full `What's Changed` list normally.
+
+### Dead links in `What's Included`
+
+Two details, both there to avoid shipping dead links in a release body:
 
 - **It omits `spring-cloud-release` itself.** The hand-written body for v2025.1.2 has a `Spring Cloud Starter Build` line pointing at `spring-cloud/spring-cloud-starter-build`, but that repository does not exist — the link 404s. The other 16 lines match the hand-written body exactly.
 - **On a commercial train, each link follows the tag that actually exists.** Some entries in a commercial properties file carry the plain OSS version because that project had no commercial release (`spring-cloud-bus=5.0.2` in `2025_1_2_1.properties`), and `spring-cloud-bus-commercial` has no `v5.0.2` tag. Those entries link to the OSS repository; entries with a real commercial version link to the `-commercial` one.
