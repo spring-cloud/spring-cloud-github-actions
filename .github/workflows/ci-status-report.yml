@@ -1,0 +1,441 @@
+name: CI Status Report
+
+# Reads config/projects.json and reports the latest ci.yml/ci.yaml workflow
+# run status for every OSS and commercial branch of every Spring Cloud
+# project, so a branch whose CI has quietly started failing is visible in
+# one place instead of being discovered branch-by-branch.
+#
+# See README-ci-status-report.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names to check (e.g. spring-cloud-build,spring-cloud-config). When empty, all projects in projects.json are checked.'
+        required: false
+        type: string
+        default: ''
+      repo_type:
+        description: 'Check commercial, oss, or both?'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      token:
+        description: 'GitHub token with read access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  # Weekdays at 6:00am US Eastern time. GitHub Actions cron always runs in
+  # UTC and has no notion of DST, so this is split into two entries - one at
+  # the UTC offset for EDT (UTC-4), one for EST (UTC-5) - selected by month.
+  # The actual US DST boundary (2nd Sunday in March / 1st Sunday in November)
+  # falls in the middle of a month, so for a few days each side of that
+  # boundary this fires an hour early or late local time; that's an accepted
+  # tradeoff for a status report rather than something worth a date-computing
+  # workaround. There is no existing DST convention elsewhere in this repo's
+  # scheduled workflows to follow (examples/deploy.yml's schedule doesn't
+  # account for DST at all).
+  schedule:
+    - cron: '0 10 * 3-10 1-5'      # 6:00am EDT, March-October
+    - cron: '0 11 * 11,12,1,2 1-5' # 6:00am EST, November-February
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const filter = filterRaw
+            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
+            : new Set();
+
+          const repoType = (process.env.REPO_TYPE || 'both').trim();
+          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
+
+          // Expand every project's oss/commercial section into one matrix entry
+          // per branch it lists as "scheduled" - the full set of maintained
+          // branches, as opposed to "default" which is just the primary one.
+          const entries = [];
+          for (const [projectKey, config] of Object.entries(projects)) {
+            if (projectKey === 'defaults') continue;
+            if (filter.size > 0 && !filter.has(projectKey)) continue;
+            for (const typeKey of typeKeys) {
+              if (!config[typeKey]) continue;
+              const branches = config[typeKey]?.branches?.scheduled || [];
+              const repo = typeKey === 'commercial'
+                ? `spring-cloud/${projectKey}-commercial`
+                : `spring-cloud/${projectKey}`;
+              for (const branch of branches) {
+                entries.push({ project: projectKey, repo, type: typeKey, branch });
+              }
+            }
+          }
+
+          entries.sort((a, b) =>
+            a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
+
+          console.log(`Branches to check: ${entries.length}`);
+          for (const e of entries) console.log(`  ${e.repo}@${e.branch} (${e.type})`);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include: entries })}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${entries.length}\n`);
+          JSEOF
+
+  check:
+    name: "CI Status — ${{ matrix.repo }}@${{ matrix.branch }}"
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Check CI workflow status
+        id: check
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          PROJECT: ${{ matrix.project }}
+          TYPE: ${{ matrix.type }}
+        run: |
+          set -euo pipefail
+
+          # A project's CI workflow file may be named ci.yml or ci.yaml -
+          # try both and use whichever one actually exists in the repo.
+          RUN_JSON=""
+          WORKFLOW_FILE=""
+          for wf in ci.yml ci.yaml; do
+            RESP=$(gh api "repos/${REPO}/actions/workflows/${wf}/runs?branch=${BRANCH}&per_page=1" 2>/dev/null || echo "")
+            if [[ -n "$RESP" ]] && [[ "$(echo "$RESP" | jq -r '.total_count // 0')" != "0" ]]; then
+              RUN_JSON="$RESP"
+              WORKFLOW_FILE="$wf"
+              break
+            fi
+          done
+
+          if [[ -z "$RUN_JSON" ]]; then
+            echo "No ci.yml/ci.yaml runs found for ${REPO}@${BRANCH}."
+            STATUS="not-found"
+            CONCLUSION="none"
+            URL=""
+            RUN_NUMBER=""
+            CREATED_AT=""
+          else
+            RUN=$(echo "$RUN_JSON" | jq -c '.workflow_runs[0]')
+            STATUS=$(echo "$RUN" | jq -r '.status')
+            CONCLUSION=$(echo "$RUN" | jq -r '.conclusion // "none"')
+            URL=$(echo "$RUN" | jq -r '.html_url')
+            RUN_NUMBER=$(echo "$RUN" | jq -r '.run_number')
+            CREATED_AT=$(echo "$RUN" | jq -r '.created_at')
+            echo "Found ${WORKFLOW_FILE} run #${RUN_NUMBER}: status=${STATUS} conclusion=${CONCLUSION}"
+          fi
+
+          # Only branches that are actually failing get the extra "who broke
+          # it" lookback below. A "not-found" branch has no CI runs to walk
+          # through in the first place, and a passing/pending branch doesn't
+          # need a culprit - so the extra API calls scale with the number of
+          # red branches, not the size of the whole matrix.
+          echo '{}' > blame.json
+          if [[ "$CONCLUSION" == "failure" ]]; then
+            echo "Walking back through ${WORKFLOW_FILE} history on ${BRANCH} to find when it broke..."
+
+            gh api "repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${BRANCH}&per_page=100" \
+              2>/dev/null > history.json || echo '{"workflow_runs":[]}' > history.json
+
+            node - << 'JSEOF' > blame.json
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync('history.json', 'utf8'));
+
+          // GitHub returns workflow runs newest-first. Only completed runs
+          // have a meaningful conclusion, so in-progress/queued entries are
+          // dropped before walking the pass/fail streak.
+          const runs = (data.workflow_runs || []).filter(r => r.status === 'completed');
+
+          let passIndex = -1;
+          for (let i = 0; i < runs.length; i++) {
+            if (runs[i].conclusion === 'success') { passIndex = i; break; }
+          }
+
+          // No passing run inside the fetched window (the most recent 100
+          // completed runs) - the branch has been red for at least that
+          // long. Report the oldest run seen as a lower bound rather than
+          // paginating further back (the case where paginating would cost
+          // the most is exactly the chronically-red branch we're trying to
+          // bound the cost for).
+          const approximate = passIndex === -1;
+          const breakRun = approximate ? runs[runs.length - 1] : runs[passIndex - 1];
+          const failingRuns = approximate ? runs.length : passIndex;
+
+          const out = breakRun ? {
+            breakSha: breakRun.head_sha,
+            breakRunUrl: breakRun.html_url,
+            breakRunCreatedAt: breakRun.created_at,
+            failingRuns,
+            approximate,
+          } : {};
+
+          process.stdout.write(JSON.stringify(out));
+          JSEOF
+
+            BREAK_SHA=$(jq -r '.breakSha // ""' blame.json)
+            if [[ -n "$BREAK_SHA" ]]; then
+              COMMIT=$(gh api "repos/${REPO}/commits/${BREAK_SHA}" 2>/dev/null || echo "")
+              if [[ -n "$COMMIT" ]]; then
+                echo "$COMMIT" | jq \
+                  --slurpfile blame blame.json \
+                  '$blame[0] + {
+                    breakAuthor: (if .author.login then "@" + .author.login else .commit.author.name end),
+                    breakMessage: (.commit.message | split("\n")[0]),
+                    breakCommitDate: .commit.author.date,
+                    breakCommitUrl: .html_url
+                  }' > blame-merged.json
+                mv blame-merged.json blame.json
+                echo "Broke at ${BREAK_SHA:0:7} ($(jq -r '.breakAuthor' blame.json)): $(jq -r '.breakMessage' blame.json)"
+              else
+                echo "Could not look up commit ${BREAK_SHA} for author/message details."
+              fi
+            fi
+          fi
+
+          SAFE=$(echo "${REPO}-${BRANCH}" | tr '/' '-')
+          echo "safe-name=${SAFE}" >> "$GITHUB_OUTPUT"
+
+          jq -n \
+            --arg project "$PROJECT" \
+            --arg repo "$REPO" \
+            --arg type "$TYPE" \
+            --arg branch "$BRANCH" \
+            --arg workflowFile "$WORKFLOW_FILE" \
+            --arg status "$STATUS" \
+            --arg conclusion "$CONCLUSION" \
+            --arg url "$URL" \
+            --arg runNumber "$RUN_NUMBER" \
+            --arg createdAt "$CREATED_AT" \
+            '{project: $project, repo: $repo, type: $type, branch: $branch, workflowFile: $workflowFile, status: $status, conclusion: $conclusion, url: $url, runNumber: $runNumber, createdAt: $createdAt}' \
+            > base.json
+
+          jq -s '.[0] * .[1]' base.json blame.json > "result-${SAFE}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ steps.check.outputs.safe-name }}
+          path: result-${{ steps.check.outputs.safe-name }}.json
+
+  summary:
+    name: Summary
+    needs: [setup, check]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        id: write-summary
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) =>
+                a.project.localeCompare(b.project) ||
+                a.type.localeCompare(b.type) ||
+                a.branch.localeCompare(b.branch));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const icon = r => {
+            if (r.status === 'not-found') return '❔';
+            if (r.status !== 'completed') return '🔄';
+            if (r.conclusion === 'success') return '✅';
+            if (r.conclusion === 'failure') return '❌';
+            if (r.conclusion === 'cancelled') return '⚠️';
+            return '❔';
+          };
+
+          const label = r => {
+            if (r.status === 'not-found') return 'no runs found';
+            if (r.status !== 'completed') return r.status;
+            return r.conclusion;
+          };
+
+          // Only failing branches carry breakSha etc. (the check job only
+          // spends the extra API calls on those - see ci-status-report.yml).
+          const daysSince = iso => {
+            if (!iso) return null;
+            return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000));
+          };
+
+          const blameFacts = r => {
+            if (!r.breakSha) return null;
+            const days = daysSince(r.breakRunCreatedAt);
+            return {
+              since: r.breakRunCreatedAt ? r.breakRunCreatedAt.slice(0, 10) : 'unknown',
+              daysLabel: days === null ? '' : `${days} day${days === 1 ? '' : 's'}`,
+              runsLabel: `${r.failingRuns}${r.approximate ? '+' : ''} run${r.failingRuns === 1 && !r.approximate ? '' : 's'}`,
+              sha: r.breakSha.slice(0, 7),
+              author: r.breakAuthor || 'unknown author',
+              message: r.breakMessage || '(no commit message)',
+              commitUrl: r.breakCommitUrl || '',
+            };
+          };
+
+          // GitHub-flavored markdown, for the job summary.
+          const blameLineMd = r => {
+            const f = blameFacts(r);
+            if (!f) return null;
+            const commitLink = f.commitUrl ? `[\`${f.sha}\`](${f.commitUrl})` : `\`${f.sha}\``;
+            return `Failing since **${f.since}** (${f.daysLabel}, ${f.runsLabel}) — broke at ${commitLink} by **${f.author}**: "${f.message}"`;
+          };
+
+          // Google Chat uses its own lightweight formatting (single-asterisk
+          // bold, <url|text> links) rather than GitHub markdown, so it gets
+          // a separate, plainer renderer.
+          const blameLineChat = r => {
+            const f = blameFacts(r);
+            if (!f) return null;
+            const shaLink = f.commitUrl ? `<${f.commitUrl}|${f.sha}>` : f.sha;
+            return `since ${f.since} (${f.daysLabel}, ${f.runsLabel}) - broke at ${shaLink} by ${f.author}: "${f.message}"`;
+          };
+
+          const lines = [];
+          lines.push('## CI Status Report');
+          lines.push('');
+          lines.push('| | Project | Type | Branch | Workflow | Status | Run |');
+          lines.push('|---|---|---|---|---|---|---|');
+          for (const r of results) {
+            const run = r.url ? `[#${r.runNumber}](${r.url})` : '-';
+            lines.push(`| ${icon(r)} | \`${r.project}\` | ${r.type} | \`${r.branch}\` | ` +
+              `${r.workflowFile || '-'} | ${label(r)} | ${run} |`);
+          }
+          lines.push('');
+
+          const passing = results.filter(r => r.conclusion === 'success');
+          const failing = results.filter(r => r.conclusion === 'failure');
+          const notFound = results.filter(r => r.status === 'not-found');
+
+          lines.push(`**${results.length}** branches checked — ` +
+            `**${passing.length}** passing, ` +
+            `**${failing.length}** failing, ` +
+            `**${notFound.length}** with no CI runs found.`);
+
+          if (failing.length) {
+            lines.push('');
+            lines.push('### Failing');
+            lines.push('');
+            for (const r of failing) {
+              lines.push(`- \`${r.repo}\`@\`${r.branch}\` — [run #${r.runNumber}](${r.url})`);
+              const blame = blameLineMd(r);
+              if (blame) lines.push(`  - ${blame}`);
+            }
+          }
+
+          if (notFound.length) {
+            lines.push('');
+            lines.push('### No CI runs found');
+            lines.push('');
+            for (const r of notFound) {
+              lines.push(`- \`${r.repo}\`@\`${r.branch}\``);
+            }
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          console.log(lines.join('\n'));
+
+          // Surface counts (and the per-branch failing details, for the chat
+          // notification step below) without ever failing this job - the
+          // report itself succeeding is independent of what it reports.
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `total=${results.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `passing=${passing.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `failing=${failing.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `not-found=${notFound.length}\n`);
+
+          const failingDetails = failing.map(r => {
+            const blame = blameLineChat(r);
+            return blame ? `${r.repo}@${r.branch} — ${blame}` : `${r.repo}@${r.branch}`;
+          }).join('\n');
+
+          // Multiline GITHUB_OUTPUT values need the <<delimiter heredoc form
+          // rather than a plain key=value line.
+          const delimiter = `ghadelim_${Date.now()}`;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `failing-details<<${delimiter}\n${failingDetails}\n${delimiter}\n`);
+          JSEOF
+
+      - name: Send Google Chat notification
+        if: always()
+        env:
+          WEBHOOK_URL: ${{ secrets.SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL }}
+          TOTAL: ${{ steps.write-summary.outputs.total }}
+          PASSING: ${{ steps.write-summary.outputs.passing }}
+          FAILING: ${{ steps.write-summary.outputs.failing }}
+          NOT_FOUND: ${{ steps.write-summary.outputs.not-found }}
+          FAILING_DETAILS: ${{ steps.write-summary.outputs.failing-details }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${WEBHOOK_URL}" ]]; then  
+            echo "GOOGLE_CHAT_WEBHOOK_URL is not set - skipping Google Chat notification."
+            exit 0
+          fi
+
+          ICON="✅"
+          if [[ "${FAILING:-0}" != "0" ]]; then
+            ICON="❌"
+          elif [[ "${NOT_FOUND:-0}" != "0" ]]; then
+            ICON="❔"
+          fi
+
+          TEXT="${ICON} *CI Status Report* — ${PASSING:-0} passing, ${FAILING:-0} failing, ${NOT_FOUND:-0} not found (of ${TOTAL:-0} branches checked)"
+          if [[ -n "${FAILING_DETAILS:-}" ]]; then
+            TEXT=$(printf '%s\n\nFailing:\n%s' "$TEXT" "$FAILING_DETAILS")
+          fi
+          TEXT=$(printf '%s\n\n<%s|View full report>' "$TEXT" "$RUN_URL")
+
+          jq -n --arg text "$TEXT" '{text: $text}' > chat-message.json
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'Content-Type: application/json; charset=UTF-8' \
+            -d @chat-message.json \
+            "${WEBHOOK_URL}"
