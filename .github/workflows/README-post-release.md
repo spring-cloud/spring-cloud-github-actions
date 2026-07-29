@@ -51,6 +51,7 @@ This is also what makes re-running the workflow safe, and what lets a `projects`
 | Secret | Description | Required |
 |--------|-------------|----------|
 | `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus read access to `spring-cloud-release-commercial` for commercial runs. | Yes, unless `token` is passed |
+| `SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK` | Incoming webhook URL for the Google Chat space to notify when the run finishes. If unset, the step logs that it is skipping and the run still succeeds. Never used on a dry run. | No |
 
 Cross-repo writes rely entirely on this token — the workflow's own `permissions:` block is `contents: read`.
 
@@ -174,6 +175,38 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❌ needs attention — merge conflict, no usable branch
 
 Followed by explicit sections for anything that needs a human: **Blocked on a manual merge**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+
+### Google Chat notification
+
+When `SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK` is set and the run is **not** a dry run, a summary is posted to Google Chat, ending with a request to write up anything the generated notes cannot capture:
+
+```
+⚠️ *Post Release — 2025.1.2* (OSS)
+
+Milestones closed: 7 closed, 10 none found
+Releases: 1 already existed, 6 published, 10 skipped (OSS tag)
+Next snapshot: 2025.1.3 (2025_1_3-snapshot.properties created)
+New milestones: 5 already existed, 12 created
+Merge back: 6 already merged, 1 BLOCKED by a conflict, 9 merged, 1 not reached
+Version bumps: 6 already up to date, 9 pushed, 2 not reached
+CI/PR workflow files kept from the maintenance branch: 8 project(s)
+Dependabot: 18 PR(s) asked to recreate
+
+*2 project(s) need attention:*
+• spring-cloud/spring-cloud-config-commercial — blocked on a manual merge of release/5.0.4 into 5.0.x
+
+*Please update your project's release notes* with anything that needs calling
+out — CVEs, breaking changes, deprecations, or other notable fixes. ...
+
+<https://…/actions/runs/123|View the full report>
+```
+
+Notes on this:
+
+- **Skipped entirely for a dry run.** There is nothing to announce, and asking people to write up release notes would be misleading when no release was published.
+- **Still posted when the run is red** — the message is built before the summary step exits non-zero, because a blocked project is exactly when people need to see it.
+- Chat uses its own lightweight formatting (`*bold*`, `<url|text>`, no tables) rather than GitHub markdown, so the message is built separately from the job summary. Same approach as [ci-status-report](README-ci-status-report.md).
+- Per-phase counts are produced by **grouping on whatever status values are present**, not by listing the expected ones, so a status nobody enumerated appears under its raw name rather than being silently dropped. The counts always add up to the number of projects.
 
 ## Notes
 

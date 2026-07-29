@@ -1214,6 +1214,7 @@ jobs:
           path: results
 
       - name: Write summary
+        id: write-summary
         env:
           RELEASE_VERSION: ${{ inputs.release_version }}
           COMMERCIAL: ${{ needs.setup.outputs.commercial }}
@@ -1407,6 +1408,84 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
           console.log(L.join('\n'));
 
+          // ── Google Chat message ─────────────────────────────────────────────────────
+          // Chat has its own lightweight formatting (*bold*, <url|text>, no tables), so this
+          // is built separately rather than reusing the markdown above. Assembled here, where
+          // the data already is, and handed to the posting step as one value.
+          const problems = blocked.length + branchFailed.length;
+          const C = [];
+          C.push(`${problems ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
+            `(${commercial ? 'commercial' : 'OSS'}${hotfix ? ', hotfix' : ''})` +
+            (filter ? ` · only ${filter}` : ''));
+          C.push('');
+
+          const n = (rows, pred) => rows.filter(pred).length;
+
+          // Counted by grouping on whatever status values are present, rather than by listing
+          // the ones expected. A status nobody thought to enumerate then shows up under its raw
+          // name instead of being silently dropped, so the totals always add up to the project
+          // count and the message cannot quietly under-report.
+          const PHRASE = {
+            closed: 'closed', 'already-closed': 'already closed', 'not-found': 'none found',
+            'would-close': 'would close (dry run)',
+            created: 'created', 'already-exists': 'already existed',
+            'no-tag-oss-fallback': 'skipped (OSS tag)', 'would-create': 'would publish (dry run)',
+            merged: 'merged', 'already-merged': 'already merged',
+            'no-release-branch': 'no release branch', 'merge-conflict': 'BLOCKED by a conflict',
+            pushed: 'pushed', 'nothing-to-push': 'already up to date',
+            'would-push': 'would push (dry run)', 'branch-not-found': 'no branch found',
+            'version-mismatch': 'version mismatch', 'no-version': 'no version',
+            error: 'errored', skipped: 'not reached', unknown: 'unknown',
+          };
+          // overrides let one status read differently per phase - a created release is
+          // "published", a created milestone is just "created".
+          const phrase = (k, overrides) => (overrides && overrides[k]) || PHRASE[k] || k;
+          const tally = (label, rows, key, overrides) => {
+            const counts = {};
+            for (const r of rows) {
+              const v = r[key] || 'unknown';
+              counts[v] = (counts[v] || 0) + 1;
+            }
+            const keys = Object.keys(counts).sort();
+            if (keys.length) {
+              C.push(`${label}: ` +
+                keys.map(k => `${counts[k]} ${phrase(k, overrides)}`).join(', '));
+            }
+          };
+
+          tally('Milestones closed', mr, 'milestone');
+          tally('Releases', mr, 'release', { created: 'published' });
+          if (sc) C.push(`Next snapshot: ${sc.nextVersion} (${sc.nextFile} ${sc.status})`);
+          tally('New milestones', nm, 'status');
+          tally('Merge back', mb, 'mergeStatus');
+          tally('Version bumps', mb, 'pushStatus');
+          const kept = n(mb, r => r.restored || r.autoResolved);
+          if (kept) C.push(`CI/PR workflow files kept from the maintenance branch: ${kept} project(s)`);
+          const nudged = mb.reduce((sum, r) => sum + (Number(r.dependabotCommented) || 0), 0);
+          if (nudged) C.push(`Dependabot: ${nudged} PR(s) asked to recreate`);
+
+          if (problems) {
+            C.push('');
+            C.push(`*${problems} project(s) need attention:*`);
+            for (const r of blocked) {
+              C.push(`• ${r.repo} — blocked on a manual merge of release/${r.version} into ${r.branch}`);
+            }
+            for (const r of branchFailed) C.push(`• ${r.repo} — ${phrase(r.branchStatus)}`);
+          }
+
+          C.push('');
+          C.push("*Please update your project's release notes* with anything that needs calling " +
+            'out — CVEs, breaking changes, deprecations, or other notable fixes. The generated ' +
+            'notes only list merged PRs, and where a release line has no previous tag they are ' +
+            'just a placeholder.');
+
+          // Written before the exit below so the notification still goes out on a red run -
+          // that is exactly when people need to see it.
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `total=${all.length}\n`);
+          const delim = 'ghadelim_post_release_chat';
+          fs.appendFileSync(out, `chat-text<<${delim}\n${C.join('\n')}\n${delim}\n`);
+
           // A blocked merge or an unusable branch means a project was left half-done, which has
           // to be a red run rather than a green one with a note buried in the table.
           if (blocked.length || branchFailed.length) {
@@ -1414,3 +1493,36 @@ jobs:
             process.exit(1);
           }
           JSEOF
+
+      # Never posted for a dry run - there is nothing to announce, and the ask to write up
+      # release notes would be misleading when no release was published.
+      - name: Send Google Chat notification
+        if: always() && inputs.dry_run != true && steps.write-summary.outputs.total != '0'
+        env:
+          WEBHOOK_URL: ${{ secrets.SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK }}
+          CHAT_TEXT: ${{ steps.write-summary.outputs.chat-text }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${WEBHOOK_URL}" ]]; then
+            echo "SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK is not set - skipping the Google Chat notification."
+            exit 0
+          fi
+
+          if [[ -z "${CHAT_TEXT:-}" ]]; then
+            echo "No summary text was produced - skipping the Google Chat notification."
+            exit 0
+          fi
+
+          TEXT=$(printf '%s\n\n<%s|View the full report>' "$CHAT_TEXT" "$RUN_URL")
+
+          jq -n --arg text "$TEXT" '{text: $text}' > chat-message.json
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'Content-Type: application/json; charset=UTF-8' \
+            -d @chat-message.json \
+            "${WEBHOOK_URL}"
+
+          echo "Posted the post-release notification to Google Chat."
