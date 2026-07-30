@@ -449,10 +449,12 @@ jobs:
               body = `## What's Included\n${included.join('\n')}\n\n${body}`.trim() + '\n';
             }
 
-            // Commercial branches are orphaned from each other, so the first tag on a new line
-            // has no predecessor to diff against and generate-notes returns nothing but a
-            // Full Changelog link - which the sanitize step above then strips, leaving an empty
-            // body. Publish a placeholder instead; the changes get written up by hand.
+            // generate-notes is PR-based, so it returns nothing but a Full Changelog link when
+            // there are no merged PRs to list - which the sanitize step above then strips,
+            // leaving an empty body. That happens when the work landed as direct commits rather
+            // than through PRs, and also when there is no predecessor tag at all (commercial
+            // lines are orphan branches, so the first tag on a line has nothing to diff
+            // against). Publish a placeholder; the changes get written up by hand.
             // Checked after What's Included is prepended, so the release train's own list is
             // never displaced by the placeholder.
             if (!body.trim()) {
@@ -1512,8 +1514,8 @@ jobs:
           C.push('');
           C.push("*Please update your project's release notes* with anything that needs calling " +
             'out — CVEs, breaking changes, deprecations, or other notable fixes. The generated ' +
-            'notes only list merged PRs, and where a release line has no previous tag they are ' +
-            'just a placeholder.');
+            'notes only list merged pull requests, so anything that landed as a direct commit is ' +
+            'missing, and any release with no PRs in range says only "Released from tag ...".');
 
           // Written before the exit below so the notification still goes out on a red run -
           // that is exactly when people need to see it.

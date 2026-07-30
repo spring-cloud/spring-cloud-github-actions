@@ -113,17 +113,22 @@ Release **titles** are deliberately not normalized: OSS projects use the bare ve
 
 ### When there are no notes to generate
 
-Commercial branches are created as **orphan branches** with no history shared between lines, so the first tag on a new line has no predecessor to diff against. `generate-notes` then returns nothing but a `**Full Changelog**` link, which sanitization strips — leaving an empty body.
-
-In that case the release body becomes a placeholder:
+`generate-notes` is **PR-based**: it lists merged pull requests between the previous tag and this one. When it finds none, it returns nothing but a `**Full Changelog**` link — which sanitization strips, leaving an empty body. The release body then becomes a placeholder:
 
 ```
-Released from tag v5.0.4.1.
+Released from tag v3.2.17.
 ```
 
-The actual changes are written up by hand for these releases. This is checked *after* `What's Included` is prepended, so the release train's own release keeps its version list rather than being replaced by the placeholder.
+**The changes for these releases have to be written up by hand.** There is nothing for the workflow to recover: the information simply is not in the PR history.
 
-Once a line has more than one tag this resolves itself — `v4.2.9`, which follows `v4.2.8` on the same line, generates a full `What's Changed` list normally.
+Two distinct situations produce it, and both occur in practice:
+
+- **No merged PRs in the range.** The changes landed as direct commits rather than through pull requests. `generate-notes` finds the predecessor perfectly well — for `spring-cloud-function-commercial` v3.2.17 it returned `compare/v3.2.16...v3.2.17` — but there are no PRs in it to list. This is the common case, and it is unrelated to how old the line is.
+- **No predecessor tag at all.** Commercial branches are created as **orphan branches** with no history shared between lines, so the first tag on a new line has nothing to diff against — `compare v4.2.8...v5.0.4.1` returns `404 No common ancestor`. Here `generate-notes` emits `commits/<tag>` rather than a `compare/` link.
+
+The check runs *after* `What's Included` is prepended, so the release train's own release keeps its version list rather than being replaced by the placeholder.
+
+Neither situation is something a later run fixes, and a line having many tags is no guarantee against it — `spring-cloud-gateway-commercial` v3.1.14 got a placeholder despite v3.1.11 through v3.1.13 existing. Where a project does merge its work through PRs, notes generate normally: `v4.2.9`, 42 commits after `v4.2.8` on the same line, produced a full `What's Changed` list of 8 entries.
 
 ### Dead links in `What's Included`
 
