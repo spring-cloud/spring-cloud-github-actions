@@ -11,7 +11,7 @@ It:
 1. **Reads the properties file** for `release_version` from the `jenkins-releaser-config` branch of `spring-cloud-release` (or `spring-cloud-release-commercial`), validates the inputs, and builds a matrix of `{project, repo, version, tag}`
 2. **Verifies a `v<version>` tag exists** for every project — a hard gate, in a single job so an incomplete release produces one consolidated failure naming every missing tag
 3. **Closes the release milestone** and **publishes the GitHub release** for each tag
-4. **Writes the next `<train>-snapshot.properties` file** to `jenkins-releaser-config`, with every version's last segment bumped and `-SNAPSHOT` appended
+4. **Writes the next `<train>-snapshot.properties` file** to `jenkins-releaser-config`, with every version's last segment bumped and `-SNAPSHOT` appended — creating it, or **overwriting an existing one whose versions do not match**
 5. **Opens a milestone** for each new snapshot version, via the [create-milestone](../actions/create-milestone/README.md) action
 6. **Merges `release/<version>` back into the `.x` branch**, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, and comments `@dependabot recreate` on superseded Dependabot PRs
 7. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
@@ -78,6 +78,20 @@ projects: spring-cloud-config-commercial,spring-cloud-gateway-commercial
 - Empty entries are dropped, so a trailing comma (`spring-cloud-config,`) is accepted — matching how [ci-status-report](README-ci-status-report.md) and [rollout-deploy-docs](README-rollout-deploy-docs.md) parse the same input.
 
 **The filter does not apply to step 4.** The snapshot properties file is train-wide and stays complete: `update-project-versions` needs the *whole* versions map to update each project's dependency versions, so a file containing only the filtered projects would produce wrong POMs. Step 4 always writes every entry; only the repo-facing steps are filtered.
+
+## The next snapshot properties file
+
+The correct contents are **always computed from the release properties file**, and the target is written whether or not it already exists. An existing snapshot file may have been seeded by hand, or by an earlier run against a different release, so trusting it would leave every downstream project bumped to the wrong versions.
+
+| Situation | Status | What happens |
+|---|---|---|
+| Target absent | `created` | Written as a new file |
+| Target exists, versions differ | `updated` | Overwritten with the computed versions |
+| Target exists, already byte-identical | `unchanged` | Nothing committed — avoids an empty commit |
+
+An update sends the existing blob `sha` with the `PUT`. That is what makes the Contents API replace rather than create, and it also makes the write fail rather than clobber if someone else changed the file between the read and the write.
+
+Only the file for *this* run's next version is touched. Other `-snapshot.properties` files on the branch — older trains, other lines — are left alone.
 
 Note this differs from [ci-status-report](README-ci-status-report.md) and [rollout-deploy-docs](README-rollout-deploy-docs.md), which pair bare project names with a separate `repo_type` input. Here the suffix carries the type, so there is no `repo_type`.
 

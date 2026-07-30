@@ -549,11 +549,16 @@ jobs:
 
           const gh = args => execFileSync('gh', args,
             { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+          // Returns {content, sha} - the sha is needed to update an existing file via the
+          // Contents API, which rejects a PUT over an existing path without it.
           const readFile = file => {
             try {
-              const b64 = gh(['api',
-                `repos/${releaseRepo}/contents/${file}?ref=${BRANCH}`, '--jq', '.content']);
-              return Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+              const raw = JSON.parse(gh(['api',
+                `repos/${releaseRepo}/contents/${file}?ref=${BRANCH}`]));
+              return {
+                content: Buffer.from((raw.content || '').replace(/\s/g, ''), 'base64').toString('utf8'),
+                sha: raw.sha,
+              };
             } catch (err) { return null; }
           };
 
@@ -567,85 +572,109 @@ jobs:
             return map;
           };
 
+          // The correct contents are always computed from the release file and written, whether
+          // or not the target already exists. An existing snapshot file may have been seeded by
+          // hand or by an earlier run against a different release, so trusting it would leave
+          // every downstream project bumped to the wrong versions.
+          const source = readFile(propsFile);
+          if (source === null) {
+            console.error(`ERROR: could not re-read ${propsFile}.`);
+            process.exit(1);
+          }
+
+          const bump = v => {
+            const parts = v.split('.');
+            parts[parts.length - 1] = String(Number(parts[parts.length - 1]) + 1);
+            return parts.join('.');
+          };
+
+          // Rewritten line by line so ordering and any non-fixed-versions lines survive. Every
+          // entry is bumped, including spring-boot, and including projects this run is not
+          // otherwise touching - the file is train-wide and update-project-versions needs the
+          // complete map to update each project's dependency versions.
+          const content = source.content.split('\n').map(line => {
+            const m = line.match(ENTRY_RE);
+            if (!m) return line;
+            return `releaser.fixed-versions[${m[1]}]=${bump(m[2].trim())}-SNAPSHOT`;
+          }).join('\n');
+
+          const existing = readFile(nextFile);
+
+          console.log(`Target ${nextFile}:`);
+          console.log('---');
+          console.log(content);
+          console.log('---');
+
           let status;
-          let content = readFile(nextFile);
-
-          if (content !== null) {
-            // Already seeded - by an earlier run of this workflow, or by hand. Read it and leave
-            // it alone. This is what lets a projects-filtered repair run work, and makes
-            // re-running a full train safe.
-            console.log(`${nextFile} already exists on ${releaseRepo}@${BRANCH} - not rewriting.`);
-            status = 'already-exists';
+          if (existing && existing.content === content) {
+            // Byte-identical, so there is nothing to commit. Skipping the PUT avoids an empty
+            // commit on the branch, the same way sync-deploy-docs-workflow does.
+            console.log(`${nextFile} already has exactly these versions - nothing to change.`);
+            status = 'unchanged';
+          } else if (dryRun) {
+            if (existing) {
+              console.log('[dry run] would UPDATE the existing file. Current contents:');
+              console.log('---');
+              console.log(existing.content);
+              console.log('---');
+            }
+            console.log('[dry run] not committing.');
+            status = existing ? 'would-update' : 'would-create';
           } else {
-            const source = readFile(propsFile);
-            if (source === null) {
-              console.error(`ERROR: could not re-read ${propsFile}.`);
-              process.exit(1);
-            }
-
-            const bump = v => {
-              const parts = v.split('.');
-              parts[parts.length - 1] = String(Number(parts[parts.length - 1]) + 1);
-              return parts.join('.');
+            const payload = {
+              message: existing
+                ? `Updating ${nextVersion} snapshot versions`
+                : `Adding ${nextVersion} snapshot versions`,
+              content: Buffer.from(content, 'utf8').toString('base64'),
+              branch: BRANCH,
             };
-
-            // Rewrite in place so line order and any non-fixed-versions lines survive. Every
-            // entry is bumped, including spring-boot, and including projects this run is not
-            // otherwise touching - the file is train-wide and update-project-versions needs the
-            // complete map to update each project's dependency versions.
-            content = source.split('\n').map(line => {
-              const m = line.match(ENTRY_RE);
-              if (!m) return line;
-              return `releaser.fixed-versions[${m[1]}]=${bump(m[2].trim())}-SNAPSHOT`;
-            }).join('\n');
-
-            console.log(`Generated ${nextFile}:`);
-            console.log('---');
-            console.log(content);
-            console.log('---');
-
-            if (dryRun) {
-              console.log('[dry run] not committing.');
-              status = 'would-create';
-            } else {
-              fs.writeFileSync('payload.json', JSON.stringify({
-                message: `Adding ${nextVersion} snapshot versions`,
-                content: Buffer.from(content, 'utf8').toString('base64'),
-                branch: BRANCH,
-              }));
-              gh(['api', `repos/${releaseRepo}/contents/${nextFile}`,
-                '--method', 'PUT', '--input', 'payload.json']);
-              console.log(`Committed ${nextFile} to ${releaseRepo}@${BRANCH}.`);
-              status = 'created';
-            }
+            // The blob sha is what tells the Contents API to replace rather than create, and it
+            // also makes the write fail rather than clobber if someone else changed the file
+            // between the read above and this PUT.
+            if (existing) payload.sha = existing.sha;
+            fs.writeFileSync('payload.json', JSON.stringify(payload));
+            gh(['api', `repos/${releaseRepo}/contents/${nextFile}`,
+              '--method', 'PUT', '--input', 'payload.json']);
+            console.log(`${existing ? 'Updated' : 'Committed'} ${nextFile} on ` +
+              `${releaseRepo}@${BRANCH}.`);
+            status = existing ? 'updated' : 'created';
           }
 
           // update-project-versions resolves versions over raw.githubusercontent.com, which is
           // CDN-cached, so a file committed seconds ago may not be served yet. Wait for it - but
           // only when this job actually wrote something.
-          let available = status === 'already-exists';
-          if (status === 'created') {
+          let available = status === 'unchanged';
+          if (status === 'created' || status === 'updated') {
             const url = `https://raw.githubusercontent.com/${releaseRepo}/${BRANCH}/${nextFile}`;
-            console.log(`Waiting for ${url} to be served...`);
+            console.log(`Waiting for ${url} to serve these contents...`);
             for (let attempt = 1; attempt <= 30; attempt++) {
-              // The commercial release repo is private, so raw needs the same bearer token
-              // update-project-versions sends.
-              const code = execFileSync('curl', ['-s', '-o', '/dev/null',
-                '-w', '%{http_code}', '-H', 'Cache-Control: no-cache',
-                '-H', `Authorization: Bearer ${process.env.GH_TOKEN}`, url],
-                { encoding: 'utf8' }).trim();
-              if (code === '200') {
-                console.log(`Served after ${attempt} attempt(s).`);
+              let served = null;
+              try {
+                // The commercial release repo is private, so raw needs the same bearer token
+                // update-project-versions sends.
+                served = execFileSync('curl', ['-s', '-f',
+                  '-H', 'Cache-Control: no-cache',
+                  '-H', `Authorization: Bearer ${process.env.GH_TOKEN}`, url],
+                  { encoding: 'utf8' });
+              } catch (err) { /* not served yet */ }
+
+              // Compares contents rather than just the status code. An updated file returns 200
+              // immediately while the CDN is still serving the previous version, so a status
+              // check would wave through exactly the stale read this wait exists to prevent.
+              if (served !== null && served.trim() === content.trim()) {
+                console.log(`Serving the new contents after ${attempt} attempt(s).`);
                 available = true;
                 break;
               }
-              console.log(`Attempt ${attempt}: raw returned ${code}, waiting 10s...`);
+              console.log(`Attempt ${attempt}: ` +
+                (served === null ? 'not served yet' : 'still serving older contents') +
+                ', waiting 10s...');
               execFileSync('sleep', ['10']);
             }
             if (!available) {
-              console.log('WARNING: the raw URL never served the new file. Version updates will ' +
-                'be skipped rather than applied from a stale file - re-run this workflow with ' +
-                'the same inputs once the CDN catches up.');
+              console.log('WARNING: the raw URL never served the new contents. Version updates ' +
+                'will be skipped rather than applied from a stale file - re-run this workflow ' +
+                'with the same inputs once the CDN catches up.');
             }
           }
 
@@ -1265,6 +1294,7 @@ jobs:
           const ICON = {
             closed: '✅', created: '✅', pushed: '✅', merged: '✅',
             'would-close': '🔎', 'would-create': '🔎', 'would-push': '🔎',
+            updated: '✅', unchanged: '➖', 'would-update': '🔎',
             'already-closed': '➖', 'already-exists': '➖', 'already-merged': '➖',
             'nothing-to-push': '➖', 'no-release-branch': '➖',
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
@@ -1291,9 +1321,13 @@ jobs:
             L.push('');
             L.push(`${icon(sc.status)} \`${sc.nextFile}\` on \`${sc.releaseRepo}\`` +
               `@\`jenkins-releaser-config\` — **${sc.status}**`);
-            if (sc.status === 'already-exists') {
+            if (sc.status === 'updated' || sc.status === 'would-update') {
               L.push('');
-              L.push('The file was already present, so it was read rather than rewritten.');
+              L.push('The file already existed and its versions did not match, so it was ' +
+                'overwritten with the versions computed from the release.');
+            } else if (sc.status === 'unchanged') {
+              L.push('');
+              L.push('The file already had exactly these versions, so nothing was committed.');
             }
             L.push('');
           }
