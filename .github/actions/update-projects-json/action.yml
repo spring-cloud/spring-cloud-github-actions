@@ -21,6 +21,13 @@ inputs:
     description: 'Set to "true" to update commercial.branches.default to the new branch'
     required: false
     default: 'false'
+  remove-oss-branch:
+    description: >
+      Set to "false" to keep the OSS branch in oss.branches.scheduled and oss.jdkVersions.
+      Use for -internal branches, which mirror an OSS branch that keeps building rather than
+      replacing it. Has no effect for hotfix/release branches, which never remove the OSS entry.
+    required: false
+    default: 'true'
   token:
     description: 'GitHub token with contents:write on the spring-cloud-github-actions repository'
     required: true

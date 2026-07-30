@@ -17,7 +17,8 @@ For the resolved project the action:
    `set-default-branch` is `true`.
 3. Copies `jdkVersions` from the OSS entry into the `commercial` section,
    resolving hotfix branches against their parent branch.
-4. Removes the OSS branch from the OSS entry (skipped for hotfix branches).
+4. Removes the OSS branch from the OSS entry (skipped for hotfix branches, and
+   when `remove-oss-branch` is `false`).
 5. Commits the updated `projects.json` to the `main` branch of
    `spring-cloud-github-actions` with the message:
    `Update projects.json: add <project> commercial branch <branch>`
@@ -32,6 +33,7 @@ No commit is made if the JSON is unchanged.
 | `oss-branch` | no | `''` | OSS branch being copied. Leave empty for hotfix branches (use `oss-tag` instead). |
 | `commercial-branch` | yes | — | New commercial branch name |
 | `set-default-branch` | no | `false` | Set to `true` to update `commercial.branches.default` to the new branch |
+| `remove-oss-branch` | no | `true` | Set to `false` to keep the OSS branch in `oss.branches.scheduled` and `oss.jdkVersions`. Used for `-internal` branches, which mirror an OSS branch that keeps building rather than replacing it. |
 | `token` | yes | — | GitHub token with `contents: write` on `spring-cloud-github-actions` |
 
 ## Usage

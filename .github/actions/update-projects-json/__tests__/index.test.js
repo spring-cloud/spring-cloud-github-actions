@@ -241,6 +241,26 @@ describe('updateProjects', () => {
     expect(changed).toBe(false);
   });
 
+  test('keeps oss branch scheduled when removeOssBranch is false', () => {
+    const data = makeData();
+    updateProjects(data, 'spring-cloud/spring-cloud-config', '4.1.x', '4.1.x-internal', false, false);
+    expect(data['spring-cloud-config'].commercial.branches.scheduled).toContain('4.1.x-internal');
+    expect(data['spring-cloud-config'].oss.branches.scheduled).toContain('4.1.x');
+    expect(data['spring-cloud-config'].oss.jdkVersions['4.1.x']).toEqual(['17']);
+  });
+
+  test('internal branch inherits JDKs from the oss branch it mirrors', () => {
+    const data = makeData();
+    updateProjects(data, 'spring-cloud/spring-cloud-config', '4.2.x', '4.2.x-internal', false, false);
+    expect(data['spring-cloud-config'].commercial.jdkVersions['4.2.x-internal']).toEqual(['17', '21']);
+  });
+
+  test('removeOssBranch defaults to true when omitted', () => {
+    const data = makeData();
+    updateProjects(data, 'spring-cloud/spring-cloud-config', '4.1.x', '4.1.x');
+    expect(data['spring-cloud-config'].oss.branches.scheduled).not.toContain('4.1.x');
+  });
+
   test('does not remove oss branch for hotfix branch', () => {
     const data = makeData();
     updateProjects(data, 'spring-cloud/spring-cloud-config', '4.1.x', '4.1.1.x', false);

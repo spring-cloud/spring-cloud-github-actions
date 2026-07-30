@@ -112,8 +112,13 @@ function dumpsPretty(data) {
 /**
  * Updates the projects.json data object when a new commercial branch is initialized.
  * Returns true if any changes were made.
+ *
+ * removeOssBranch: when false the OSS branch is left in oss.branches.scheduled and
+ * oss.jdkVersions even though the commercial branch is a regular (non-hotfix) branch.
+ * Used for -internal branches, which mirror an OSS branch that keeps building rather
+ * than replacing it.
  */
-function updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault) {
+function updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault, removeOssBranch = true) {
   const rawProjectName = ossRepo.split('/').pop();
   // Strip -commercial suffix for projects.json lookup (projects are keyed without it).
   const isCommercialSource = rawProjectName.endsWith('-commercial');
@@ -173,7 +178,9 @@ function updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault) 
   }
 
   // 4. Remove the branch from the OSS entry (regular branches only, not tag-based hotfixes)
-  if (ossBranch && !isHotfixBranch(commercialBranch)) {
+  if (ossBranch && !isHotfixBranch(commercialBranch) && !removeOssBranch) {
+    core.info(`remove-oss-branch is false — leaving '${ossBranch}' in the OSS entry.`);
+  } else if (ossBranch && !isHotfixBranch(commercialBranch)) {
     if (!entry.oss) entry.oss = {};
     const oss = entry.oss;
     if (!oss.branches) oss.branches = {};
@@ -212,6 +219,8 @@ async function run() {
     const commercialBranch = core.getInput('commercial-branch', { required: true }).trim();
     const setDefaultStr = (core.getInput('set-default-branch') || 'false').toLowerCase();
     const setDefault = ['true', '1', 'yes'].includes(setDefaultStr);
+    const removeOssBranchStr = (core.getInput('remove-oss-branch') || 'true').toLowerCase();
+    const removeOssBranch = ['true', '1', 'yes'].includes(removeOssBranchStr);
     const token = core.getInput('token', { required: true });
     core.setSecret(token);
 
@@ -222,6 +231,7 @@ async function run() {
     core.info(`OSS branch:        ${ossBranch || '<none>'}`);
     core.info(`Commercial branch: ${commercialBranch}`);
     core.info(`Set default:       ${setDefault}`);
+    core.info(`Remove OSS branch: ${removeOssBranch}`);
     core.info('');
 
     const repoDir = path.join(os.tmpdir(), '_projects_json_repo');
@@ -241,7 +251,7 @@ async function run() {
     const projectsFile = path.join(repoDir, 'config', 'projects.json');
     const data = JSON.parse(fs.readFileSync(projectsFile, 'utf-8'));
 
-    const changed = updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault);
+    const changed = updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault, removeOssBranch);
 
     if (!changed) {
       core.info('No changes required.');

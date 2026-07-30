@@ -3,8 +3,7 @@ description: >
   Checks out a Spring Cloud project release branch, updates dependency versions from the
   release train, verifies no pre-release versions remain, commits and pushes the changes,
   then triggers the project's release-train-ready.yml workflow and waits for it to complete.
-  Finally removes the release branch from the Antora playbook (docs-build branch) and from
-  projects.json.
+  Finally removes the release branch from the Antora playbook (docs-build branch).
 author: 'Spring Cloud Team'
 
 inputs:
@@ -170,93 +169,6 @@ runs:
         branch: release/${{ inputs.project-version }}
         operation: remove
         token: ${{ inputs.token }}
-
-    - name: Remove release branch from projects.json
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        PROJECT: ${{ inputs.project }}
-        RELEASE_BRANCH: release/${{ inputs.project-version }}
-      run: |
-        cat > /tmp/remove_from_projects.js << 'JSEOF'
-        const fs = require('fs');
-
-        const project       = process.env.PROJECT;
-        const releaseBranch = process.env.RELEASE_BRANCH;
-
-        const config = JSON.parse(fs.readFileSync('/tmp/projects_original.json', 'utf8'));
-
-        const isCommercial = project.endsWith('-commercial');
-        const baseProject  = isCommercial ? project.slice(0, -'-commercial'.length) : project;
-
-        if (!config[baseProject] || !config[baseProject].commercial) {
-          console.log(`No commercial entry found for ${baseProject} in projects.json — nothing to remove.`);
-          process.exit(0);
-        }
-
-        const commercial = config[baseProject].commercial;
-        let changed = false;
-
-        const scheduled = (commercial.branches || {}).scheduled || [];
-        const idx = scheduled.indexOf(releaseBranch);
-        if (idx !== -1) {
-          scheduled.splice(idx, 1);
-          changed = true;
-          console.log(`Removed ${releaseBranch} from ${baseProject}.commercial.branches.scheduled`);
-        } else {
-          console.log(`${releaseBranch} not in branches.scheduled — skipping`);
-        }
-
-        const versionMap = commercial.jdkVersions || {};
-        if (releaseBranch in versionMap) {
-          delete versionMap[releaseBranch];
-          changed = true;
-          console.log(`Removed ${baseProject}.commercial.jdkVersions[${releaseBranch}]`);
-        } else {
-          console.log(`jdkVersions[${releaseBranch}] not found — skipping`);
-        }
-
-        if (!changed) {
-          console.log('No changes needed to projects.json.');
-          process.exit(0);
-        }
-
-        let raw = JSON.stringify(config, null, 2);
-        raw = raw.replace(/\[[\s\S]*?\]/g, m => {
-          try {
-            const arr = JSON.parse(m);
-            if (Array.isArray(arr) && arr.every(x => typeof x === 'string')) {
-              return '[' + arr.map(x => JSON.stringify(x)).join(', ') + ']';
-            }
-          } catch {}
-          return m;
-        });
-
-        fs.writeFileSync('/tmp/projects_updated.json', raw + '\n', 'utf8');
-        console.log('projects.json written.');
-        JSEOF
-
-        file_response=$(gh api "repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json?ref=main")
-        current_sha=$(echo "$file_response" | jq -r '.sha')
-        echo "$file_response" | jq -r '.content' | tr -d '\n' | base64 -d > /tmp/projects_original.json
-        cp /tmp/projects_original.json /tmp/projects_updated.json
-
-        node /tmp/remove_from_projects.js
-
-        if diff -q /tmp/projects_original.json /tmp/projects_updated.json > /dev/null 2>&1; then
-          echo "No changes to projects.json — nothing to push."
-        else
-          new_content_b64=$(base64 -w 0 /tmp/projects_updated.json)
-          jq -n \
-            --arg message "Removing ${RELEASE_BRANCH} for ${PROJECT} after release is ready" \
-            --arg content "$new_content_b64" \
-            --arg sha "$current_sha" \
-            '{message: $message, content: $content, sha: $sha, branch: "main"}' | \
-          gh api "repos/spring-cloud/spring-cloud-github-actions/contents/config/projects.json" \
-            --method PUT \
-            --input -
-          echo "projects.json updated on main."
-        fi
 
 branding:
   icon: 'check-square'

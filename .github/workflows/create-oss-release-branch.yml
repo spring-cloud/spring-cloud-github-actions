@@ -1,30 +1,36 @@
 name: Create OSS Release Branch
 
-# Creates a commercial release branch directly from an OSS source branch.
+# Prepares a commercial release from an OSS source branch, in two stages.
 #
-# Unlike create-hotfix-branch (which starts from a tag), this workflow creates
-# a release branch from an OSS branch (e.g. main) so that the full git history
-# is preserved and the branch can later be merged back into the OSS repo.
+# Stage 1 — the -internal branch (long-lived, one per minor line)
+#   The OSS branch is cloned with full history and pushed to the commercial repo as
+#   <major>.<minor>.x-internal, derived from the root pom.xml version
+#   (e.g. pom version 5.0.0-SNAPSHOT → 5.0.x-internal).  The branch is initialised with
+#   the commercial release CI files, registered in projects.json, and its pom versions
+#   are rewritten from -SNAPSHOT to -INTERNAL-SNAPSHOT using the internal snapshot
+#   properties file for the Spring Cloud release train
+#   (e.g. 2026_1_0-internal-snapshot.properties in spring-cloud-release-commercial
+#   @jenkins-releaser-config).  Dependency versions are updated from the same file.
+#   Those changes are pushed without [skip actions], so the CI release workflow runs
+#   asynchronously while the rest of this workflow continues.
 #
-# The commercial repo is always the OSS repo with -commercial appended.
-# The release branch is named release/<version>, where <version> is derived by
-# stripping -SNAPSHOT from the root pom.xml version on the OSS branch
-# (e.g. pom version 5.0.0-SNAPSHOT → release/5.0.0).
+#   The -internal branch is created only once per minor line.  On later releases in the
+#   same line (5.0.1, 5.0.2 …) creation is skipped and the existing branch is re-stamped
+#   for the new release train.  It is deregistered from projects.json by retire-branch.yml
+#   when the line is retired, not at the end of each release.
 #
-# Initialisation steps (each committed with [skip actions]):
-#   1. Update CI/PR workflows to commercial equivalents
-#   2. Copy .settings.xml from the commercial repo default branch
-#   3. Replace OSS repo.spring.io references with commercial repos
-#      (and add https://repo.spring.io/snapshot for snapshot-only dependencies)
-#   4. Update distribution management to commercial Broadcom entries
-#   5. Update projects.json to register the new commercial release branch
+# Stage 2 — the release/ branch (per release, disposable)
+#   release/<version> is cut from the -internal branch tip, where <version> is the root
+#   pom.xml version with -SNAPSHOT stripped (e.g. 5.0.0-SNAPSHOT → release/5.0.0).  Its
+#   pom versions stay at -INTERNAL-SNAPSHOT until release-train-ready stamps the real
+#   release versions.  Release branches are not registered in projects.json.
 #
-# After initialisation:
+# After both branches exist:
 #   - A milestone is created in the OSS repo
-#   - release-train-join.yml and release-train-ready.yml are ensured in the branch
+#   - release-train-join.yml and release-train-ready.yml are ensured in the release branch
 #   - release-train-join.yml is triggered with deployment-destination=Maven Central
 #     (unless the trigger_release_train_join input is set to false to opt out)
-#   - A final empty commit is pushed to trigger CI
+#   - The release branch's [skip actions] commits are squashed and pushed to trigger CI
 
 on:
   workflow_dispatch:
@@ -39,6 +45,10 @@ on:
         type: string
       spring_release_train:
         description: 'Spring release train this release is part of (e.g. 2026.1)'
+        required: true
+        type: string
+      spring_cloud_release_train:
+        description: 'Spring Cloud release train version this release is part of (e.g. 2026.1.0). Used to look up the -INTERNAL-SNAPSHOT properties file in spring-cloud-release-commercial@jenkins-releaser-config.'
         required: true
         type: string
       sha:
@@ -56,17 +66,19 @@ permissions:
   contents: read
 
 jobs:
-  # Read root pom.xml from the OSS branch to derive the release version and
-  # commercial branch/repo names.
+  # Read root pom.xml from the OSS branch to derive the release version, the internal
+  # branch name, and the commercial branch/repo names.
   derive:
     runs-on: ubuntu-latest
     outputs:
-      release_version:    ${{ steps.derive.outputs.release_version }}
-      commercial_repo:    ${{ steps.derive.outputs.commercial_repo }}
-      commercial_project: ${{ steps.derive.outputs.commercial_project }}
-      commercial_branch:  ${{ steps.derive.outputs.commercial_branch }}
+      release_version:        ${{ steps.derive.outputs.release_version }}
+      commercial_repo:        ${{ steps.derive.outputs.commercial_repo }}
+      commercial_project:     ${{ steps.derive.outputs.commercial_project }}
+      commercial_branch:      ${{ steps.derive.outputs.commercial_branch }}
+      internal_branch:        ${{ steps.derive.outputs.internal_branch }}
+      internal_train_version: ${{ steps.derive.outputs.internal_train_version }}
     steps:
-      - name: Derive release version and commercial branch from pom.xml
+      - name: Derive release version, internal branch and commercial branch from pom.xml
         id: derive
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
@@ -85,58 +97,191 @@ jobs:
           process.stdout.write(m[1].replace(/-SNAPSHOT\$/, '') + '\n');
           ")
 
+          # The internal branch covers the whole minor line, so the patch segment is
+          # dropped: 5.0.0 -> 5.0.x-internal, 4.2.5 -> 4.2.x-internal.  Derived from the
+          # pom version rather than the OSS branch name so that main and 4.2.x both work.
+          if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+(\..+)?$ ]]; then
+            echo "ERROR: pom version '${release_version}' is not <major>.<minor>[.<patch>] —"
+            echo "cannot derive the internal branch name from it."
+            exit 1
+          fi
+          INTERNAL_BRANCH="$(echo "$release_version" | cut -d. -f1-2).x-internal"
+
+          # The internal snapshot properties file is looked up by release train version:
+          # 2026.1.0 -> 2026.1.0-INTERNAL-SNAPSHOT -> 2026_1_0-internal-snapshot.properties
+          train="${{ inputs.spring_cloud_release_train }}"
+          train_upper="$(echo "$train" | tr '[:lower:]' '[:upper:]')"
+          if [[ "$train_upper" == *-INTERNAL-SNAPSHOT ]]; then
+            INTERNAL_TRAIN_VERSION="$train"
+          else
+            INTERNAL_TRAIN_VERSION="${train}-INTERNAL-SNAPSHOT"
+          fi
+
           COMMERCIAL_REPO="spring-cloud/${{ inputs.oss_repo }}-commercial"
           COMMERCIAL_PROJECT="${{ inputs.oss_repo }}-commercial"
           COMMERCIAL_BRANCH="release/${release_version}"
 
-          echo "release_version=${release_version}"       >> "$GITHUB_OUTPUT"
-          echo "commercial_repo=${COMMERCIAL_REPO}"       >> "$GITHUB_OUTPUT"
-          echo "commercial_project=${COMMERCIAL_PROJECT}" >> "$GITHUB_OUTPUT"
-          echo "commercial_branch=${COMMERCIAL_BRANCH}"   >> "$GITHUB_OUTPUT"
+          echo "release_version=${release_version}"               >> "$GITHUB_OUTPUT"
+          echo "commercial_repo=${COMMERCIAL_REPO}"               >> "$GITHUB_OUTPUT"
+          echo "commercial_project=${COMMERCIAL_PROJECT}"         >> "$GITHUB_OUTPUT"
+          echo "commercial_branch=${COMMERCIAL_BRANCH}"           >> "$GITHUB_OUTPUT"
+          echo "internal_branch=${INTERNAL_BRANCH}"               >> "$GITHUB_OUTPUT"
+          echo "internal_train_version=${INTERNAL_TRAIN_VERSION}" >> "$GITHUB_OUTPUT"
 
           echo "OSS repo:           spring-cloud/${{ inputs.oss_repo }}"
           echo "OSS branch:         ${{ inputs.oss_branch }}"
           echo "Release version:    ${release_version}"
           echo "Commercial repo:    ${COMMERCIAL_REPO}"
+          echo "Internal branch:    ${INTERNAL_BRANCH}"
+          echo "Internal train:     ${INTERNAL_TRAIN_VERSION}"
           echo "Commercial branch:  ${COMMERCIAL_BRANCH}"
 
-  # Full clone of the OSS branch (preserving history) and push to the commercial
-  # repo as the new release branch.  No orphan — history is kept so the branch
-  # can be merged back into the OSS repo after the release.
-  create-branch:
+  # Full clone of the OSS branch (preserving history) and push to the commercial repo as
+  # the -internal branch.  No orphan — history is kept so the branch can be merged back
+  # into the OSS repo after the release.  Skipped when the branch already exists, which is
+  # the normal case for every release after the first in a minor line.
+  create-internal-branch:
     needs: derive
     runs-on: ubuntu-latest
-    outputs:
-      oss_sha: ${{ steps.clone.outputs.oss_sha }}
     steps:
-      - name: Clone OSS branch and push to commercial repo as release branch
-        id: clone
+      - name: Create internal branch in commercial repo
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
           oss_repo="spring-cloud/${{ inputs.oss_repo }}"
           commercial_repo="${{ needs.derive.outputs.commercial_repo }}"
-          commercial_branch="${{ needs.derive.outputs.commercial_branch }}"
+          internal_branch="${{ needs.derive.outputs.internal_branch }}"
+
+          if gh api "repos/${commercial_repo}/git/ref/heads/${internal_branch}" --silent 2>/dev/null; then
+            echo "${internal_branch} already exists in ${commercial_repo} — skipping creation."
+            echo "It will be re-stamped for this release train by the next job."
+            exit 0
+          fi
 
           echo "Cloning ${oss_repo}@${{ inputs.oss_branch }} (full history)..."
           git clone --branch "${{ inputs.oss_branch }}" \
             "https://x-access-token:${GH_TOKEN}@github.com/${oss_repo}.git" source-repo
 
-          echo "Pushing to ${commercial_repo} as ${commercial_branch}..."
+          echo "Pushing to ${commercial_repo} as ${internal_branch}..."
           cd source-repo
           git remote add commercial \
             "https://x-access-token:${GH_TOKEN}@github.com/${commercial_repo}.git"
-          git push commercial "HEAD:refs/heads/${commercial_branch}"
+          git push commercial "HEAD:refs/heads/${internal_branch}"
 
-          oss_sha=$(git rev-parse HEAD)
-          echo "oss_sha=${oss_sha}" >> "$GITHUB_OUTPUT"
-          echo "Branch ${commercial_branch} created in ${commercial_repo} at ${oss_sha}."
+          echo "Branch ${internal_branch} created in ${commercial_repo} at $(git rev-parse HEAD)."
 
-  # Apply commercial initialisation steps to the new release branch.
-  # Each action commits with [skip actions] so CI is not triggered until the
-  # final empty commit pushed by the trigger-ci job.
-  update-branch:
-    needs: [derive, create-branch]
+  # Initialise the -internal branch: commercial release CI files, projects.json
+  # registration, and the -INTERNAL-SNAPSHOT version stamp.  All steps are idempotent so
+  # they can run against a branch created by an earlier release.
+  #
+  # Ordering matters.  add-commercial-release-files commits with [skip actions] and lands
+  # ci-release.yml (whose push trigger names the internal branch); the version commit that
+  # follows is pushed *without* [skip actions], so it is what kicks off CI.
+  init-internal-branch:
+    needs: [derive, create-internal-branch]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout spring-cloud-github-actions
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Add commercial release CI files to internal branch
+        uses: ./.github/actions/add-commercial-release-files
+        with:
+          repository: ${{ needs.derive.outputs.commercial_repo }}
+          branch:     ${{ needs.derive.outputs.internal_branch }}
+          token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # remove-oss-branch is false because the internal branch mirrors the OSS branch
+      # rather than replacing it — the OSS branch keeps building on its own schedule.
+      - name: Update projects.json with the new internal branch
+        uses: ./.github/actions/update-projects-json
+        with:
+          oss-repo:          spring-cloud/${{ inputs.oss_repo }}
+          oss-branch:        ${{ inputs.oss_branch }}
+          commercial-branch: ${{ needs.derive.outputs.internal_branch }}
+          remove-oss-branch: 'false'
+          token:             ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Clone internal branch
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          git clone --single-branch --branch "${{ needs.derive.outputs.internal_branch }}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ needs.derive.outputs.commercial_repo }}.git" \
+            _internal_repo
+
+          git -C _internal_repo config user.name  "Spring Builds"
+          git -C _internal_repo config user.email "svc.spring-builds@broadcom.com"
+
+      # Stamps the project version to <version>-INTERNAL-SNAPSHOT and rewrites dependency
+      # version properties, both read from the internal snapshot properties file for this
+      # release train.
+      - name: Update project and dependency versions to INTERNAL-SNAPSHOT
+        uses: ./.github/actions/update-project-versions
+        with:
+          release-train-version: ${{ needs.derive.outputs.internal_train_version }}
+          commercial:            'true'
+          token:                 ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          directory:             _internal_repo
+
+      - name: Commit and push version updates
+        run: |
+          internal_branch="${{ needs.derive.outputs.internal_branch }}"
+          cd _internal_repo
+          git add .
+          if git diff --cached --quiet; then
+            echo "No version changes to commit — ${internal_branch} is already stamped for"
+            echo "${{ needs.derive.outputs.internal_train_version }}.  Nothing is pushed, so no CI run is triggered."
+            exit 0
+          fi
+          git commit -m "Update versions for ${{ needs.derive.outputs.internal_train_version }}"
+          git push origin "${internal_branch}"
+          echo "Version updates pushed to ${internal_branch} — the CI release workflow will run asynchronously."
+
+  # Cut release/<version> from the tip of the initialised -internal branch.  A plain ref
+  # creation inside the commercial repo; no clone is needed.
+  create-release-branch:
+    needs: [derive, init-internal-branch]
+    runs-on: ubuntu-latest
+    outputs:
+      base_sha: ${{ steps.create.outputs.base_sha }}
+    steps:
+      - name: Create release branch from internal branch
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          commercial_repo="${{ needs.derive.outputs.commercial_repo }}"
+          commercial_branch="${{ needs.derive.outputs.commercial_branch }}"
+          internal_branch="${{ needs.derive.outputs.internal_branch }}"
+
+          if gh api "repos/${commercial_repo}/git/ref/heads/${commercial_branch}" --silent 2>/dev/null; then
+            echo "ERROR: ${commercial_branch} already exists in ${commercial_repo}."
+            echo "Version ${{ needs.derive.outputs.release_version }} looks like it has already been released."
+            exit 1
+          fi
+
+          base_sha=$(gh api "repos/${commercial_repo}/git/ref/heads/${internal_branch}" --jq '.object.sha')
+          echo "Creating ${commercial_branch} in ${commercial_repo} from ${internal_branch} at ${base_sha}..."
+
+          gh api "repos/${commercial_repo}/git/refs" \
+            --method POST \
+            --field ref="refs/heads/${commercial_branch}" \
+            --field sha="${base_sha}"
+
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "Branch ${commercial_branch} created."
+
+  # The release branch inherits ci-release.yml from the internal branch, where the push
+  # trigger names the internal branch.  Re-running add-commercial-release-files rewrites it
+  # for release/<version>.  The commit carries [skip actions]; the trigger-ci job squashes
+  # it and pushes to start CI.
+  #
+  # Release branches are intentionally not registered in projects.json.
+  update-release-branch:
+    needs: [derive, create-release-branch]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout spring-cloud-github-actions
@@ -150,14 +295,6 @@ jobs:
           repository: ${{ needs.derive.outputs.commercial_repo }}
           branch:     ${{ needs.derive.outputs.commercial_branch }}
           token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
-
-      - name: Update projects.json with the new commercial release branch
-        uses: ./.github/actions/update-projects-json
-        with:
-          oss-repo:          spring-cloud/${{ inputs.oss_repo }}
-          oss-branch:        ${{ inputs.oss_branch }}
-          commercial-branch: ${{ needs.derive.outputs.commercial_branch }}
-          token:             ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
   # Create a milestone in the OSS repo (not the commercial repo) for the release version.
   create-milestone:
@@ -178,7 +315,7 @@ jobs:
   # files.  If either is missing, run the generator against the commercial release
   # branch to produce them before triggering release-train-join.yml.
   ensure-workflows:
-    needs: [derive, update-branch]
+    needs: [derive, update-release-branch]
     runs-on: ubuntu-latest
     steps:
       - name: Check for required release train workflows in OSS branch
@@ -298,7 +435,7 @@ jobs:
   # push it (without [skip actions]) to trigger the CI pipeline on the newly
   # initialised commercial release branch.
   trigger-ci:
-    needs: [derive, create-branch, trigger-release-train-join]
+    needs: [derive, create-release-branch, trigger-release-train-join]
     runs-on: ubuntu-latest
     steps:
       - name: Squash initialization commits and push to trigger CI
@@ -307,7 +444,7 @@ jobs:
         run: |
           COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
           BRANCH="${{ needs.derive.outputs.commercial_branch }}"
-          BASE_SHA="${{ needs.create-branch.outputs.oss_sha }}"
+          BASE_SHA="${{ needs.create-release-branch.outputs.base_sha }}"
 
           git clone --single-branch --branch "$BRANCH" \
             "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _trigger_repo
@@ -316,8 +453,9 @@ jobs:
           git config user.name  "Spring Builds"
           git config user.email "svc.spring-builds@broadcom.com"
 
-          # Soft-reset to the OSS SHA that the branch was created from, staging all
-          # initialization changes, then commit them as a single push to trigger CI.
+          # Soft-reset to the internal branch SHA that the release branch was cut from,
+          # staging all initialization changes, then commit them as a single push to
+          # trigger CI.
           if [[ "$(git rev-parse HEAD)" != "$BASE_SHA" ]]; then
             git reset --soft "$BASE_SHA"
             git commit -m "Initialize commercial release branch"
