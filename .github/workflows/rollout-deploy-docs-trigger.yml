@@ -48,6 +48,7 @@ jobs:
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
       count: ${{ steps.build-matrix.outputs.count }}
+      excluded: ${{ steps.build-matrix.outputs.excluded }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -119,6 +120,8 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT,
             `matrix=${JSON.stringify({ include: entries })}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${entries.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `excluded=${JSON.stringify(excluded)}\n`);
           JSEOF
 
   sync:
@@ -179,7 +182,7 @@ jobs:
 
   summary:
     name: Summary
-    needs: sync
+    needs: [setup, sync]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -193,6 +196,7 @@ jobs:
       - name: Write summary
         env:
           DRY_RUN: ${{ inputs.dry_run }}
+          EXCLUDED: ${{ needs.setup.outputs.excluded }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -247,6 +251,29 @@ jobs:
             lines.push('These branches are deliberately not built; the rollout never creates the file.');
             lines.push('');
             for (const r of noTrigger) lines.push(`- \`${r.repo}\` @ \`${r.branch}\``);
+          }
+
+          // Excluded before the matrix was built, so these never produce a
+          // result artifact - carry them through from the setup job rather
+          // than leaving them buried in that job's log.
+          let excluded = [];
+          try {
+            excluded = JSON.parse(process.env.EXCLUDED || '[]');
+          } catch (err) {
+            console.log(`Could not parse excluded list: ${err.message}`);
+          }
+
+          lines.push('');
+          lines.push('### Excluded — `release/` or `-internal` branch');
+          lines.push('');
+          if (excluded.length) {
+            lines.push('These are not published as docs and are never targeted by this rollout.');
+            lines.push('');
+            for (const e of excluded) lines.push(`- \`${e.repo}\` @ \`${e.branch}\``);
+            lines.push('');
+            lines.push(`**${excluded.length}** branches excluded.`);
+          } else {
+            lines.push('None — no `release/` or `-internal` branches in `projects.json`.');
           }
 
           if (failed.length) {
