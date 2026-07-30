@@ -30,7 +30,7 @@ on:
         type: string
         default: ''
 
-  # Weekdays at 6:00am US Eastern time. GitHub Actions cron always runs in
+  # Weekdays at ~6:00am US Eastern time. GitHub Actions cron always runs in
   # UTC and has no notion of DST, so this is split into two entries - one at
   # the UTC offset for EDT (UTC-4), one for EST (UTC-5) - selected by month.
   # The actual US DST boundary (2nd Sunday in March / 1st Sunday in November)
@@ -40,9 +40,13 @@ on:
   # workaround. There is no existing DST convention elsewhere in this repo's
   # scheduled workflows to follow (examples/deploy.yml's schedule doesn't
   # account for DST at all).
+  #
+  # Minute is :07, not :00 - GitHub's own docs flag the top of the hour as
+  # the highest-congestion time for scheduled workflows and recommend an
+  # off-the-hour minute to reduce the chance of delay or a dropped run.
   schedule:
-    - cron: '0 10 * 3-10 1-5'      # 6:00am EDT, March-October
-    - cron: '0 11 * 11,12,1,2 1-5' # 6:00am EST, November-February
+    - cron: '7 10 * 3-10 1-5'      # ~6:07am EDT, March-October
+    - cron: '7 11 * 11,12,1,2 1-5' # ~6:07am EST, November-February
 
 permissions:
   contents: read
