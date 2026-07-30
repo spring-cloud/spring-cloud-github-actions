@@ -76,10 +76,16 @@ jobs:
           const repoType = (process.env.REPO_TYPE || 'both').trim();
           const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
 
+          // release/ branches and -internal branches are excluded: they are
+          // short-lived or private-facing and are not published as docs.
+          const isExcluded = branch =>
+            branch.startsWith('release/') || branch.endsWith('-internal');
+
           // One entry per repository x scheduled branch. Whether a branch
           // actually has a trigger workflow is decided by the sync action,
           // which skips (never creates) when the file is absent.
           const entries = [];
+          const excluded = [];
           for (const [projectKey, config] of Object.entries(projects)) {
             if (projectKey === 'defaults') continue;
             if (filter.size > 0 && !filter.has(projectKey)) continue;
@@ -89,6 +95,10 @@ jobs:
                 ? `spring-cloud/${projectKey}-commercial`
                 : `spring-cloud/${projectKey}`;
               for (const branch of (config[typeKey].branches || {}).scheduled || []) {
+                if (isExcluded(branch)) {
+                  excluded.push({ repo, branch });
+                  continue;
+                }
                 entries.push({ repo, branch, type: typeKey });
               }
             }
@@ -99,6 +109,12 @@ jobs:
 
           console.log(`Repository/branch pairs to process: ${entries.length}`);
           for (const e of entries) console.log(`  ${e.repo} @ ${e.branch} (${e.type})`);
+
+          // Listed rather than silently dropped, so the excluded set stays visible.
+          if (excluded.length) {
+            console.log(`\nExcluded - release/ or -internal branch: ${excluded.length}`);
+            for (const e of excluded) console.log(`  ${e.repo} @ ${e.branch}`);
+          }
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT,
             `matrix=${JSON.stringify({ include: entries })}\n`);
