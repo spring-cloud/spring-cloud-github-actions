@@ -1293,6 +1293,8 @@ jobs:
           // identical to one that did all the work.
           const ICON = {
             closed: '✅', created: '✅', pushed: '✅', merged: '✅',
+            // bumpOutcome carries a GitHub step outcome, not one of our own statuses.
+            success: '✅', cancelled: '⚠️',
             'would-close': '🔎', 'would-create': '🔎', 'would-push': '🔎',
             updated: '✅', unchanged: '➖', 'would-update': '🔎',
             'already-closed': '➖', 'already-exists': '➖', 'already-merged': '➖',
