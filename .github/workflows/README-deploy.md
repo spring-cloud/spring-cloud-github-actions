@@ -25,6 +25,15 @@ The workflow configures Maven settings for Artifactory (OSS and optional commerc
 | `branches` | Branch(es) to build — single branch or comma-separated list (e.g. `main,3.3.x,3.2.x`). Empty uses ref or scheduled config. | No | string |
 | `custom_build_command` | Custom run command for the build step (overrides default Maven command). Supports multi-line. | No | string |
 | `runs_on` | Runner to use for the build job. | No | string (default: `ubuntu-latest`) |
+| `build_docs` | Include the `docs` profile in the deploying build. Set to `false` for branches whose version cannot produce a parseable Antora component version — see below. | No | boolean (default: `true`) |
+
+### `build_docs`
+
+The deploying JDK normally builds with `-Pdocs,deploy,spring`. The `antora-component-version` Maven plugin derives the Antora component version from the project version by stripping **only** `-SNAPSHOT`, so a `-INTERNAL-SNAPSHOT` project version yields e.g. `5.0.3-INTERNAL`. `@springio/antora-extensions` then rejects it — it requires `X.Y.Z[.W][-RC<n>|-M<n>]` — and the build fails with `FATAL (antora): Cannot parse version`.
+
+The plugin exposes no configuration for this (its only mojo parameter is `project`), so the component version cannot be overridden on the command line. Setting `build_docs: false` drops `-Pdocs` from the deploy command instead, which is what the commercial release CI (`ci-release.yml`, added by [`add-commercial-release-files`](../actions/add-commercial-release-files/action.yml)) does for `-internal` and `release/` branches.
+
+Non-deploying JDK legs never include the docs profile, so they are unaffected.
 
 ## Secrets
 

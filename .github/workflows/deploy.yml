@@ -25,6 +25,16 @@ on:
         required: false
         type: boolean
         default: true
+      build_docs:
+        description: >
+          Include the docs profile in the deploying build. Set to false for branches whose
+          project version cannot produce a parseable Antora component version — the
+          antora-component-version plugin derives it by stripping only -SNAPSHOT, so a
+          -INTERNAL-SNAPSHOT version yields e.g. 5.0.3-INTERNAL, which @springio/antora-extensions
+          rejects (it requires X.Y.Z[.W][-RC<n>|-M<n>]) and the build fails.
+        required: false
+        type: boolean
+        default: true
     secrets:
       ARTIFACTORY_USERNAME:
         required: true
@@ -151,6 +161,22 @@ jobs:
             echo "This build will NOT deploy artifacts"
           fi
 
+          # The caller can veto the docs profile even on the deploying JDK. Used by the
+          # commercial release CI on -INTERNAL-SNAPSHOT branches, where Antora cannot parse
+          # the derived component version.
+          if [[ "${{ inputs.build_docs }}" == "false" && "$BUILD_WITH_DOCS" == "true" ]]; then
+            BUILD_WITH_DOCS=false
+            echo "build_docs input is false — the docs profile is disabled for this build"
+          fi
+
+          # -Pdocs is only added when the profile is wanted; the rest of the command is
+          # identical either way.
+          if [[ "$BUILD_WITH_DOCS" == "true" ]]; then
+            echo "DEPLOY_PROFILES=-Pdocs,deploy,spring" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_PROFILES=-Pdeploy,spring" >> $GITHUB_ENV
+          fi
+
           echo "BUILD_WITH_DOCS=$BUILD_WITH_DOCS" >> $GITHUB_ENV
           echo "SHOULD_DEPLOY=$SHOULD_DEPLOY" >> $GITHUB_ENV
           echo "Build configuration: BUILD_WITH_DOCS=$BUILD_WITH_DOCS, SHOULD_DEPLOY=$SHOULD_DEPLOY"
@@ -197,9 +223,10 @@ jobs:
       - name: Build and deploy
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
         run: |
-          # Run Maven deploy for the designated JDK version (always includes docs profile)
-          echo "Building with docs profile and deploying artifacts"
-          ./mvnw clean deploy -Pdocs,deploy,spring -B -U $MAVEN_FLAGS $MAVEN_SETTINGS $MAVEN_DEPLOY_FLAGS
+          # Run Maven deploy for the designated JDK version. DEPLOY_PROFILES carries the
+          # docs profile unless the caller disabled it via the build_docs input.
+          echo "Deploying artifacts with $DEPLOY_PROFILES"
+          ./mvnw clean deploy $DEPLOY_PROFILES -B -U $MAVEN_FLAGS $MAVEN_SETTINGS $MAVEN_DEPLOY_FLAGS
 
       - name: Custom build command
         if: ${{ inputs.custom_build_command != '' }}

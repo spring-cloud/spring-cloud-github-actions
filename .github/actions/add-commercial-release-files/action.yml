@@ -91,6 +91,12 @@ runs:
             with:
               branches: EXPR_inputs.branches_EXPR
               runs_on: ubuntu22-2-8
+              # The branches this workflow builds carry -INTERNAL-SNAPSHOT versions until
+              # release-train-ready stamps the release versions. The antora-component-version
+              # plugin derives the component version by stripping only -SNAPSHOT, producing
+              # e.g. 5.0.3-INTERNAL, which @springio/antora-extensions cannot parse. Building
+              # the docs profile would fail, so it is disabled here.
+              build_docs: false
             secrets:
               ARTIFACTORY_USERNAME: EXPR_secrets.ARTIFACTORY_USERNAME_EXPR
               ARTIFACTORY_PASSWORD: EXPR_secrets.ARTIFACTORY_PASSWORD_EXPR
