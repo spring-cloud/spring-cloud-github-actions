@@ -1,5 +1,19 @@
 name: Create OSS Release Branch
 
+# Names each run for what it targets, so the Actions list distinguishes runs at a glance:
+#
+#   Create OSS Release Branch - spring-cloud-config (main) - 2026.1.0
+#   Create OSS Release Branch - spring-cloud-gateway (4.2.x) - 2025.1.2
+#
+# run-name is evaluated before any job starts, so it can only read the inputs — the
+# -internal and release/ branch names are derived from the OSS pom.xml inside the derive
+# job. Those appear in the job names instead, which are evaluated with the needs context:
+#
+#   Create Internal Branch - 5.0.x-internal
+#   Initialize Internal Branch - 5.0.x-internal
+#   Create Release Branch - release/5.0.0
+run-name: "Create OSS Release Branch - ${{ inputs.oss_repo }} (${{ inputs.oss_branch }}) - ${{ inputs.spring_cloud_release_train }}"
+
 # Prepares a commercial release from an OSS source branch, in two stages.
 #
 # Stage 1 — the -internal branch (long-lived, one per minor line)
@@ -69,6 +83,7 @@ jobs:
   # Read root pom.xml from the OSS branch to derive the release version, the internal
   # branch name, and the commercial branch/repo names.
   derive:
+    name: Derive Branch Names - ${{ inputs.oss_repo }} (${{ inputs.oss_branch }})
     runs-on: ubuntu-latest
     outputs:
       release_version:        ${{ steps.derive.outputs.release_version }}
@@ -141,6 +156,7 @@ jobs:
   # into the OSS repo after the release.  Skipped when the branch already exists, which is
   # the normal case for every release after the first in a minor line.
   create-internal-branch:
+    name: Create Internal Branch - ${{ needs.derive.outputs.internal_branch }}
     needs: derive
     runs-on: ubuntu-latest
     steps:
@@ -178,6 +194,7 @@ jobs:
   # ci-release.yml (whose push trigger names the internal branch); the version commit that
   # follows is pushed *without* [skip actions], so it is what kicks off CI.
   init-internal-branch:
+    name: Initialize Internal Branch - ${{ needs.derive.outputs.internal_branch }}
     needs: [derive, create-internal-branch]
     runs-on: ubuntu-latest
     steps:
@@ -243,6 +260,7 @@ jobs:
   # Cut release/<version> from the tip of the initialised -internal branch.  A plain ref
   # creation inside the commercial repo; no clone is needed.
   create-release-branch:
+    name: Create Release Branch - ${{ needs.derive.outputs.commercial_branch }}
     needs: [derive, init-internal-branch]
     runs-on: ubuntu-latest
     outputs:
@@ -281,6 +299,7 @@ jobs:
   #
   # Release branches are intentionally not registered in projects.json.
   update-release-branch:
+    name: Update Release Branch - ${{ needs.derive.outputs.commercial_branch }}
     needs: [derive, create-release-branch]
     runs-on: ubuntu-latest
     steps:
@@ -298,6 +317,7 @@ jobs:
 
   # Create a milestone in the OSS repo (not the commercial repo) for the release version.
   create-milestone:
+    name: Create Milestone - ${{ needs.derive.outputs.release_version }}
     needs: derive
     runs-on: ubuntu-latest
     steps:
@@ -315,6 +335,7 @@ jobs:
   # files.  If either is missing, run the generator against the commercial release
   # branch to produce them before triggering release-train-join.yml.
   ensure-workflows:
+    name: Ensure Release Train Workflows - ${{ needs.derive.outputs.commercial_branch }}
     needs: [derive, update-release-branch]
     runs-on: ubuntu-latest
     steps:
@@ -402,6 +423,7 @@ jobs:
   # complete before proceeding.  Maven Central is used as the deployment
   # destination because this is an OSS project release.
   trigger-release-train-join:
+    name: Join Release Train - ${{ needs.derive.outputs.commercial_branch }}
     needs: [derive, ensure-workflows, create-milestone]
     runs-on: ubuntu-latest
     steps:
@@ -435,6 +457,7 @@ jobs:
   # push it (without [skip actions]) to trigger the CI pipeline on the newly
   # initialised commercial release branch.
   trigger-ci:
+    name: Trigger CI - ${{ needs.derive.outputs.commercial_branch }}
     needs: [derive, create-release-branch, trigger-release-train-join]
     runs-on: ubuntu-latest
     steps:
