@@ -27,7 +27,7 @@ on:
           - oss
           - commercial
       dry_run:
-        description: 'Render and diff without committing or pushing'
+        description: 'Dry run, if checked no changes will be committed, but you can see what would be updated'
         required: false
         type: boolean
         default: true
