@@ -1,4 +1,5 @@
 name: Rollout Deploy Docs Trigger
+run-name: ${{ format('{0} ({1})', github.workflow, inputs.projects || 'all') }}
 
 # Pushes the canonical Deploy Docs trigger (examples/deploy-docs-trigger.yml) to
 # every source branch listed in config/projects.json that already has one.
