@@ -1,5 +1,17 @@
 name: Post Release
 
+# Names each run for what it targets, so the Actions list distinguishes runs at a glance
+# instead of showing a column of identical "Post Release" rows:
+#
+#   Post Release - 2025.1.2
+#   Post Release - 2024.0.8 (commercial)
+#   Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
+#
+# (commercial) is shown only when `projects` is empty. With a filter the input is ignored -
+# the type is derived from the names - so printing it could contradict the run, and the
+# -commercial suffix in the listed names already says which line it is.
+run-name: "Post Release - ${{ inputs.release_version }}${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || (inputs.commercial == true && ' (commercial)' || '') }}${{ inputs.dry_run == true && ' - Dry Run' || '' }}"
+
 # Performs the chores that follow a Spring Cloud release train, in order:
 #
 #   1. setup                   — read the jenkins-releaser-config properties file, validate, filter

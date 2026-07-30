@@ -32,6 +32,17 @@ This is also what makes re-running the workflow safe, and what lets a `projects`
 
 - **`workflow_dispatch`** only. There is no schedule — this runs when a release train has shipped.
 
+Each run is named for what it targets, so the Actions list distinguishes them at a glance:
+
+```
+Post Release - 2025.1.2
+Post Release - 2024.0.8 (commercial)
+Post Release - 2025.1.2.1 (commercial) - Dry Run
+Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
+```
+
+`(commercial)` appears only when `projects` is empty. With a filter the `commercial` input is ignored — the type is derived from the project names — so printing it could contradict what the run actually did, and the `-commercial` suffix on the listed names already shows which line it is.
+
 **Defaults to a dry run.** Set `dry_run` to `false` to actually close, create, commit and push.
 
 **The workflow exits non-zero** if any project hit a merge conflict or had no usable branch to update, since those leave a project half-done. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
