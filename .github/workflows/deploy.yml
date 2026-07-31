@@ -62,7 +62,7 @@ jobs:
     steps:
       - name: Determine branches and JDK versions
         id: set-matrix
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@run-workflow-for-other-branch-when-schedule
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
         with:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}
@@ -245,7 +245,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch CI for non-default branches
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@run-workflow-for-other-branch-when-schedule
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@main
         with:
           non-default-branches: ${{ needs.setup.outputs.non-default-branches }}
           repository: ${{ github.repository }}
