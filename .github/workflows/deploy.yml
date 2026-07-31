@@ -25,6 +25,13 @@ on:
         required: false
         type: boolean
         default: true
+      timeout_minutes:
+        description: >
+          Timeout for each build job. Raise it for projects whose full reactor does not finish
+          in the default hour on a single runner. GitHub caps a job at 360 minutes.  Defaults to 60 minutes.
+        required: false
+        type: number
+        default: 60
       build_docs:
         description: >
           Include the docs profile in the deploying build. Set to false for branches whose
@@ -73,7 +80,7 @@ jobs:
     name: Build ${{ matrix.branch }} (JDK ${{ matrix.java-version }})
     needs: setup
     runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.timeout_minutes || 60 }}
     strategy:
       fail-fast: false
       matrix:
