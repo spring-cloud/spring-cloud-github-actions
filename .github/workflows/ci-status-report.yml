@@ -1,7 +1,7 @@
 name: CI Status Report
 
-# Reads config/projects.json and reports the latest ci.yml/ci.yaml workflow
-# run status for every OSS and commercial branch of every Spring Cloud
+# Reads config/projects.json and reports the latest ci.yml/ci.yaml/ci-release.yml
+# workflow run status for every OSS and commercial branch of every Spring Cloud
 # project, so a branch whose CI has quietly started failing is visible in
 # one place instead of being discovered branch-by-branch.
 #
@@ -132,11 +132,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A project's CI workflow file may be named ci.yml or ci.yaml -
-          # try both and use whichever one actually exists in the repo.
+          # A project's CI workflow file is usually ci.yml or ci.yaml, but
+          # -internal branches and some OSS release/* branches run ci-release.yml
+          # instead (same convention already used by the trigger-branch-ci
+          # action) - try all three and use whichever one actually exists on
+          # this branch. Trying a name that doesn't exist is just a cheap
+          # 404, so there's no need to gate this by branch name pattern.
           RUN_JSON=""
           WORKFLOW_FILE=""
-          for wf in ci.yml ci.yaml; do
+          for wf in ci-release.yml ci.yml ci.yaml; do
             RESP=$(gh api "repos/${REPO}/actions/workflows/${wf}/runs?branch=${BRANCH}&per_page=1" 2>/dev/null || echo "")
             if [[ -n "$RESP" ]] && [[ "$(echo "$RESP" | jq -r '.total_count // 0')" != "0" ]]; then
               RUN_JSON="$RESP"
@@ -146,7 +150,7 @@ jobs:
           done
 
           if [[ -z "$RUN_JSON" ]]; then
-            echo "No ci.yml/ci.yaml runs found for ${REPO}@${BRANCH}."
+            echo "No ci-release.yml/ci.yml/ci.yaml runs found for ${REPO}@${BRANCH}."
             STATUS="not-found"
             CONCLUSION="none"
             URL=""

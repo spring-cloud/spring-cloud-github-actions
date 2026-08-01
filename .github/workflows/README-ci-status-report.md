@@ -1,13 +1,13 @@
 # CI Status Report Workflow
 
-A workflow, runnable on demand or on a schedule, that checks the latest `ci.yml`/`ci.yaml` workflow run for every OSS and commercial branch of every Spring Cloud project, so a branch whose CI has quietly started failing is visible in one place instead of being discovered branch-by-branch.
+A workflow, runnable on demand or on a schedule, that checks the latest `ci.yml`/`ci.yaml`/`ci-release.yml` workflow run for every OSS and commercial branch of every Spring Cloud project, so a branch whose CI has quietly started failing is visible in one place instead of being discovered branch-by-branch.
 
 ## Description
 
 It:
 
 1. **Builds a matrix** from [`config/projects.json`](../../config/projects.json), expanding each project's `oss` and/or `commercial` section into one entry per branch listed under `branches.scheduled` (the full set of maintained branches, not just the `default` one)
-2. **Looks up the latest run** of that branch's CI workflow via `gh api repos/<repo>/actions/workflows/<file>/runs?branch=<branch>`, trying `ci.yml` then `ci.yaml`
+2. **Looks up the latest run** of that branch's CI workflow via `gh api repos/<repo>/actions/workflows/<file>/runs?branch=<branch>`, trying `ci-release.yml`, then `ci.yml`, then `ci.yaml` — `-internal` branches and some OSS `release/*` branches run `ci-release.yml` instead of `ci.yml`/`ci.yaml` (the same convention the [`trigger-branch-ci`](../actions/trigger-branch-ci/action.yml) action already uses), so it's tried first and used whenever it's the one that actually exists on that branch
 3. **For branches whose latest run failed**, walks back through that workflow's run history to find when it broke and who broke it (see [Who broke it](#who-broke-it) below)
 4. **Writes a summary table** to the job summary showing pass/fail/pending/not-found per project, type, and branch
 5. **Posts a notification to Google Chat** (if configured) with the pass/fail counts and a link back to the run
@@ -48,7 +48,7 @@ The job summary contains one row per project/type/branch combination:
 - ❌ latest run failed — listed again under a **Failing** section with a direct link and, when available, the "who broke it" details below
 - ⚠️ latest run was cancelled
 - 🔄 latest run is still queued/in progress
-- ❔ no `ci.yml` or `ci.yaml` run was found for that branch — listed under **No CI runs found** (no blame lookback — see below)
+- ❔ no `ci-release.yml`, `ci.yml`, or `ci.yaml` run was found for that branch — listed under **No CI runs found** (no blame lookback — see below)
 
 When `GOOGLE_CHAT_WEBHOOK_URL` is set, the same pass/fail/not-found counts and the same per-branch failing details (including blame, if found) are posted as a Chat message with a `<link|View full report>` back to `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`. Chat uses its own lightweight text formatting (`*bold*`, `<url|text>`) rather than GitHub markdown, so the job summary and the Chat message render the same facts with different syntax.
 
