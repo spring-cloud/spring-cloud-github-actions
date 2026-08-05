@@ -398,8 +398,10 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `not-found=${notFound.length}\n`);
 
           const failingDetails = failing.map(r => {
+            const repo = `*${r.repo}*`;
+            const runLink = r.url ? ` (<${r.url}|run #${r.runNumber}>)` : '';
             const blame = blameLineChat(r);
-            return blame ? `${r.repo}@${r.branch} — ${blame}` : `${r.repo}@${r.branch}`;
+            return blame ? `${repo}@${r.branch}${runLink} — ${blame}` : `${repo}@${r.branch}${runLink}`;
           }).join('\n');
 
           // Multiline GITHUB_OUTPUT values need the <<delimiter heredoc form
