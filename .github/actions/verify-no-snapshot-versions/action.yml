@@ -1,5 +1,5 @@
 name: 'Verify No Snapshot Versions'
-description: 'Verifies that all Maven and Gradle build files in a Spring Cloud project contain only release versions (no -SNAPSHOT, -RC*, or -M* versions)'
+description: 'Verifies that every version in every Maven and Gradle build file in a Spring Cloud project is a release version (no -SNAPSHOT, -RC*, or -M* versions), wherever it is declared'
 author: 'Spring Cloud Team'
 
 inputs:

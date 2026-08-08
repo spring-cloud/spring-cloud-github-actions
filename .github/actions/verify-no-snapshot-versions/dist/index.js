@@ -28236,8 +28236,49 @@ const path = __nccwpck_require__(6928);
  */
 const PRE_RELEASE_PATTERN = /-SNAPSHOT$|-RC\d+$|-M\d+$/i;
 
+/**
+ * Matches values that are shaped like a version number: an optional leading `v`,
+ * then a digit, then version characters only (no whitespace, no `/`, no `:`).
+ *
+ * Used to gate values held under keys that are not explicitly named as versions,
+ * so that strings such as `https://repo.spring.io/libs-snapshot` are not mistaken
+ * for a pre-release version.
+ */
+const VERSION_SHAPE_PATTERN = /^v?\d[A-Za-z0-9.\-_+]*$/;
+
+/**
+ * Elements whose Maven coordinates are worth showing in a violation location so
+ * the offending entry can be found quickly in a large pom.
+ */
+const COORDINATE_ELEMENTS = new Set(['dependency', 'plugin', 'extension']);
+
+const CHECK_OFF_ANNOTATION = '@releaser:version-check-off';
+
 function isPreRelease(version) {
   return PRE_RELEASE_PATTERN.test(String(version).trim());
+}
+
+/**
+ * True when a value looks like a version number.
+ *
+ * Exported for unit testing.
+ */
+function looksLikeVersion(value) {
+  return VERSION_SHAPE_PATTERN.test(String(value).trim());
+}
+
+/**
+ * True for keys that unambiguously hold a version, in any of the casings used
+ * across Maven and Gradle builds:
+ *   version, spring-boot.version, spring-boot-version, springBootVersion
+ *
+ * Values under these keys are always checked. Values under any other key are
+ * only checked when they are shaped like a version (see looksLikeVersion).
+ *
+ * Exported for unit testing.
+ */
+function isVersionKey(key) {
+  return /(^|[.\-_])version$/i.test(key) || /Version$/.test(key);
 }
 
 async function run() {
@@ -28257,32 +28298,25 @@ async function run() {
 
     const allViolations = [];
 
-    const pomFiles = findFiles(directory, 'pom.xml', excludePatterns);
-    for (const file of pomFiles) {
-      const fileViolations = checkPomFile(file);
-      for (const v of fileViolations) {
-        allViolations.push({ file: path.relative(directory, file), ...v });
+    const collect = (files, checker) => {
+      for (const file of files) {
+        for (const v of checker(file)) {
+          allViolations.push({ file: path.relative(directory, file), ...v });
+        }
       }
-    }
+    };
 
-    const gradlePropsFiles = findFiles(directory, 'gradle.properties', excludePatterns);
-    for (const file of gradlePropsFiles) {
-      const fileViolations = checkGradlePropertiesFile(file);
-      for (const v of fileViolations) {
-        allViolations.push({ file: path.relative(directory, file), ...v });
-      }
-    }
-
-    const buildGradleFiles = [
-      ...findFiles(directory, 'build.gradle', excludePatterns),
-      ...findFiles(directory, 'build.gradle.kts', excludePatterns),
-    ];
-    for (const file of buildGradleFiles) {
-      const fileViolations = checkBuildGradleFile(file);
-      for (const v of fileViolations) {
-        allViolations.push({ file: path.relative(directory, file), ...v });
-      }
-    }
+    collect(findFiles(directory, 'pom.xml', excludePatterns), checkPomFile);
+    collect(findFiles(directory, 'gradle.properties', excludePatterns), checkGradlePropertiesFile);
+    collect(
+      [
+        ...findFiles(directory, 'build.gradle', excludePatterns),
+        ...findFiles(directory, 'build.gradle.kts', excludePatterns),
+        ...findFiles(directory, 'settings.gradle', excludePatterns),
+        ...findFiles(directory, 'settings.gradle.kts', excludePatterns),
+      ],
+      checkBuildGradleFile
+    );
 
     core.setOutput('violations', JSON.stringify(allViolations));
 
@@ -28306,12 +28340,7 @@ async function run() {
 // ── pom.xml ────────────────────────────────────────────────────────────────
 
 /**
- * Checks a pom.xml file for pre-release versions in:
- *   - The project's own <version>
- *   - The <parent><version>
- *   - All <properties> entries ending in .version
- *   - All <dependency><version> entries (direct and dependency management)
- *   - All <plugin><version> entries (build and plugin management)
+ * Checks a pom.xml file for pre-release versions.
  *
  * Exported for unit testing.
  *
@@ -28356,6 +28385,17 @@ function extractVersionCheckOffAnnotations(content) {
 
 /**
  * Core logic for checking pom.xml content.
+ *
+ * The whole parsed document is walked rather than a fixed list of known
+ * locations, so EVERY <version> element is checked no matter where it sits —
+ * including places a targeted check misses, such as a version pinned on a
+ * plugin's own <dependencies>, or anything declared inside a <profile>.
+ *
+ * Every entry under any <properties> block is checked too. Keys that name a
+ * version outright (foo.version, foo-version, fooVersion, version) are always
+ * checked; other keys are only checked when the value is shaped like a version,
+ * which keeps values such as repository URLs from being misread.
+ *
  * Operates on a string so it can be unit tested without touching the filesystem.
  *
  * Exported for unit testing.
@@ -28366,7 +28406,11 @@ function extractVersionCheckOffAnnotations(content) {
 function checkPomContent(content) {
   const { excludedPropertyKeys, excludedVersionValues } = extractVersionCheckOffAnnotations(content);
 
-  const parser = new XMLParser({ ignoreAttributes: false, isArray: (name) => name === 'dependency' || name === 'plugin' });
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    isArray: (name) =>
+      name === 'dependency' || name === 'plugin' || name === 'profile' || name === 'extension',
+  });
   let parsed;
   try {
     parsed = parser.parse(content);
@@ -28378,77 +28422,133 @@ function checkPomContent(content) {
   if (!project) return [];
 
   const violations = [];
-
-  if (project.version && !excludedVersionValues.has(String(project.version).trim()) && isPreRelease(project.version)) {
-    violations.push({ location: '<version>', version: String(project.version) });
-  }
-
-  if (project.parent?.version && !excludedVersionValues.has(String(project.parent.version).trim()) && isPreRelease(project.parent.version)) {
-    violations.push({ location: '<parent><version>', version: String(project.parent.version) });
-  }
-
-  const properties = project.properties ?? {};
-  for (const [key, value] of Object.entries(properties)) {
-    if (excludedPropertyKeys.has(key)) continue;
-    if (key.endsWith('.version') && isPreRelease(value)) {
-      violations.push({ location: `<properties><${key}>`, version: String(value) });
-    }
-  }
-
-  checkDependencyVersions(project.dependencies?.dependency, '<dependencies>', violations, excludedVersionValues);
-  checkDependencyVersions(
-    project.dependencyManagement?.dependencies?.dependency,
-    '<dependencyManagement><dependencies>',
-    violations,
-    excludedVersionValues
-  );
-  checkPluginVersions(project.build?.plugins?.plugin, '<build><plugins>', violations, excludedVersionValues);
-  checkPluginVersions(
-    project.build?.pluginManagement?.plugins?.plugin,
-    '<build><pluginManagement><plugins>',
-    violations,
-    excludedVersionValues
-  );
-
+  walkPomNode(project, [], violations, excludedPropertyKeys, excludedVersionValues);
   return violations;
 }
 
-function checkDependencyVersions(dependencies, context, violations, excludedVersionValues = new Set()) {
-  if (!dependencies) return;
-  const list = Array.isArray(dependencies) ? dependencies : [dependencies];
-  for (const dep of list) {
-    if (dep?.version && !excludedVersionValues.has(String(dep.version).trim()) && isPreRelease(dep.version)) {
-      const coords = [dep.groupId, dep.artifactId].filter(Boolean).join(':');
-      violations.push({
-        location: `${context}<dependency>[${coords}]<version>`,
-        version: String(dep.version),
-      });
+/**
+ * Recursively walks a parsed POM node, flagging every pre-release <version>
+ * element and every pre-release <properties> entry found beneath it.
+ *
+ * @param {object} node
+ * @param {{ name: string, coords?: string }[]} parts - ancestor element path, root <project> excluded
+ * @param {{ location: string, version: string }[]} violations - accumulator
+ */
+function walkPomNode(node, parts, violations, excludedPropertyKeys, excludedVersionValues) {
+  for (const [key, rawValue] of Object.entries(node)) {
+    if (key.startsWith('@_') || key === '#text') continue;
+
+    for (const item of Array.isArray(rawValue) ? rawValue : [rawValue]) {
+      if (key === 'version') {
+        const value = scalarValue(item);
+        if (value === null || excludedVersionValues.has(value) || !isPreRelease(value)) continue;
+        violations.push({
+          location: renderLocation(parts, { name: 'version' }),
+          version: value,
+        });
+        continue;
+      }
+
+      if (!isPlainObject(item)) continue;
+
+      if (key === 'properties') {
+        checkPomProperties(
+          item,
+          [...parts, { name: 'properties' }],
+          violations,
+          excludedPropertyKeys
+        );
+        continue;
+      }
+
+      walkPomNode(
+        item,
+        [...parts, elementLabel(key, item)],
+        violations,
+        excludedPropertyKeys,
+        excludedVersionValues
+      );
     }
   }
 }
 
-function checkPluginVersions(plugins, context, violations, excludedVersionValues = new Set()) {
-  if (!plugins) return;
-  const list = Array.isArray(plugins) ? plugins : [plugins];
-  for (const plugin of list) {
-    if (plugin?.version && !excludedVersionValues.has(String(plugin.version).trim()) && isPreRelease(plugin.version)) {
-      const coords = [plugin.groupId, plugin.artifactId].filter(Boolean).join(':');
-      violations.push({
-        location: `${context}<plugin>[${coords}]<version>`,
-        version: String(plugin.version),
-      });
+/**
+ * Checks every entry of a <properties> block (at any depth in the document).
+ */
+function checkPomProperties(node, parts, violations, excludedPropertyKeys) {
+  for (const [key, rawValue] of Object.entries(node)) {
+    if (key.startsWith('@_') || key === '#text') continue;
+
+    for (const item of Array.isArray(rawValue) ? rawValue : [rawValue]) {
+      const value = scalarValue(item);
+
+      if (value === null) {
+        if (isPlainObject(item)) {
+          checkPomProperties(item, [...parts, { name: key }], violations, excludedPropertyKeys);
+        }
+        continue;
+      }
+
+      if (excludedPropertyKeys.has(key)) continue;
+      if (!isPreRelease(value)) continue;
+      if (!isVersionKey(key) && !looksLikeVersion(value)) continue;
+
+      violations.push({ location: renderLocation(parts, { name: key }), version: value });
     }
   }
+}
+
+/**
+ * Builds the path label for a single element, appending Maven coordinates for
+ * <dependency>, <plugin> and <extension>, and the id for <profile>, so that a
+ * violation can be traced to a specific entry.
+ */
+function elementLabel(name, node) {
+  if (name === 'profile' && scalarValue(node.id) !== null) {
+    return { name, coords: scalarValue(node.id) };
+  }
+  if (COORDINATE_ELEMENTS.has(name)) {
+    const coords = [node.groupId, node.artifactId]
+      .map(scalarValue)
+      .filter((v) => v !== null && v !== '')
+      .join(':');
+    if (coords) return { name, coords };
+  }
+  return { name };
+}
+
+/**
+ * Renders an element path as the location string reported in a violation,
+ * e.g. <build><plugins><plugin>[org.example:my-plugin]<dependencies><dependency>[g:a]<version>
+ */
+function renderLocation(parts, leaf) {
+  return [...parts, leaf]
+    .map((p) => `<${p.name}>` + (p.coords ? `[${p.coords}]` : ''))
+    .join('');
+}
+
+/**
+ * Returns the text value of a parsed node, or null when the node holds child
+ * elements rather than text. Elements carrying attributes are parsed as objects
+ * with the text under `#text`.
+ */
+function scalarValue(item) {
+  if (item === null || item === undefined) return null;
+  if (Array.isArray(item)) return null;
+  if (typeof item === 'object') {
+    return item['#text'] === undefined ? null : String(item['#text']).trim();
+  }
+  return String(item).trim();
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // ── gradle.properties ──────────────────────────────────────────────────────
 
 /**
  * Checks a gradle.properties file for pre-release versions.
- *
- * Inspects:
- *   - The bare `version` key (project version)
- *   - Any key ending in `Version` (e.g. springBootVersion, springCloudCommonsVersion)
  *
  * Exported for unit testing.
  *
@@ -28462,6 +28562,10 @@ function checkGradlePropertiesFile(filePath) {
 
 /**
  * Core logic for checking gradle.properties content.
+ *
+ * Every key is inspected. Keys that name a version outright are always checked;
+ * any other key is checked only when its value is shaped like a version.
+ *
  * Operates on a string so it can be unit tested without touching the filesystem.
  *
  * Exported for unit testing.
@@ -28472,15 +28576,18 @@ function checkGradlePropertiesFile(filePath) {
 function checkGradlePropertiesContent(content) {
   const violations = [];
   for (const line of content.split('\n')) {
-    const match = line.match(/^([a-zA-Z][a-zA-Z0-9.]*)(\s*=\s*)(.+)$/);
+    if (line.includes(CHECK_OFF_ANNOTATION)) continue;
+
+    const match = line.match(/^([a-zA-Z][a-zA-Z0-9._-]*)\s*=\s*(.+)$/);
     if (!match) continue;
 
-    const [, key, , rawValue] = match;
+    const [, key, rawValue] = match;
     const value = rawValue.trim();
 
-    if ((key === 'version' || /Version$/.test(key)) && isPreRelease(value)) {
-      violations.push({ location: key, version: value });
-    }
+    if (!isPreRelease(value)) continue;
+    if (!isVersionKey(key) && !looksLikeVersion(value)) continue;
+
+    violations.push({ location: key, version: value });
   }
   return violations;
 }
@@ -28488,9 +28595,8 @@ function checkGradlePropertiesContent(content) {
 // ── build.gradle / build.gradle.kts ───────────────────────────────────────
 
 /**
- * Checks a build.gradle or build.gradle.kts file for a pre-release project version.
- *
- * Inspects the `version = '...'` or `version = "..."` declaration.
+ * Checks a build.gradle, build.gradle.kts or settings.gradle file for
+ * pre-release versions.
  *
  * Exported for unit testing.
  *
@@ -28504,6 +28610,20 @@ function checkBuildGradleFile(filePath) {
 
 /**
  * Core logic for checking build.gradle content.
+ *
+ * Every string literal in the file is inspected rather than only the project
+ * `version = '...'` declaration, so inline dependency coordinates and plugin
+ * versions are covered too:
+ *
+ *   version = '4.2.0-SNAPSHOT'                                    → version
+ *   springCloudVersion = '2025.0.0-SNAPSHOT'                      → springCloudVersion
+ *   implementation 'org.example:my-lib:1.0.0-SNAPSHOT'            → org.example:my-lib
+ *   id 'org.example.plugin' version '2.0.0-SNAPSHOT'              → plugin [org.example.plugin]
+ *
+ * A literal under a key that does not name a version is only flagged when it is
+ * shaped like a version, so repository URLs such as
+ * 'https://repo.spring.io/libs-snapshot' are left alone.
+ *
  * Operates on a string so it can be unit tested without touching the filesystem.
  *
  * Exported for unit testing.
@@ -28513,11 +28633,76 @@ function checkBuildGradleFile(filePath) {
  */
 function checkBuildGradleContent(content) {
   const violations = [];
-  const match = content.match(/^version\s*=\s*['"]([^'"]+)['"]/m);
-  if (match && isPreRelease(match[1])) {
-    violations.push({ location: 'version', version: match[1] });
+  const stringLiteral = /(['"])((?:\\.|(?!\1)[^\\\n])*)\1/g;
+
+  for (const rawLine of stripBlockComments(content).split('\n')) {
+    if (rawLine.includes(CHECK_OFF_ANNOTATION)) continue;
+
+    const line = stripLineComment(rawLine);
+    if (!line.trim()) continue;
+
+    for (const match of line.matchAll(stringLiteral)) {
+      const literal = match[2];
+      const before = line.slice(0, match.index);
+
+      // 1. Dependency coordinates: 'group:artifact:version[:classifier]'
+      const coordinates = literal.split(':');
+      if (coordinates.length >= 3) {
+        const version = coordinates[2].trim();
+        if (isPreRelease(version) && looksLikeVersion(version)) {
+          violations.push({
+            location: `${coordinates[0]}:${coordinates[1]}`,
+            version,
+          });
+        }
+        continue;
+      }
+
+      if (!isPreRelease(literal)) continue;
+
+      // 2. Assignment: key = 'value'
+      const assignment = before.match(/([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*$/);
+      if (assignment) {
+        const key = assignment[1];
+        if (isVersionKey(key) || looksLikeVersion(literal)) {
+          violations.push({ location: key, version: literal });
+        }
+        continue;
+      }
+
+      // 3. version keyword: `version '1.0'`, `version("1.0")`, `version: '1.0'`,
+      //    `id 'x' version '1.0'`
+      if (/\bversion\s*[:(]?\s*$/.test(before)) {
+        const pluginId = before.match(/\bid\s*\(?\s*(['"])([^'"]+)\1/);
+        violations.push({
+          location: pluginId ? `plugin [${pluginId[2]}]` : 'version',
+          version: literal,
+        });
+        continue;
+      }
+
+      // 4. Any other literal that is shaped like a version
+      if (looksLikeVersion(literal)) {
+        violations.push({ location: truncate(line.trim(), 100), version: literal });
+      }
+    }
   }
+
   return violations;
+}
+
+function stripBlockComments(content) {
+  // Preserve newlines so line-oriented handling below is unaffected.
+  return content.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '));
+}
+
+function stripLineComment(line) {
+  // Drop `// ...` but leave `https://...` intact.
+  return line.replace(/(^|[^:'"\w])\/\/.*$/, '$1');
+}
+
+function truncate(str, max) {
+  return str.length <= max ? str : `${str.slice(0, max - 1)}…`;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -28555,6 +28740,8 @@ function findFiles(dir, filename, excludePatterns = []) {
 
 module.exports = {
   isPreRelease,
+  looksLikeVersion,
+  isVersionKey,
   extractVersionCheckOffAnnotations,
   checkPomContent,
   checkGradlePropertiesContent,

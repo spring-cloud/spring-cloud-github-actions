@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const {
   isPreRelease,
+  looksLikeVersion,
+  isVersionKey,
   extractVersionCheckOffAnnotations,
   checkPomContent,
   checkGradlePropertiesContent,
@@ -54,6 +56,49 @@ describe('isPreRelease', () => {
   it('returns false for an empty string', () => {
     expect(isPreRelease('')).toBe(false);
   });
+});
+
+// ─── looksLikeVersion ────────────────────────────────────────────────────────
+
+describe('looksLikeVersion', () => {
+  it.each(['4.2.0', '4.2.0-SNAPSHOT', '2023.0.1-RC1', 'v1.2.3', '17'])(
+    'returns true for %s',
+    (value) => {
+      expect(looksLikeVersion(value)).toBe(true);
+    }
+  );
+
+  it.each([
+    'https://repo.spring.io/libs-snapshot',
+    'libs-snapshot',
+    'org.example:my-lib:1.0.0',
+    '${spring-boot.version}',
+    'UTF-8 -M1',
+    '',
+  ])('returns false for %s', (value) => {
+    expect(looksLikeVersion(value)).toBe(false);
+  });
+});
+
+// ─── isVersionKey ────────────────────────────────────────────────────────────
+
+describe('isVersionKey', () => {
+  it.each([
+    'version',
+    'spring-boot.version',
+    'spring-cloud-commons-version',
+    'spring_boot_version',
+    'springBootVersion',
+  ])('returns true for %s', (key) => {
+    expect(isVersionKey(key)).toBe(true);
+  });
+
+  it.each(['url', 'repo.url', 'project.build.sourceEncoding', 'versions'])(
+    'returns false for %s',
+    (key) => {
+      expect(isVersionKey(key)).toBe(false);
+    }
+  );
 });
 
 // ─── checkPomContent ─────────────────────────────────────────────────────────
@@ -227,8 +272,8 @@ describe('checkPomContent', () => {
     });
   });
 
-  describe('with non-version .version properties', () => {
-    it('does NOT flag properties that do not end in .version', () => {
+  describe('with non-version properties', () => {
+    it('does NOT flag release-valued properties regardless of key', () => {
       const xml = `<project>
         <version>4.2.0</version>
         <properties>
@@ -237,6 +282,124 @@ describe('checkPomContent', () => {
         </properties>
       </project>`;
       expect(checkPomContent(xml)).toEqual([]);
+    });
+
+    it('flags a pre-release value under a key that does not end in .version', () => {
+      const xml = `<project>
+        <version>4.2.0</version>
+        <properties>
+          <spring-cloud-commons-version>4.3.0-SNAPSHOT</spring-cloud-commons-version>
+          <internal.tooling>1.2.0-RC1</internal.tooling>
+        </properties>
+      </project>`;
+      const violations = checkPomContent(xml);
+      expect(violations).toEqual(
+        expect.arrayContaining([
+          {
+            location: '<properties><spring-cloud-commons-version>',
+            version: '4.3.0-SNAPSHOT',
+          },
+          { location: '<properties><internal.tooling>', version: '1.2.0-RC1' },
+        ])
+      );
+    });
+
+    it('does NOT flag a URL property that happens to end in -snapshot', () => {
+      const xml = `<project>
+        <version>4.2.0</version>
+        <properties>
+          <repo.url>https://repo.spring.io/libs-snapshot</repo.url>
+        </properties>
+      </project>`;
+      expect(checkPomContent(xml)).toEqual([]);
+    });
+  });
+
+  describe('with pre-release versions nested outside the well-known locations', () => {
+    let violations;
+
+    beforeAll(() => {
+      violations = checkPomContent(loadFixture('nested-snapshot-pom.xml'));
+    });
+
+    // The spring-cloud-function miss: a -SNAPSHOT pinned on a plugin's own
+    // <dependencies> block, which a location-by-location check never visits.
+    it('detects a SNAPSHOT in a <plugin><dependencies><dependency>', () => {
+      expect(violations).toEqual(
+        expect.arrayContaining([
+          {
+            location:
+              '<build><plugins><plugin>[org.springframework.boot:spring-boot-maven-plugin]' +
+              '<dependencies><dependency>[org.springframework.cloud:spring-cloud-function-adapter-gcp]<version>',
+            version: '3.1.0-SNAPSHOT',
+          },
+        ])
+      );
+    });
+
+    it('detects a SNAPSHOT in a <profile> dependency', () => {
+      expect(violations).toEqual(
+        expect.arrayContaining([
+          {
+            location:
+              '<profiles><profile>[spring]<dependencies><dependency>[org.example:profile-only-dep]<version>',
+            version: '9.9.9-SNAPSHOT',
+          },
+        ])
+      );
+    });
+
+    it('detects a SNAPSHOT in <profile><properties>', () => {
+      expect(violations).toEqual(
+        expect.arrayContaining([
+          {
+            location: '<profiles><profile>[spring]<properties><spring-boot.version>',
+            version: '3.5.0-SNAPSHOT',
+          },
+        ])
+      );
+    });
+
+    it('detects a SNAPSHOT in a <build><extensions><extension>', () => {
+      expect(violations).toEqual(
+        expect.arrayContaining([
+          {
+            location: '<build><extensions><extension>[org.example:my-wagon]<version>',
+            version: '1.0.0-SNAPSHOT',
+          },
+        ])
+      );
+    });
+
+    it('detects a milestone in a <reporting> plugin', () => {
+      expect(violations).toEqual(
+        expect.arrayContaining([
+          {
+            location:
+              '<reporting><plugins><plugin>[org.apache.maven.plugins:maven-javadoc-plugin]<version>',
+            version: '3.6.0-M1',
+          },
+        ])
+      );
+    });
+
+    it('detects a SNAPSHOT in a kebab-case version property', () => {
+      expect(violations).toEqual(
+        expect.arrayContaining([
+          {
+            location: '<properties><spring-cloud-commons-version>',
+            version: '4.3.0-SNAPSHOT',
+          },
+        ])
+      );
+    });
+
+    it('honours @releaser:version-check-off on the sample project version', () => {
+      expect(violations.some((v) => v.version === '0.0.1-SNAPSHOT')).toBe(false);
+    });
+
+    it('does NOT flag the snapshot repository URL', () => {
+      expect(violations.some((v) => String(v.version).startsWith('http'))).toBe(false);
     });
   });
 
@@ -443,6 +606,28 @@ describe('checkGradlePropertiesContent', () => {
       expect(checkGradlePropertiesContent(content)).toEqual([]);
     });
   });
+
+  describe('with keys that do not end in Version', () => {
+    it('flags a pre-release value under any key', () => {
+      expect(checkGradlePropertiesContent('springCloud=2025.0.0-SNAPSHOT\n')).toEqual([
+        { location: 'springCloud', version: '2025.0.0-SNAPSHOT' },
+      ]);
+    });
+
+    it('does NOT flag a repository URL ending in -snapshot', () => {
+      expect(
+        checkGradlePropertiesContent('repo.url=https://repo.spring.io/libs-snapshot\n')
+      ).toEqual([]);
+    });
+
+    it('honours a @releaser:version-check-off annotation on the line', () => {
+      const content =
+        'failsafeVersion=3.0.0-M3 # @releaser:version-check-off\nspringBootVersion=3.3.0-SNAPSHOT\n';
+      expect(checkGradlePropertiesContent(content)).toEqual([
+        { location: 'springBootVersion', version: '3.3.0-SNAPSHOT' },
+      ]);
+    });
+  });
 });
 
 // ─── checkBuildGradleContent ─────────────────────────────────────────────────
@@ -512,6 +697,71 @@ describe('checkBuildGradleContent', () => {
 
     it('returns no violations for a clean version with single quotes', () => {
       expect(checkBuildGradleContent("version = '4.2.0'")).toEqual([]);
+    });
+  });
+
+  describe('with pre-release versions outside the project version declaration', () => {
+    it('detects a SNAPSHOT in inline dependency coordinates', () => {
+      const content = `dependencies {
+    implementation 'org.springframework.cloud:spring-cloud-commons:4.2.0-SNAPSHOT'
+}`;
+      expect(checkBuildGradleContent(content)).toEqual([
+        {
+          location: 'org.springframework.cloud:spring-cloud-commons',
+          version: '4.2.0-SNAPSHOT',
+        },
+      ]);
+    });
+
+    it('detects a SNAPSHOT in a plugin version', () => {
+      const content = `plugins {
+    id 'org.example.plugin' version '2.0.0-SNAPSHOT'
+}`;
+      expect(checkBuildGradleContent(content)).toEqual([
+        { location: 'plugin [org.example.plugin]', version: '2.0.0-SNAPSHOT' },
+      ]);
+    });
+
+    it('detects a SNAPSHOT in Groovy map-style dependency notation', () => {
+      const content = `dependencies {
+    implementation group: 'org.example', name: 'my-lib', version: '1.0.0-SNAPSHOT'
+}`;
+      expect(checkBuildGradleContent(content)).toEqual([
+        { location: 'version', version: '1.0.0-SNAPSHOT' },
+      ]);
+    });
+
+    it('detects a SNAPSHOT in a version variable other than the project version', () => {
+      expect(checkBuildGradleContent(`ext.springCloudVersion = '2025.0.0-SNAPSHOT'`)).toEqual([
+        { location: 'ext.springCloudVersion', version: '2025.0.0-SNAPSHOT' },
+      ]);
+    });
+
+    it('does NOT flag a repository URL ending in -snapshot', () => {
+      const content = `repositories {
+    maven { url 'https://repo.spring.io/libs-snapshot' }
+    maven { url = "https://repo.spring.io/libs-snapshot-local" }
+}`;
+      expect(checkBuildGradleContent(content)).toEqual([]);
+    });
+
+    it('ignores versions in line and block comments', () => {
+      const content = `// implementation 'org.example:my-lib:1.0.0-SNAPSHOT'
+/*
+ * version = '9.9.9-SNAPSHOT'
+ */
+version = '4.2.0'`;
+      expect(checkBuildGradleContent(content)).toEqual([]);
+    });
+
+    it('honours a @releaser:version-check-off annotation on the line', () => {
+      const content = `dependencies {
+    testImplementation 'org.example:only-milestones:1.0.0-M1' // @releaser:version-check-off
+    implementation 'org.example:my-lib:2.0.0-SNAPSHOT'
+}`;
+      expect(checkBuildGradleContent(content)).toEqual([
+        { location: 'org.example:my-lib', version: '2.0.0-SNAPSHOT' },
+      ]);
     });
   });
 });

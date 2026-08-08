@@ -128,6 +128,82 @@ jobs:
           fi
           echo "✅ Action correctly failed when SNAPSHOT versions were detected"
 
+  # ── Integration test (SNAPSHOT nested outside the well-known locations) ────
+  # Reproduces the spring-cloud-function miss: a -SNAPSHOT pinned on a plugin's
+  # own <dependencies> block survived a release because it sat somewhere a
+  # location-by-location check never visited.
+  # https://github.com/spring-cloud/spring-cloud-function/commit/7d76185e3faa9e05c206278f85132b5c6cf91d94
+  integration-test-nested-snapshot:
+    name: Integration Test (nested SNAPSHOT — expected to fail)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create project with a SNAPSHOT nested in a plugin dependency
+        run: |
+          mkdir -p /tmp/nested-project
+
+          cat > /tmp/nested-project/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>io.spring.sample</groupId>
+            <artifactId>function-sample-gcp-background</artifactId>
+            <version>0.0.1-SNAPSHOT</version><!-- @releaser:version-check-off -->
+            <properties>
+              <spring-cloud-function.version>5.0.4</spring-cloud-function.version>
+              <repo.url>https://repo.spring.io/libs-snapshot</repo.url>
+            </properties>
+            <build>
+              <plugins>
+                <plugin>
+                  <groupId>org.springframework.boot</groupId>
+                  <artifactId>spring-boot-maven-plugin</artifactId>
+                  <dependencies>
+                    <dependency>
+                      <groupId>org.springframework.cloud</groupId>
+                      <artifactId>spring-cloud-function-adapter-gcp</artifactId>
+                      <version>3.1.0-SNAPSHOT</version>
+                    </dependency>
+                  </dependencies>
+                </plugin>
+              </plugins>
+            </build>
+          </project>
+          EOF
+
+      - name: Run verify-no-snapshot-versions (expected to fail)
+        id: verify
+        uses: ./.github/actions/verify-no-snapshot-versions
+        with:
+          directory: '/tmp/nested-project'
+        continue-on-error: true
+
+      - name: Confirm only the plugin dependency was reported
+        env:
+          VIOLATIONS: ${{ steps.verify.outputs.violations }}
+        run: |
+          if [[ "${{ steps.verify.outcome }}" != "failure" ]]; then
+            echo "❌ Expected the action to fail for the nested SNAPSHOT, but it did not"
+            exit 1
+          fi
+
+          echo "$VIOLATIONS" | jq .
+
+          count=$(echo "$VIOLATIONS" | jq 'length')
+          if [[ "$count" != "1" ]]; then
+            echo "❌ Expected exactly 1 violation (the plugin dependency), got ${count}"
+            exit 1
+          fi
+
+          version=$(echo "$VIOLATIONS" | jq -r '.[0].version')
+          if [[ "$version" != "3.1.0-SNAPSHOT" ]]; then
+            echo "❌ Expected the violation to be 3.1.0-SNAPSHOT, got ${version}"
+            exit 1
+          fi
+
+          echo "✅ Nested plugin dependency SNAPSHOT detected; the annotated project version and the snapshot repo URL were correctly ignored"
+
   # ── Dist is up to date ──────────────────────────────────────────────────────
   dist-up-to-date:
     name: Verify dist is up to date
