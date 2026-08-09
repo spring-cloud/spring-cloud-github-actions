@@ -1,0 +1,348 @@
+name: 'Dependabot Scan'
+description: >
+  Scans one repository for open Dependabot pull requests and the current state of its
+  Dependabot update jobs, classifies each PR, and writes the result as JSON. Read-only,
+  so it is shared by the reporting and triage workflows.
+
+inputs:
+  repo:
+    description: 'Full repository path (e.g. spring-cloud/spring-cloud-build)'
+    required: true
+  project:
+    description: 'Spring Cloud project key (e.g. spring-cloud-build)'
+    required: true
+  type:
+    description: 'Repository flavor: oss or commercial'
+    required: true
+  maintained-branches:
+    description: >
+      Comma-separated branches this repo actively maintains, from projects.json
+      (branches.scheduled). A PR against anything else is reported as invalid.
+      Comma-separated rather than JSON because a matrix cannot carry structured data
+      through an expression without toJson pretty-printing it and breaking the YAML.
+    required: true
+  extra-branches:
+    description: >
+      Comma-separated branches that are maintained but are not release branches, so they
+      never appear in projects.json. Dependabot legitimately targets these.
+    required: false
+    default: 'docs-build'
+  releaser-map-file:
+    description: >
+      Path to a JSON file of {type: {project: {version: train}}}, used to resolve which
+      GitHub Project a PR belongs to. Empty disables project resolution.
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token with read access to the repository'
+    required: true
+
+outputs:
+  result-file:
+    description: 'Path of the JSON file written'
+    value: ${{ steps.scan.outputs.result-file }}
+  safe-name:
+    description: 'Filename-safe form of the repo, for artifact naming'
+    value: ${{ steps.scan.outputs.safe-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Scan repository
+      id: scan
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PROJECT: ${{ inputs.project }}
+        TYPE: ${{ inputs.type }}
+        MAINTAINED_BRANCHES: ${{ inputs.maintained-branches }}
+        EXTRA_BRANCHES: ${{ inputs.extra-branches }}
+        RELEASER_MAP_FILE: ${{ inputs.releaser-map-file }}
+      run: |
+        node - << 'JSEOF'
+        const fs = require('fs');
+        const { execFileSync } = require('child_process');
+
+        const REPO = process.env.REPO;
+        const PROJECT = process.env.PROJECT;
+        const TYPE = process.env.TYPE;
+
+        const parseJson = (raw, fallback) => {
+          try { return JSON.parse(raw); } catch (_) { return fallback; }
+        };
+
+        const maintained = new Set();
+        for (const source of [process.env.MAINTAINED_BRANCHES, process.env.EXTRA_BRANCHES]) {
+          for (const b of (source || '').split(',')) {
+            const t = b.trim();
+            if (t) maintained.add(t);
+          }
+        }
+
+        // {type: {project: {version: train}}}, written once by the calling workflow so
+        // the releaser config is fetched a single time rather than once per repo.
+        let releaserMap = {};
+        const mapFile = (process.env.RELEASER_MAP_FILE || '').trim();
+        if (mapFile && fs.existsSync(mapFile)) {
+          const all = parseJson(fs.readFileSync(mapFile, 'utf8'), {}) || {};
+          releaserMap = (all[TYPE] || {})[PROJECT] || {};
+        }
+
+        const gh = args => {
+          try {
+            return { ok: true, out: execFileSync('gh', args,
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 }) };
+          } catch (err) {
+            return { ok: false, out: '', err: (err.stderr || err.message || '').split('\n')[0].trim() };
+          }
+        };
+
+        // GitHub's API - the GraphQL endpoint behind `gh pr list` especially - returns
+        // the occasional 502/504. Without a retry those surface as "0 open PRs", which
+        // reads as good news and is the most dangerous way for this report to be wrong.
+        const ghRetry = (args, attempts = 3) => {
+          let last;
+          for (let attempt = 1; attempt <= attempts; attempt++) {
+            last = gh(args);
+            if (last.ok) return last;
+            if (attempt < attempts) {
+              console.log(`  attempt ${attempt} failed (${last.err}) - retrying`);
+              execFileSync('sleep', [String(attempt * 3)]);
+            }
+          }
+          return last;
+        };
+
+        const warnings = [];
+
+        // ── Is the repository readable at all? ──────────────────────────────────────
+        // `gh pr list` answers with an empty array and exit 0 for a repository it cannot
+        // see, so a renamed, deleted or permission-denied repo would otherwise be
+        // reported as simply having no open Dependabot PRs. One explicit existence check
+        // turns that silent zero into a visible error.
+        const repoResp = ghRetry(['api', `repos/${REPO}`, '--jq', '.full_name']);
+        const repoUnreadable = !repoResp.ok;
+        if (repoUnreadable) {
+          warnings.push(`repository is not readable: ${repoResp.err}`);
+        }
+
+        // ── Dependabot update jobs ──────────────────────────────────────────────────
+        // Dependabot's own update runs surface as normal workflow runs with
+        // event=dynamic and path=dynamic/dependabot/dependabot-updates. The run name
+        // encodes the ecosystem and directory, e.g. "maven in /. - Update #1510829977".
+        const updateJobs = [];
+        let updateJobsFailed = false;
+        const runsResp = ghRetry(['api',
+          `repos/${REPO}/actions/runs?actor=dependabot%5Bbot%5D&event=dynamic&per_page=100`]);
+        if (!runsResp.ok) {
+          updateJobsFailed = true;
+          warnings.push(`could not list Dependabot update runs: ${runsResp.err}`);
+        } else {
+          const runs = parseJson(runsResp.out, {}).workflow_runs || [];
+          // Runs come back newest-first, so the first entry seen for a given
+          // ecosystem/directory/branch is that update's current state. Older runs for
+          // the same key are history and are ignored - the question is "is this update
+          // broken now?", not "has it ever failed?".
+          const seen = new Set();
+          for (const run of runs) {
+            const m = (run.name || '').match(/^(\S+) in (\S+) - Update #(\d+)$/);
+            const ecosystem = m ? m[1] : (run.name || 'unknown');
+            const directory = m ? m[2] : '?';
+            const key = `${ecosystem}|${directory}|${run.head_branch}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            updateJobs.push({
+              ecosystem, directory,
+              branch: run.head_branch,
+              status: run.status,
+              conclusion: run.conclusion || 'none',
+              url: run.html_url,
+              createdAt: run.created_at,
+            });
+          }
+        }
+        const failingUpdateJobs = updateJobs.filter(j => j.conclusion === 'failure');
+
+        // ── Open Dependabot pull requests ───────────────────────────────────────────
+        const PR_FIELDS = 'number,title,url,baseRefName,createdAt,updatedAt,headRefOid,' +
+          'mergeable,mergeStateStatus,statusCheckRollup,milestone';
+
+        const listPrs = () => {
+          const r = ghRetry(['pr', 'list', '--repo', REPO, '--author', 'app/dependabot',
+            '--state', 'open', '--limit', '100', '--json', PR_FIELDS]);
+          if (!r.ok) {
+            warnings.push(`could not list Dependabot PRs: ${r.err}`);
+            return null;
+          }
+          return parseJson(r.out, []);
+        };
+
+        // A repo whose PR list could not be read is reported as unscannable rather than
+        // as having no open PRs - see prListFailed in the result below.
+        let prs = listPrs();
+        const prListFailed = prs === null;
+        if (prListFailed) prs = [];
+
+        // GitHub computes mergeability lazily and returns UNKNOWN until it has. Asking
+        // for the PR is itself what triggers the computation, so a single re-read a few
+        // seconds later resolves it in practice.
+        if (prs.some(pr => pr.mergeable === 'UNKNOWN')) {
+          execFileSync('sleep', ['5']);
+          const retried = listPrs();
+          if (retried) prs = retried;
+        }
+
+        // A check is either a CheckRun (status + conclusion) or a legacy StatusContext
+        // (state). Both appear in statusCheckRollup, so they are normalised to one shape.
+        const FAILING = new Set(['FAILURE', 'TIMED_OUT', 'ERROR', 'STARTUP_FAILURE', 'CANCELLED']);
+        const PASSING = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+
+        const normalizeCheck = c => {
+          if (c.__typename === 'StatusContext' || c.state) {
+            return { name: c.context || 'status', state: (c.state || '').toUpperCase(), url: c.targetUrl || '' };
+          }
+          const status = (c.status || '').toUpperCase();
+          if (status && status !== 'COMPLETED') {
+            return { name: c.name || 'check', state: 'PENDING', url: c.detailsUrl || '' };
+          }
+          return { name: c.name || 'check', state: (c.conclusion || 'PENDING').toUpperCase(), url: c.detailsUrl || '' };
+        };
+
+        // Project version of a branch: strip <parent> so its <version> is not mistaken
+        // for the project's own, then take the first <version> that remains.
+        const versionCache = new Map();
+        const branchVersion = branch => {
+          if (versionCache.has(branch)) return versionCache.get(branch);
+          let version = null;
+          const r = gh(['api', `repos/${REPO}/contents/pom.xml?ref=${branch}`, '--jq', '.content']);
+          if (r.ok) {
+            const pom = Buffer.from(r.out.trim(), 'base64').toString('utf8');
+            const m = pom.replace(/<parent>[\s\S]*?<\/parent>/, '').match(/<version>([^<]+)<\/version>/);
+            if (m) version = m[1].trim();
+          }
+          versionCache.set(branch, version);
+          return version;
+        };
+
+        // Existing milestone titles, fetched once and reused for every PR in this repo.
+        let milestoneTitles = null;
+        const milestoneExists = title => {
+          if (milestoneTitles === null) {
+            const r = gh(['api', `repos/${REPO}/milestones?state=open&per_page=100`,
+              '--jq', '[.[].title]']);
+            milestoneTitles = r.ok ? new Set(parseJson(r.out, [])) : new Set();
+            if (!r.ok) warnings.push(`could not list milestones: ${r.err}`);
+          }
+          return milestoneTitles.has(title);
+        };
+
+        const scanned = prs.map(pr => {
+          const checks = (pr.statusCheckRollup || []).map(normalizeCheck);
+          const failing = checks.filter(c => FAILING.has(c.state));
+          const pending = checks.filter(c => !FAILING.has(c.state) && !PASSING.has(c.state));
+
+          const isMaintained = maintained.has(pr.baseRefName);
+
+          // First match wins.
+          //
+          // The order matters most for retired branches: those are locked, so their PRs
+          // report mergeStateStatus BLOCKED even with every check green. Testing
+          // maintenance first keeps a locked branch from ever being described in terms
+          // of its checks - the actionable fact is that the branch is gone.
+          //
+          // Checks are read from statusCheckRollup rather than inferred from
+          // mergeStateStatus, which conflates too many causes to be useful here.
+          // A green PR that GitHub still refuses to merge (branch protection, an
+          // unreported required check) is called "blocked" rather than "ready", so that
+          // everything reported as ready can genuinely be merged.
+          let state;
+          if (!isMaintained) state = 'unmaintained';
+          else if (pr.mergeable === 'CONFLICTING') state = 'conflicting';
+          else if (failing.length) state = 'failing';
+          else if (pending.length) state = 'pending';
+          else if (pr.mergeable !== 'MERGEABLE') state = 'unknown';
+          else if (pr.mergeStateStatus === 'BLOCKED') state = 'blocked';
+          else state = 'ready';
+
+          // Milestone and project are only meaningful for a branch we still maintain.
+          let expectedMilestone = null, milestoneState = 'n/a';
+          let expectedProject = null, projectState = 'n/a';
+
+          if (isMaintained) {
+            const version = branchVersion(pr.baseRefName);
+            if (!version) {
+              milestoneState = 'unresolved';
+              projectState = 'unresolved';
+            } else {
+              expectedMilestone = version.replace(/-SNAPSHOT$/, '');
+              const current = pr.milestone?.title || null;
+              if (current === expectedMilestone) milestoneState = 'set';
+              else if (current) milestoneState = 'mismatch';
+              else if (!milestoneExists(expectedMilestone)) milestoneState = 'missing';
+              else milestoneState = 'unset';
+
+              // Boards are OSS-only by design; commercial PRs get a milestone alone.
+              if (TYPE === 'oss') {
+                expectedProject = releaserMap[version] || null;
+                projectState = expectedProject ? 'resolved' : 'unresolved';
+              }
+            }
+          }
+
+          return {
+            number: pr.number,
+            title: pr.title,
+            url: pr.url,
+            baseRefName: pr.baseRefName,
+            createdAt: pr.createdAt,
+            headRefOid: pr.headRefOid,
+            mergeable: pr.mergeable,
+            mergeStateStatus: pr.mergeStateStatus,
+            currentMilestone: pr.milestone?.title || null,
+            state,
+            failingChecks: failing.map(c => c.name),
+            pendingChecks: pending.map(c => c.name),
+            expectedMilestone, milestoneState,
+            expectedProject, projectState,
+          };
+        });
+
+        const countOf = s => scanned.filter(p => p.state === s).length;
+        const counts = {
+          open: scanned.length,
+          ready: countOf('ready'),
+          blocked: countOf('blocked'),
+          failing: countOf('failing'),
+          conflicting: countOf('conflicting'),
+          pending: countOf('pending'),
+          unknown: countOf('unknown'),
+          unmaintained: countOf('unmaintained'),
+        };
+
+        const result = {
+          project: PROJECT, repo: REPO, type: TYPE,
+          counts,
+          repoUnreadable,
+          prListFailed,
+          updateJobsFailed,
+          updateJobsChecked: updateJobs.length,
+          failingUpdateJobs,
+          prs: scanned,
+          warnings,
+        };
+
+        const safe = `${REPO}`.replace(/\//g, '-');
+        const file = `result-${safe}.json`;
+        fs.writeFileSync(file, JSON.stringify(result, null, 2));
+
+        console.log(`${REPO}: ${counts.open} open PR(s) - ` +
+          `${counts.ready} ready, ${counts.blocked} blocked, ${counts.failing} failing, ` +
+          `${counts.conflicting} conflicting, ${counts.pending} pending, ` +
+          `${counts.unknown} unknown, ${counts.unmaintained} unmaintained`);
+        console.log(`${REPO}: ${failingUpdateJobs.length} failing update job(s) of ${updateJobs.length} tracked`);
+        for (const w of warnings) console.log(`  warning: ${w}`);
+
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, `result-file=${file}\n`);
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, `safe-name=${safe}\n`);
+        JSEOF

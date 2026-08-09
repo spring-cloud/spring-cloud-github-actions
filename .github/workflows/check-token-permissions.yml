@@ -1,0 +1,254 @@
+name: Check Token Permissions
+
+# Probes a GitHub token for every permission the Dependabot automation needs
+# (see DESIGN-dependabot-automation.md) and reports which features it can and
+# cannot support. Purely diagnostic - it reads, and the one mutation it issues
+# is deliberately given invalid node IDs so it can never change anything.
+#
+# Run this after rotating GH_ACTIONS_REPO_TOKEN, or before building a feature
+# that needs a scope the token may not have (notably Projects v2).
+#
+# See README-check-token-permissions.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      token:
+        description: 'Token to probe. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+      org:
+        description: 'Organization that owns the Projects v2 boards.'
+        required: false
+        type: string
+        default: 'spring-cloud'
+      oss_repo:
+        description: 'An OSS repo to probe read/write access against.'
+        required: false
+        type: string
+        default: 'spring-cloud/spring-cloud-build'
+      commercial_repo:
+        description: 'A commercial repo to probe read/write access against.'
+        required: false
+        type: string
+        default: 'spring-cloud/spring-cloud-build-commercial'
+      project_title:
+        description: 'Optional Projects v2 board title to look for (e.g. 2025.1.3). Empty just lists what is visible.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe token
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run permission probes
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          ORG: ${{ inputs.org }}
+          OSS_REPO: ${{ inputs.oss_repo }}
+          COMMERCIAL_REPO: ${{ inputs.commercial_repo }}
+          PROJECT_TITLE: ${{ inputs.project_title }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const ORG = process.env.ORG;
+          const OSS = process.env.OSS_REPO;
+          const COMM = process.env.COMMERCIAL_REPO;
+          const WANT_PROJECT = (process.env.PROJECT_TITLE || '').trim();
+
+          // gh exits non-zero on API and GraphQL errors alike. Both still print the
+          // response body on stdout, which is where the useful detail lives, so
+          // failures are captured rather than thrown.
+          const gh = args => {
+            try {
+              return { ok: true, out: execFileSync('gh', args,
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 }) };
+            } catch (err) {
+              return {
+                ok: false,
+                out: err.stdout || '',
+                err: (err.stderr || err.message || '').split('\n')[0].trim(),
+              };
+            }
+          };
+
+          // A GraphQL call can exit zero and still carry an "errors" array, so the
+          // body is inspected regardless of exit status.
+          const graphql = query => {
+            const r = gh(['api', 'graphql', '-f', `query=${query}`]);
+            let body = null;
+            try { body = JSON.parse(r.out); } catch (_) { /* non-JSON error output */ }
+            const errors = body?.errors || [];
+            return { ...r, body, errors, ok: r.ok && errors.length === 0 };
+          };
+
+          const results = [];
+          const add = (check, status, detail) => {
+            results.push({ check, status, detail });
+            const icon = { ok: '✅', warn: '⚠️', fail: '❌' }[status];
+            console.log(`${icon} ${check}: ${detail}`);
+          };
+
+          // ── Identity and declared scopes ────────────────────────────────────────────
+          // Classic PATs return their scopes in a response header. Fine-grained tokens
+          // and GitHub App installation tokens send it empty, which is not a problem -
+          // it just means the functional probes below are the only real evidence.
+          const who = gh(['api', 'user', '--jq', '.login']);
+          add('Token identity', who.ok ? 'ok' : 'warn',
+            who.ok ? `authenticated as ${who.out.trim()}`
+                   : `could not read /user (${who.err}) - normal for an App installation token`);
+
+          const headers = gh(['api', '-i', '/rate_limit']);
+          const scopeLine = (headers.out.match(/^x-oauth-scopes:(.*)$/im) || [])[1];
+          const scopes = (scopeLine || '').trim();
+          let declared = null;
+          if (scopes) {
+            declared = scopes.split(',').map(s => s.trim()).filter(Boolean);
+            add('Declared scopes', 'ok', `\`${declared.join('`, `')}\``);
+          } else {
+            add('Declared scopes', 'warn',
+              'none reported - fine-grained or App token; rely on the functional probes below');
+          }
+
+          // ── Repository read + write ─────────────────────────────────────────────────
+          // .permissions.push is the honest signal for "can this token write issues,
+          // milestones and comments here" without actually mutating anything.
+          for (const [label, repo] of [['OSS', OSS], ['Commercial', COMM]]) {
+            const r = gh(['api', `repos/${repo}`, '--jq', '.permissions']);
+            if (!r.ok) {
+              add(`${label} repo access (\`${repo}\`)`, 'fail', `cannot read: ${r.err}`);
+              continue;
+            }
+            let perms = {};
+            try { perms = JSON.parse(r.out); } catch (_) { /* ignore */ }
+            const canWrite = perms.push === true;
+            add(`${label} repo access (\`${repo}\`)`, canWrite ? 'ok' : 'warn',
+              canWrite ? 'read + write (push)' : 'read only - cannot set milestones or comment');
+          }
+
+          // ── Actions read: the Dependabot update-job feed (feature 1) ────────────────
+          const runs = gh(['api',
+            `repos/${OSS}/actions/runs?actor=dependabot%5Bbot%5D&event=dynamic&per_page=1`,
+            '--jq', '.total_count']);
+          add('Dependabot update runs readable', runs.ok ? 'ok' : 'fail',
+            runs.ok ? `${runs.out.trim()} run(s) visible on \`${OSS}\``
+                    : `cannot list workflow runs: ${runs.err}`);
+
+          // ── Pull requests and milestones (features 2, 3, 4) ─────────────────────────
+          const prs = gh(['api', `repos/${OSS}/pulls?state=open&per_page=1`, '--jq', 'length']);
+          add('Pull requests readable', prs.ok ? 'ok' : 'fail',
+            prs.ok ? 'ok' : `cannot list pull requests: ${prs.err}`);
+
+          const miles = gh(['api', `repos/${OSS}/milestones?per_page=1`, '--jq', 'length']);
+          add('Milestones readable', miles.ok ? 'ok' : 'fail',
+            miles.ok ? 'ok' : `cannot list milestones: ${miles.err}`);
+
+          // ── The releaser config branch that resolves a PR's project (feature 2) ─────
+          const releaser = gh(['api',
+            `repos/${ORG}/spring-cloud-release/contents/?ref=jenkins-releaser-config`,
+            '--jq', '[.[] | select(.name | endswith("-snapshot.properties"))] | length']);
+          add('`jenkins-releaser-config` readable', releaser.ok ? 'ok' : 'fail',
+            releaser.ok ? `${releaser.out.trim()} snapshot properties file(s) found`
+                        : `cannot read the branch: ${releaser.err}`);
+
+          // ── Projects v2 read ───────────────────────────────────────────────────────
+          const projQuery = `{ organization(login: "${ORG}") { projectsV2(first: 100) { nodes { number title closed } } } }`;
+          const projRead = graphql(projQuery);
+          const insufficient = r => r.errors.some(e => e.type === 'INSUFFICIENT_SCOPES');
+
+          let projectsVisible = null;
+          if (projRead.ok) {
+            const nodes = projRead.body?.data?.organization?.projectsV2?.nodes || [];
+            projectsVisible = nodes;
+            const open = nodes.filter(n => !n.closed);
+            add('Projects v2 readable', 'ok',
+              `${nodes.length} board(s) visible, ${open.length} open`);
+          } else if (insufficient(projRead)) {
+            add('Projects v2 readable', 'fail',
+              'INSUFFICIENT_SCOPES - token needs `read:project` (or `project`)');
+          } else {
+            add('Projects v2 readable', 'fail',
+              projRead.errors[0]?.message || projRead.err || 'unknown GraphQL error');
+          }
+
+          // ── Projects v2 write ──────────────────────────────────────────────────────
+          // Probed with deliberately invalid node IDs. A token lacking the scope is
+          // rejected before the IDs are ever resolved (INSUFFICIENT_SCOPES); a token
+          // that has it gets as far as failing to find them. Either way nothing is
+          // added to any board - there is no object for these IDs to point at.
+          const writeProbe = graphql(
+            'mutation { addProjectV2ItemById(input: {projectId: "PVT_probe_invalid", ' +
+            'contentId: "PVTI_probe_invalid"}) { item { id } } }');
+          if (insufficient(writeProbe)) {
+            add('Projects v2 writable', 'fail',
+              'INSUFFICIENT_SCOPES - token needs the `project` scope to add PRs to a board');
+          } else {
+            add('Projects v2 writable', 'ok',
+              'scope check passed (probe rejected on the invalid IDs, as intended)');
+          }
+
+          // ── Optional: is the specific board present? ────────────────────────────────
+          if (WANT_PROJECT) {
+            if (projectsVisible === null) {
+              add(`Board \`${WANT_PROJECT}\` present`, 'warn',
+                'could not check - Projects v2 is not readable with this token');
+            } else {
+              const hit = projectsVisible.find(n => n.title === WANT_PROJECT);
+              add(`Board \`${WANT_PROJECT}\` present`, hit ? 'ok' : 'fail',
+                hit ? `found (#${hit.number}${hit.closed ? ', closed' : ''})`
+                    : `no board titled \`${WANT_PROJECT}\` in \`${ORG}\``);
+            }
+          }
+
+          // ── Report ─────────────────────────────────────────────────────────────────
+          const icon = s => ({ ok: '✅', warn: '⚠️', fail: '❌' })[s];
+          const by = name => results.find(r => r.check.startsWith(name));
+          const passing = name => by(name)?.status === 'ok';
+
+          const lines = ['## Token Permission Probe', ''];
+          lines.push(`Org \`${ORG}\` · OSS \`${OSS}\` · commercial \`${COMM}\``, '');
+          lines.push('| | Check | Detail |', '|---|---|---|');
+          for (const r of results) {
+            lines.push(`| ${icon(r.status)} | ${r.check} | ${r.detail} |`);
+          }
+
+          // Translate the raw probes into "can each designed feature actually run?",
+          // which is the question this workflow exists to answer.
+          const canWriteOss = by('OSS repo access')?.status === 'ok';
+          const features = [
+            ['1 — Alert on failing Dependabot workflows',
+              passing('Dependabot update runs readable')],
+            ['2a — Set milestones on Dependabot PRs',
+              passing('Milestones readable') && canWriteOss],
+            ['2b — Add OSS PRs to the correct project',
+              passing('Projects v2 readable') && passing('Projects v2 writable')
+                && passing('`jenkins-releaser-config` readable')],
+            ['3 — Comment `@dependabot rebase` on conflicts', canWriteOss],
+            ['4 — Daily Dependabot PR report',
+              passing('Pull requests readable') && passing('Milestones readable')],
+          ];
+
+          lines.push('', '### Feature readiness', '', '| | Feature |', '|---|---|');
+          for (const [name, ready] of features) {
+            lines.push(`| ${ready ? '✅' : '❌'} | ${name} |`);
+          }
+
+          const blocked = features.filter(([, ready]) => !ready);
+          lines.push('');
+          lines.push(blocked.length
+            ? `**${blocked.length} of ${features.length} feature${blocked.length === 1 ? ' is' : 's are'} blocked** by missing permissions.`
+            : `**All ${features.length} features are supported** by this token.`);
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          console.log('\n' + lines.join('\n'));
+
+          // Always exits 0 - this reports on a token, it does not gate anything.
+          JSEOF

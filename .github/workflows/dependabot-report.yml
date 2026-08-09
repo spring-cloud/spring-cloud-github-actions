@@ -1,0 +1,450 @@
+name: Dependabot Report
+
+# Reads config/projects.json and reports, for every OSS and commercial Spring Cloud
+# repository, the state of Dependabot: which of its update jobs are failing, and how many
+# open Dependabot PRs are ready to merge, blocked by failing checks, conflicting, or
+# targeting a branch that is no longer maintained.
+#
+# Read-only. Covers features 1 and 4 of DESIGN-dependabot-automation.md; the triage
+# workflow that acts on these findings is separate.
+#
+# See README-dependabot-report.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated Spring Cloud project names to check. Empty checks all of them.'
+        required: false
+        type: string
+        default: ''
+      repo_type:
+        description: 'Check commercial, oss, or both?'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      notify:
+        description: 'Post the summary to Google Chat.'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with read access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  # Weekdays at ~6:17am US Eastern. As in ci-status-report.yml, GitHub Actions cron is
+  # always UTC with no notion of DST, so this is split into two month-selected entries -
+  # one at the EDT offset (UTC-4), one at EST (UTC-5). For a few days either side of the
+  # real DST boundary this fires an hour early or late, which is an accepted tradeoff for
+  # a status report.
+  #
+  # Minute is :17 rather than :00 - GitHub flags the top of the hour as the most congested
+  # slot for scheduled workflows. It is deliberately offset from ci-status-report.yml's
+  # :07 so the two reports do not contend for runners or arrive as one wall of text.
+  schedule:
+    - cron: '17 10 * 3-10 1-5'      # ~6:17am EDT, March-October
+    - cron: '17 11 * 11,12,1,2 1-5' # ~6:17am EST, November-February
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const filter = filterRaw
+            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
+            : new Set();
+
+          const repoType = (process.env.REPO_TYPE || 'both').trim();
+          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
+
+          // One entry per repository, not per branch - Dependabot PRs are listed
+          // repo-wide and then attributed to a branch, so fanning out per branch would
+          // fetch the same PR list several times.
+          const entries = [];
+          for (const [projectKey, config] of Object.entries(projects)) {
+            if (projectKey === 'defaults') continue;
+            if (filter.size > 0 && !filter.has(projectKey)) continue;
+            for (const typeKey of typeKeys) {
+              if (!config[typeKey]) continue;
+              const branches = config[typeKey]?.branches?.scheduled || [];
+              const repo = typeKey === 'commercial'
+                ? `spring-cloud/${projectKey}-commercial`
+                : `spring-cloud/${projectKey}`;
+              entries.push({
+                project: projectKey,
+                repo,
+                type: typeKey,
+                // Comma-separated: a matrix cannot carry an array through an expression
+                // without toJson pretty-printing it and breaking the consuming YAML.
+                branches: branches.join(','),
+              });
+            }
+          }
+
+          entries.sort((a, b) => a.repo.localeCompare(b.repo));
+
+          console.log(`Repositories to scan: ${entries.length}`);
+          for (const e of entries) console.log(`  ${e.repo} (${e.type}) [${e.branches}]`);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include: entries })}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${entries.length}\n`);
+          JSEOF
+
+  releaser-map:
+    name: Build Releaser Map
+    runs-on: ubuntu-latest
+    steps:
+      # Resolving a PR's GitHub Project means mapping its base-branch version to a
+      # release train via the *-snapshot.properties files on the jenkins-releaser-config
+      # branch of spring-cloud-release. That branch is the same for every repository, so
+      # it is read once here and shared with the scan jobs as an artifact rather than
+      # re-fetched ~35 times.
+      - name: Read jenkins-releaser-config
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const gh = args => {
+            try {
+              return execFileSync('gh', args,
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 });
+            } catch (err) {
+              console.log(`  gh failed: ${(err.stderr || err.message || '').split('\n')[0]}`);
+              return null;
+            }
+          };
+
+          const SOURCES = {
+            oss: 'spring-cloud/spring-cloud-release',
+            commercial: 'spring-cloud/spring-cloud-release-commercial',
+          };
+
+          const out = {};
+          for (const [type, repo] of Object.entries(SOURCES)) {
+            out[type] = {};
+            const listing = gh(['api', `repos/${repo}/contents/?ref=jenkins-releaser-config`]);
+            if (!listing) {
+              console.log(`${type}: could not list jenkins-releaser-config on ${repo}`);
+              continue;
+            }
+            const files = JSON.parse(listing)
+              .map(f => f.name)
+              .filter(n => n.endsWith('-snapshot.properties'));
+
+            for (const name of files) {
+              const raw = gh(['api',
+                `repos/${repo}/contents/${name}?ref=jenkins-releaser-config`, '--jq', '.content']);
+              if (!raw) continue;
+              const body = Buffer.from(raw.trim(), 'base64').toString('utf8');
+
+              const versions = {};
+              for (const line of body.split('\n')) {
+                const m = line.match(/^releaser\.fixed-versions\[(.+?)\]=(.+)$/);
+                if (m) versions[m[1]] = m[2].trim();
+              }
+
+              // The train is this file's spring-cloud-release version, which is also the
+              // title of the org-level GitHub Project board.
+              const train = (versions['spring-cloud-release'] || '').replace(/-SNAPSHOT$/, '');
+              if (!train) continue;
+
+              for (const [project, version] of Object.entries(versions)) {
+                out[type][project] = out[type][project] || {};
+                out[type][project][version] = train;
+              }
+            }
+            console.log(`${type}: ${files.length} snapshot file(s), ` +
+              `${Object.keys(out[type]).length} project(s) mapped`);
+          }
+
+          fs.writeFileSync('releaser-maps.json', JSON.stringify(out, null, 2));
+          JSEOF
+
+      - name: Upload releaser map
+        uses: actions/upload-artifact@v4
+        with:
+          name: releaser-maps
+          path: releaser-maps.json
+
+  scan:
+    name: "Dependabot — ${{ matrix.repo }}"
+    needs: [setup, releaser-map]
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download releaser map
+        uses: actions/download-artifact@v4
+        with:
+          name: releaser-maps
+
+      - name: Scan repository
+        id: scan
+        uses: ./.github/actions/dependabot-scan
+        with:
+          repo: ${{ matrix.repo }}
+          project: ${{ matrix.project }}
+          type: ${{ matrix.type }}
+          maintained-branches: ${{ matrix.branches }}
+          releaser-map-file: releaser-maps.json
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ steps.scan.outputs.safe-name }}
+          path: ${{ steps.scan.outputs.result-file }}
+
+  summary:
+    name: Summary
+    needs: [setup, scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        id: write-summary
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) =>
+                a.project.localeCompare(b.project) ||
+                a.type.localeCompare(b.type));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const sum = key => results.reduce((n, r) => n + (r.counts?.[key] || 0), 0);
+          const totals = {
+            open: sum('open'), ready: sum('ready'), blocked: sum('blocked'),
+            failing: sum('failing'), conflicting: sum('conflicting'),
+            pending: sum('pending'), unknown: sum('unknown'),
+            unmaintained: sum('unmaintained'),
+          };
+
+          const allPrs = results.flatMap(r =>
+            (r.prs || []).map(pr => ({ ...pr, repo: r.repo, type: r.type })));
+          const failingJobs = results.flatMap(r =>
+            (r.failingUpdateJobs || []).map(j => ({ ...j, repo: r.repo })));
+
+          // A repo whose PR list could not be read after retries reports zero of
+          // everything, which is indistinguishable from "all clear" unless it is called
+          // out explicitly.
+          const unscannable = results.filter(r =>
+            r.prListFailed || r.repoUnreadable || r.updateJobsFailed);
+
+          const prsIn = state => allPrs.filter(p => p.state === state);
+          const missingMilestones = allPrs.filter(p => p.milestoneState === 'missing');
+          const milestoneMismatches = allPrs.filter(p => p.milestoneState === 'mismatch');
+          const unresolvedProjects = allPrs.filter(p => p.projectState === 'unresolved');
+
+          // ── Job summary ────────────────────────────────────────────────────────────
+          const md = [];
+          md.push('## Dependabot Report', '');
+          md.push(`**${totals.open}** open Dependabot PR(s) across **${results.length}** ` +
+            `repositories — **${totals.ready}** ready to merge, ` +
+            `**${totals.failing}** blocked by failing checks, ` +
+            `**${totals.blocked}** green but not mergeable, ` +
+            `**${totals.conflicting}** conflicting, **${totals.pending}** pending.`);
+          md.push('');
+          md.push(`**${failingJobs.length}** failing Dependabot update job(s).`);
+          if (unscannable.length) {
+            md.push('');
+            const one = unscannable.length === 1;
+            md.push(`⚠️ **${unscannable.length}** repositor${one ? 'y' : 'ies'} could not be ` +
+              `scanned — ${one ? 'its' : 'their'} counts below are not trustworthy.`);
+          }
+          md.push('');
+
+          md.push('| | Repo | Type | Open | Ready | Failing | Blocked | Conflicting | Pending | Invalid | Update jobs |');
+          md.push('|---|---|---|---|---|---|---|---|---|---|---|');
+          for (const r of results) {
+            const c = r.counts || {};
+            const jobs = (r.failingUpdateJobs || []).length;
+            const unread = r.prListFailed || r.repoUnreadable || r.updateJobsFailed;
+            const mark = unread ? '❔' : (jobs || c.failing) ? '❌'
+              : (c.conflicting || c.unmaintained || c.blocked) ? '⚠️' : '✅';
+            const jobCell = r.updateJobsFailed ? '❔' : jobs ? `❌ ${jobs}` : '✅';
+            md.push(`| ${mark} | \`${r.repo}\` | ${r.type} | ${c.open || 0} | ${c.ready || 0} | ` +
+              `${c.failing || 0} | ${c.blocked || 0} | ${c.conflicting || 0} | ${c.pending || 0} | ` +
+              `${c.unmaintained || 0} | ${jobCell} |`);
+          }
+
+          const section = (title, items, render) => {
+            if (!items.length) return;
+            md.push('', `### ${title}`, '');
+            for (const i of items) md.push(`- ${render(i)}`);
+          };
+
+          section('Could not be scanned', unscannable, r =>
+            `\`${r.repo}\` — ${r.repoUnreadable ? 'repository is not readable'
+              : r.prListFailed ? 'the Dependabot PR list could not be read after retries'
+              : 'the Dependabot update-job history could not be read'}`);
+
+          section('Failing Dependabot update jobs', failingJobs, j =>
+            `\`${j.repo}\` — **${j.ecosystem}** in \`${j.directory}\` on \`${j.branch}\` ` +
+            `([run](${j.url}), ${j.createdAt.slice(0, 10)})`);
+
+          section('Ready to merge', prsIn('ready'), p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — ${p.title}`);
+
+          section('Blocked by failing checks', prsIn('failing'), p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — ${p.title} ` +
+            `(failing: ${p.failingChecks.join(', ')})`);
+
+          section('Green but not mergeable', prsIn('blocked'), p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — ${p.title} ` +
+            `(all checks pass, but GitHub reports \`${p.mergeStateStatus}\`)`);
+
+          section('Conflicting — needs rebase', prsIn('conflicting'), p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — ${p.title}`);
+
+          section('Missing milestone', missingMilestones, p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — milestone \`${p.expectedMilestone}\` does not exist`);
+
+          section('Milestone mismatch', milestoneMismatches, p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — is \`${p.currentMilestone}\`, expected \`${p.expectedMilestone}\``);
+
+          section('Could not resolve project', unresolvedProjects, p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — no train matches \`${p.baseRefName}\``);
+
+          section('On unmaintained branches — should be closed', prsIn('unmaintained'), p =>
+            `\`${p.repo}\` [#${p.number}](${p.url}) — targets \`${p.baseRefName}\`, which is not in projects.json`);
+
+          const warnings = results.flatMap(r =>
+            (r.warnings || []).map(w => `\`${r.repo}\` — ${w}`));
+          section('Warnings', warnings, w => w);
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+          console.log(md.join('\n'));
+
+          // ── Google Chat message ────────────────────────────────────────────────────
+          // Chat uses its own lightweight formatting (*bold*, <url|text>) rather than
+          // GitHub markdown, so the same facts are rendered separately here.
+          const chat = [];
+          const icon = (failingJobs.length || totals.failing) ? '❌'
+            : (totals.conflicting || totals.unmaintained || unscannable.length) ? '⚠️' : '✅';
+
+          chat.push(`${icon} *Dependabot Report* — ${totals.open} open PR(s) across ` +
+            `${results.length} repos: ${totals.ready} ready, ${totals.failing} failing, ` +
+            `${totals.conflicting} conflicting, ${totals.pending} pending`);
+
+          if (unscannable.length) {
+            chat.push(`⚠️ ${unscannable.length} repo(s) could not be scanned — counts are incomplete`);
+          }
+
+          const chatSection = (title, items, render, limit = 15) => {
+            if (!items.length) return;
+            chat.push('', `*${title}* (${items.length})`);
+            for (const i of items.slice(0, limit)) chat.push(`• ${render(i)}`);
+            if (items.length > limit) chat.push(`• …and ${items.length - limit} more`);
+          };
+
+          chatSection('Failing update jobs', failingJobs, j =>
+            `${j.repo} — ${j.ecosystem} in ${j.directory} on ${j.branch} (<${j.url}|run>)`);
+
+          chatSection('Ready to merge', prsIn('ready'), p =>
+            `${p.repo} <${p.url}|#${p.number}> ${p.title}`);
+
+          chatSection('Blocked by failing checks', prsIn('failing'), p =>
+            `${p.repo} <${p.url}|#${p.number}> — ${p.failingChecks.join(', ')}`);
+
+          chatSection('Green but not mergeable', prsIn('blocked'), p =>
+            `${p.repo} <${p.url}|#${p.number}> — ${p.mergeStateStatus}`);
+
+          chatSection('Conflicting', prsIn('conflicting'), p =>
+            `${p.repo} <${p.url}|#${p.number}>`);
+
+          chatSection('Missing milestone', missingMilestones, p =>
+            `${p.repo} <${p.url}|#${p.number}> — no milestone ${p.expectedMilestone}`);
+
+          chatSection('Could not resolve project', unresolvedProjects, p =>
+            `${p.repo} <${p.url}|#${p.number}> — ${p.baseRefName}`);
+
+          chatSection('On unmaintained branches', prsIn('unmaintained'), p =>
+            `${p.repo} <${p.url}|#${p.number}> — ${p.baseRefName}`);
+
+          // Multiline GITHUB_OUTPUT values need the <<delimiter heredoc form.
+          const delimiter = `ghadelim_${Date.now()}`;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `chat-text<<${delimiter}\n${chat.join('\n')}\n${delimiter}\n`);
+          JSEOF
+
+      - name: Send Google Chat notification
+        if: always() && inputs.notify != false
+        env:
+          WEBHOOK_URL: ${{ secrets.SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL }}
+          CHAT_TEXT: ${{ steps.write-summary.outputs.chat-text }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${WEBHOOK_URL}" ]]; then
+            echo "SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL is not set - skipping Google Chat notification."
+            exit 0
+          fi
+
+          if [[ -z "${CHAT_TEXT:-}" ]]; then
+            echo "No summary text was produced - skipping Google Chat notification."
+            exit 0
+          fi
+
+          TEXT=$(printf '%s\n\n<%s|View full report>' "$CHAT_TEXT" "$RUN_URL")
+
+          jq -n --arg text "$TEXT" '{text: $text}' > chat-message.json
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'Content-Type: application/json; charset=UTF-8' \
+            -d @chat-message.json \
+            "${WEBHOOK_URL}"
