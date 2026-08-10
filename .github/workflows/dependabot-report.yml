@@ -276,6 +276,8 @@ jobs:
             (r.prs || []).map(pr => ({ ...pr, repo: r.repo, type: r.type })));
           const failingJobs = results.flatMap(r =>
             (r.failingUpdateJobs || []).map(j => ({ ...j, repo: r.repo })));
+          const staleJobs = results.flatMap(r =>
+            (r.staleUpdateJobs || []).map(j => ({ ...j, repo: r.repo })));
 
           // A repo whose PR list could not be read after retries reports zero of
           // everything, which is indistinguishable from "all clear" unless it is called
@@ -334,6 +336,11 @@ jobs:
           section('Failing Dependabot update jobs', failingJobs, j =>
             `\`${j.repo}\` — **${j.ecosystem}** in \`${j.directory}\` on \`${j.branch}\` ` +
             `([run](${j.url}), ${j.createdAt.slice(0, 10)})`);
+
+          section('Stale update-job failures (scope no longer runs)', staleJobs, j =>
+            `\`${j.repo}\` — **${j.ecosystem}** in \`${j.directory}\` on \`${j.branch}\` ` +
+            `last ran ${j.ageDays} days ago and failed ([run](${j.url}))` +
+            (j.dependency ? ` — one-off update for \`${j.dependency}\`` : ''));
 
           section('Ready to merge', prsIn('ready'), p =>
             `\`${p.repo}\` [#${p.number}](${p.url}) — ${p.title}`);

@@ -153,6 +153,40 @@ omitted.
 The Chat message carries the same facts in Chat's own formatting (`*bold*`, `<url|text>`),
 capped at 15 entries per section with an "…and N more" line, plus a link back to the run.
 
+## How update-job failures are decided
+
+Dependabot's update runs are grouped by **ecosystem, directory and branch**, and only the
+**latest** run per group counts — the question is "is this update broken now?", not "has it
+ever failed?".
+
+Two details stop that from producing false alarms:
+
+**The dependency is deliberately left out of the grouping key.** Run names come in two
+shapes:
+
+```
+maven in /. - Update #1512675253                                  recurring, whole ecosystem
+maven in /. for org.bouncycastle:bcprov-jdk18on - Update #1369244864   one-off, one dependency
+```
+
+The second is what a security advisory or an `@dependabot recreate` produces, and it never
+runs again under that name. Keying on the dependency would give each such run a group of its
+own in which it is permanently the newest, so a single old failure would be reported as
+currently-failing forever. Grouping by scope instead means a later run covering the same
+ecosystem/directory/branch supersedes it, which is what actually happened: a one-off
+`bcprov-jdk18on` update that failed in May was reported as a live failure in
+`spring-cloud-commons` months later, even though every run since had passed.
+
+A name that does not parse still has its trailing `- Update #<id>` stripped before being
+used as a key, so an unrecognised format degrades to one group per scope rather than one per
+run.
+
+**Failures older than `stale-days` (default 14) are reported separately.** A scope whose last
+run is long past is not evidence about today — retired branches are the common case, since
+their updates stop for good and a final failed run would otherwise be reported every day
+from then on. These appear under **Stale update-job failures** rather than being dropped, so
+a genuinely stalled scope stays visible without being called a current failure.
+
 ## Why a silent zero is treated as a failure
 
 Two ways this report could quietly lie, both guarded against:
@@ -175,6 +209,5 @@ results are never presented as complete.
 - `max-parallel: 8` and `fail-fast: false`, matching `ci-status-report.yml`.
 - The scan is read-only, so it is safe to run at any time and is shared with the triage
   workflow rather than duplicated.
-- Update jobs are grouped by ecosystem, directory and branch, and only the **latest** run
-  per group is considered — the question is "is this update broken now?", not "has it ever
-  failed?".
+- Update-job grouping and the staleness window are described in
+  [How update-job failures are decided](#how-update-job-failures-are-decided).

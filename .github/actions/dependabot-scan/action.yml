@@ -27,6 +27,13 @@ inputs:
       never appear in projects.json. Dependabot legitimately targets these.
     required: false
     default: 'docs-build'
+  stale-days:
+    description: >
+      A failed Dependabot update job older than this many days is reported as stale rather
+      than as currently failing - its scope has stopped running (a retired branch, or a
+      one-off targeted update), so its last conclusion says nothing about today.
+    required: false
+    default: '14'
   releaser-map-file:
     description: >
       Path to a JSON file of {type: {project: {version: train}}}, used to resolve which
@@ -58,6 +65,7 @@ runs:
         TYPE: ${{ inputs.type }}
         MAINTAINED_BRANCHES: ${{ inputs.maintained-branches }}
         EXTRA_BRANCHES: ${{ inputs.extra-branches }}
+        STALE_DAYS: ${{ inputs.stale-days }}
         RELEASER_MAP_FILE: ${{ inputs.releaser-map-file }}
       run: |
         node - << 'JSEOF'
@@ -140,20 +148,36 @@ runs:
           warnings.push(`could not list Dependabot update runs: ${runsResp.err}`);
         } else {
           const runs = parseJson(runsResp.out, {}).workflow_runs || [];
+
+          // Run names come in two shapes:
+          //   "maven in /. - Update #123"                       recurring, whole ecosystem
+          //   "maven in /. for org.bouncycastle:bcprov - Update #123"   one-off, one dependency
+          // The second is what a security advisory or an @dependabot recreate produces.
+          const NAME = /^(\S+) in (\S+?)(?: for (.+?))? - Update #(\d+)$/;
+
           // Runs come back newest-first, so the first entry seen for a given
-          // ecosystem/directory/branch is that update's current state. Older runs for
-          // the same key are history and are ignored - the question is "is this update
-          // broken now?", not "has it ever failed?".
+          // ecosystem/directory/branch is that scope's current state. Older runs for the
+          // same key are history - the question is "is this update broken now?", not
+          // "has it ever failed?".
+          //
+          // The key deliberately excludes the dependency, so a one-off targeted run
+          // shares a group with the recurring runs covering the same scope. Keying on it
+          // instead would give every targeted run a group of its own, in which it is
+          // permanently the latest run - so a single failure would be reported as
+          // currently-failing forever, since nothing of that exact name ever runs again.
           const seen = new Set();
           for (const run of runs) {
-            const m = (run.name || '').match(/^(\S+) in (\S+) - Update #(\d+)$/);
-            const ecosystem = m ? m[1] : (run.name || 'unknown');
+            const m = (run.name || '').match(NAME);
+            // Strip the trailing id even when the name does not parse, so an unknown
+            // format degrades to one group per scope rather than one per run.
+            const ecosystem = m ? m[1] : (run.name || 'unknown').replace(/ - Update #\d+$/, '');
             const directory = m ? m[2] : '?';
             const key = `${ecosystem}|${directory}|${run.head_branch}`;
             if (seen.has(key)) continue;
             seen.add(key);
             updateJobs.push({
               ecosystem, directory,
+              dependency: m && m[3] ? m[3] : null,
               branch: run.head_branch,
               status: run.status,
               conclusion: run.conclusion || 'none',
@@ -162,7 +186,19 @@ runs:
             });
           }
         }
-        const failingUpdateJobs = updateJobs.filter(j => j.conclusion === 'failure');
+
+        // A scope whose last run is long past is not evidence about today. Retired
+        // branches are the common case: their updates stop for good, so a final failed
+        // run would otherwise be reported every day from then on. Those are separated
+        // out rather than dropped, so a genuinely stalled scope is still visible.
+        const staleDays = Number(process.env.STALE_DAYS || '14');
+        const staleBefore = Date.now() - staleDays * 86400000;
+        const isStale = j => new Date(j.createdAt).getTime() < staleBefore;
+
+        const failed = updateJobs.filter(j => j.conclusion === 'failure');
+        const failingUpdateJobs = failed.filter(j => !isStale(j));
+        const staleUpdateJobs = failed.filter(isStale)
+          .map(j => ({ ...j, ageDays: Math.floor((Date.now() - new Date(j.createdAt).getTime()) / 86400000) }));
 
         // ── Open Dependabot pull requests ───────────────────────────────────────────
         const PR_FIELDS = 'number,title,url,baseRefName,createdAt,updatedAt,headRefOid,' +
@@ -328,6 +364,7 @@ runs:
           updateJobsFailed,
           updateJobsChecked: updateJobs.length,
           failingUpdateJobs,
+          staleUpdateJobs,
           prs: scanned,
           warnings,
         };
@@ -340,7 +377,8 @@ runs:
           `${counts.ready} ready, ${counts.blocked} blocked, ${counts.failing} failing, ` +
           `${counts.conflicting} conflicting, ${counts.pending} pending, ` +
           `${counts.unknown} unknown, ${counts.unmaintained} unmaintained`);
-        console.log(`${REPO}: ${failingUpdateJobs.length} failing update job(s) of ${updateJobs.length} tracked`);
+        console.log(`${REPO}: ${failingUpdateJobs.length} failing update job(s) of ${updateJobs.length} tracked` +
+          (staleUpdateJobs.length ? ` (${staleUpdateJobs.length} stale failure(s) ignored)` : ''));
         for (const w of warnings) console.log(`  warning: ${w}`);
 
         fs.appendFileSync(process.env.GITHUB_OUTPUT, `result-file=${file}\n`);

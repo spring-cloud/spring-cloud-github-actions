@@ -244,7 +244,7 @@ jobs:
           const blocked = features.filter(([, ready]) => !ready);
           lines.push('');
           lines.push(blocked.length
-            ? `**${blocked.length} of ${features.length} feature${blocked.length === 1 ? ' is' : 's are'} blocked** by missing permissions.`
+            ? `**${blocked.length} of ${features.length} features ${blocked.length === 1 ? 'is' : 'are'} blocked** by missing permissions.`
             : `**All ${features.length} features are supported** by this token.`);
 
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
