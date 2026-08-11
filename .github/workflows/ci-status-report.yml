@@ -30,21 +30,27 @@ on:
         type: string
         default: ''
 
-  # Weekdays at ~6:00am US Eastern time. GitHub Actions cron always runs in
-  # UTC and has no notion of DST, so this is split into two entries - one at
-  # the UTC offset for EDT (UTC-4), one for EST (UTC-5) - selected by month.
-  # The actual US DST boundary (2nd Sunday in March / 1st Sunday in November)
-  # falls in the middle of a month, so for a few days each side of that
-  # boundary this fires an hour early or late local time; that's an accepted
-  # tradeoff for a status report rather than something worth a date-computing
-  # workaround. There is no existing DST convention elsewhere in this repo's
-  # scheduled workflows to follow (examples/deploy.yml's schedule doesn't
-  # account for DST at all).
+  # Runs twice on weekdays, at ~4:00am and ~6:07am US Eastern time - see
+  # "Determine phase" in the setup job below for what distinguishes them.
+  # GitHub Actions cron always runs in UTC and has no notion of DST, so each
+  # of the two times needs its own pair of entries - one at the UTC offset
+  # for EDT (UTC-4), one for EST (UTC-5) - selected by month. The actual US
+  # DST boundary (2nd Sunday in March / 1st Sunday in November) falls in the
+  # middle of a month, so for a few days each side of that boundary these
+  # fire an hour early or late local time; that's an accepted tradeoff for a
+  # status report rather than something worth a date-computing workaround.
+  # There is no existing DST convention elsewhere in this repo's scheduled
+  # workflows to follow (examples/deploy.yml's schedule doesn't account for
+  # DST at all).
   #
-  # Minute is :07, not :00 - GitHub's own docs flag the top of the hour as
-  # the highest-congestion time for scheduled workflows and recommend an
-  # off-the-hour minute to reduce the chance of delay or a dropped run.
+  # The 6:07 entries use :07, not :00 - GitHub's own docs flag the top of the
+  # hour as the highest-congestion time for scheduled workflows and recommend
+  # an off-the-hour minute to reduce the chance of delay or a dropped run.
+  # The 4:00 entries are left on the hour since nothing downstream depends on
+  # split-second timing for them - see the phase note above.
   schedule:
+    - cron: '0 8 * 3-10 1-5'       # ~4:00am EDT, March-October
+    - cron: '0 9 * 11,12,1,2 1-5'  # ~4:00am EST, November-February
     - cron: '7 10 * 3-10 1-5'      # ~6:07am EDT, March-October
     - cron: '7 11 * 11,12,1,2 1-5' # ~6:07am EST, November-February
 
@@ -58,9 +64,36 @@ jobs:
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
       count: ${{ steps.build-matrix.outputs.count }}
+      phase: ${{ steps.phase.outputs.phase }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Two-phase design: the ~4am run finds failures and triggers a rerun of
+      # just the failed jobs, then exits quietly (no Chat post). The ~6:07am
+      # run scans again - by then most flaky reruns have had ~2 hours to
+      # finish - and is the one that posts to Chat, distinguishing "recovered
+      # after rerun" from "still failing after rerun" using each run's own
+      # run_attempt (GitHub increments it in place when failed jobs are
+      # rerun, so this needs no state passed between the two runs). A manual
+      # workflow_dispatch has no github.event.schedule, so it defaults to
+      # "report" - the rerun side-effect should never happen from a manual
+      # click; it only ever fires from the ~4am schedule.
+      - name: Determine phase
+        id: phase
+        env:
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          case "$EVENT_SCHEDULE" in
+            '0 8 * 3-10 1-5'|'0 9 * 11,12,1,2 1-5')
+              PHASE="detect-and-rerun"
+              ;;
+            *)
+              PHASE="report"
+              ;;
+          esac
+          echo "phase=${PHASE}" >> "$GITHUB_OUTPUT"
+          echo "Determined phase: ${PHASE} (event.schedule='${EVENT_SCHEDULE}')"
 
       - name: Build matrix
         id: build-matrix
@@ -129,6 +162,7 @@ jobs:
           BRANCH: ${{ matrix.branch }}
           PROJECT: ${{ matrix.project }}
           TYPE: ${{ matrix.type }}
+          PHASE: ${{ needs.setup.outputs.phase }}
         run: |
           set -euo pipefail
 
@@ -156,6 +190,8 @@ jobs:
             URL=""
             RUN_NUMBER=""
             CREATED_AT=""
+            RUN_ID=""
+            RUN_ATTEMPT="1"
           else
             RUN=$(echo "$RUN_JSON" | jq -c '.workflow_runs[0]')
             STATUS=$(echo "$RUN" | jq -r '.status')
@@ -163,16 +199,39 @@ jobs:
             URL=$(echo "$RUN" | jq -r '.html_url')
             RUN_NUMBER=$(echo "$RUN" | jq -r '.run_number')
             CREATED_AT=$(echo "$RUN" | jq -r '.created_at')
-            echo "Found ${WORKFLOW_FILE} run #${RUN_NUMBER}: status=${STATUS} conclusion=${CONCLUSION}"
+            RUN_ID=$(echo "$RUN" | jq -r '.id')
+            RUN_ATTEMPT=$(echo "$RUN" | jq -r '.run_attempt // 1')
+            echo "Found ${WORKFLOW_FILE} run #${RUN_NUMBER} (attempt ${RUN_ATTEMPT}): status=${STATUS} conclusion=${CONCLUSION}"
           fi
 
-          # Only branches that are actually failing get the extra "who broke
-          # it" lookback below. A "not-found" branch has no CI runs to walk
-          # through in the first place, and a passing/pending branch doesn't
-          # need a culprit - so the extra API calls scale with the number of
-          # red branches, not the size of the whole matrix.
+          # Detect-and-rerun phase only: kick off a rerun of just the failed
+          # jobs in this run, then move on without waiting for it - the
+          # report phase, ~2 hours later, scans again and reads the outcome
+          # off this same run's (by then likely incremented) run_attempt.
+          # This is what actually automates today's "someone notices and
+          # clicks rerun" step; the report phase never triggers a rerun
+          # itself, it only classifies what it observes.
+          RERUN_TRIGGERED="false"
+          if [[ "$PHASE" == "detect-and-rerun" && "$CONCLUSION" == "failure" && -n "$RUN_ID" ]]; then
+            echo "Triggering a rerun of failed jobs for ${REPO}@${BRANCH} (run ${RUN_ID})..."
+            if gh api --method POST "repos/${REPO}/actions/runs/${RUN_ID}/rerun-failed-jobs" >/dev/null 2>&1; then
+              RERUN_TRIGGERED="true"
+              echo "Rerun triggered."
+            else
+              echo "Could not trigger a rerun for ${REPO}@${BRANCH} (run ${RUN_ID}) - it may have no rerunnable failed jobs, or be outside GitHub's rerun window."
+            fi
+          fi
+
+          # Only the report phase, and only branches that are actually
+          # failing, get the extra "who broke it" lookback below. The
+          # detect-and-rerun phase skips it entirely since its findings are
+          # never shown anywhere and are about to be re-attempted anyway; a
+          # "not-found" branch has no CI runs to walk through in the first
+          # place, and a passing/pending branch doesn't need a culprit - so
+          # the extra API calls scale with the number of red branches actually
+          # being reported, not the size of the whole matrix.
           echo '{}' > blame.json
-          if [[ "$CONCLUSION" == "failure" ]]; then
+          if [[ "$PHASE" == "report" && "$CONCLUSION" == "failure" ]]; then
             echo "Walking back through ${WORKFLOW_FILE} history on ${BRANCH} to find when it broke..."
 
             gh api "repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/runs?branch=${BRANCH}&per_page=100" \
@@ -247,7 +306,10 @@ jobs:
             --arg url "$URL" \
             --arg runNumber "$RUN_NUMBER" \
             --arg createdAt "$CREATED_AT" \
-            '{project: $project, repo: $repo, type: $type, branch: $branch, workflowFile: $workflowFile, status: $status, conclusion: $conclusion, url: $url, runNumber: $runNumber, createdAt: $createdAt}' \
+            --arg runId "$RUN_ID" \
+            --arg runAttempt "$RUN_ATTEMPT" \
+            --argjson rerunTriggered "$RERUN_TRIGGERED" \
+            '{project: $project, repo: $repo, type: $type, branch: $branch, workflowFile: $workflowFile, status: $status, conclusion: $conclusion, url: $url, runNumber: $runNumber, createdAt: $createdAt, runId: $runId, runAttempt: $runAttempt, rerunTriggered: $rerunTriggered}' \
             > base.json
 
           jq -s '.[0] * .[1]' base.json blame.json > "result-${SAFE}.json"
@@ -274,9 +336,12 @@ jobs:
 
       - name: Write summary
         id: write-summary
+        env:
+          PHASE: ${{ needs.setup.outputs.phase }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const phase = process.env.PHASE;
 
           let results = [];
           try {
@@ -291,10 +356,17 @@ jobs:
             console.log('No results to summarize.');
           }
 
+          // GitHub increments run_attempt in place when a run's failed jobs
+          // are rerun (rerun-failed-jobs doesn't create a new run) - so a
+          // report-phase scan can tell "this was retried" straight from the
+          // same run object it already fetches, with no state carried over
+          // from the earlier detect-and-rerun run.
+          const wasRerun = r => Number(r.runAttempt || 1) > 1;
+
           const icon = r => {
             if (r.status === 'not-found') return '❔';
-            if (r.status !== 'completed') return '🔄';
-            if (r.conclusion === 'success') return '✅';
+            if (r.status !== 'completed') return wasRerun(r) ? '⏳' : '🔄';
+            if (r.conclusion === 'success') return wasRerun(r) ? '🔁✅' : '✅';
             if (r.conclusion === 'failure') return '❌';
             if (r.conclusion === 'cancelled') return '⚠️';
             return '❔';
@@ -302,7 +374,9 @@ jobs:
 
           const label = r => {
             if (r.status === 'not-found') return 'no runs found';
-            if (r.status !== 'completed') return r.status;
+            if (r.status !== 'completed') return wasRerun(r) ? 'rerun still running' : r.status;
+            if (r.conclusion === 'success') return wasRerun(r) ? 'recovered after rerun' : 'success';
+            if (r.conclusion === 'failure') return wasRerun(r) ? 'still failing after rerun' : 'failure';
             return r.conclusion;
           };
 
@@ -347,6 +421,11 @@ jobs:
 
           const lines = [];
           lines.push('## CI Status Report');
+          if (phase === 'detect-and-rerun') {
+            lines.push('');
+            lines.push('_Detect-and-rerun pass - reruns were triggered for any failures below;_ ' +
+              '_the follow-up report run in ~2 hours posts to Chat with the outcome._');
+          }
           lines.push('');
           lines.push('| | Project | Type | Branch | Workflow | Status | Run |');
           lines.push('|---|---|---|---|---|---|---|');
@@ -357,23 +436,47 @@ jobs:
           }
           lines.push('');
 
-          const passing = results.filter(r => r.conclusion === 'success');
+          const passing = results.filter(r => r.conclusion === 'success' && !wasRerun(r));
+          const recovered = results.filter(r => r.conclusion === 'success' && wasRerun(r));
           const failing = results.filter(r => r.conclusion === 'failure');
+          const stillFailing = failing.filter(wasRerun);
+          const newFailing = failing.filter(r => !wasRerun(r));
           const notFound = results.filter(r => r.status === 'not-found');
 
           lines.push(`**${results.length}** branches checked — ` +
             `**${passing.length}** passing, ` +
+            `**${recovered.length}** recovered after rerun, ` +
             `**${failing.length}** failing, ` +
             `**${notFound.length}** with no CI runs found.`);
 
-          if (failing.length) {
+          if (stillFailing.length) {
             lines.push('');
-            lines.push('### Failing');
+            lines.push('### Still failing after rerun');
             lines.push('');
-            for (const r of failing) {
+            for (const r of stillFailing) {
               lines.push(`- \`${r.repo}\`@\`${r.branch}\` — [run #${r.runNumber}](${r.url})`);
               const blame = blameLineMd(r);
               if (blame) lines.push(`  - ${blame}`);
+            }
+          }
+
+          if (newFailing.length) {
+            lines.push('');
+            lines.push('### New failures (no rerun attempted yet)');
+            lines.push('');
+            for (const r of newFailing) {
+              lines.push(`- \`${r.repo}\`@\`${r.branch}\` — [run #${r.runNumber}](${r.url})`);
+              const blame = blameLineMd(r);
+              if (blame) lines.push(`  - ${blame}`);
+            }
+          }
+
+          if (recovered.length) {
+            lines.push('');
+            lines.push('### Recovered after rerun');
+            lines.push('');
+            for (const r of recovered) {
+              lines.push(`- \`${r.repo}\`@\`${r.branch}\` — [run #${r.runNumber}](${r.url})`);
             }
           }
 
@@ -389,43 +492,65 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
           console.log(lines.join('\n'));
 
-          // Surface counts (and the per-branch failing details, for the chat
+          // Surface counts (and the per-branch details, for the chat
           // notification step below) without ever failing this job - the
           // report itself succeeding is independent of what it reports.
+          // Nothing here is phase-gated: on a detect-and-rerun run these
+          // outputs are simply unused, since that phase never posts to Chat.
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `total=${results.length}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `passing=${passing.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `recovered=${recovered.length}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `failing=${failing.length}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `not-found=${notFound.length}\n`);
 
           const failingDetails = failing.map(r => {
             const repo = `*${r.repo}*`;
             const runLink = r.url ? ` (<${r.url}|run #${r.runNumber}>)` : '';
+            const retried = wasRerun(r) ? ' [still failing after rerun]' : ' [new, no rerun attempted]';
             const blame = blameLineChat(r);
-            return blame ? `${repo}@${r.branch}${runLink} — ${blame}` : `${repo}@${r.branch}${runLink}`;
+            return blame
+              ? `${repo}@${r.branch}${runLink}${retried} — ${blame}`
+              : `${repo}@${r.branch}${runLink}${retried}`;
+          }).join('\n');
+
+          const recoveredDetails = recovered.map(r => {
+            const repo = `*${r.repo}*`;
+            const runLink = r.url ? ` (<${r.url}|run #${r.runNumber}>)` : '';
+            return `${repo}@${r.branch}${runLink}`;
           }).join('\n');
 
           // Multiline GITHUB_OUTPUT values need the <<delimiter heredoc form
           // rather than a plain key=value line.
-          const delimiter = `ghadelim_${Date.now()}`;
+          const failingDelimiter = `ghadelim_${Date.now()}_failing`;
           fs.appendFileSync(process.env.GITHUB_OUTPUT,
-            `failing-details<<${delimiter}\n${failingDetails}\n${delimiter}\n`);
+            `failing-details<<${failingDelimiter}\n${failingDetails}\n${failingDelimiter}\n`);
+
+          const recoveredDelimiter = `ghadelim_${Date.now()}_recovered`;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `recovered-details<<${recoveredDelimiter}\n${recoveredDetails}\n${recoveredDelimiter}\n`);
           JSEOF
 
       - name: Send Google Chat notification
-        if: always()
+        # Only the report phase (~6:07am) posts. The detect-and-rerun phase
+        # (~4am) has already triggered reruns for anything failing above and
+        # deliberately stays quiet - this run, ~2 hours later, is the one
+        # that reflects their outcome.
+        if: needs.setup.outputs.phase == 'report'
         env:
           WEBHOOK_URL: ${{ secrets.SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL }}
           TOTAL: ${{ steps.write-summary.outputs.total }}
           PASSING: ${{ steps.write-summary.outputs.passing }}
+          RECOVERED: ${{ steps.write-summary.outputs.recovered }}
           FAILING: ${{ steps.write-summary.outputs.failing }}
           NOT_FOUND: ${{ steps.write-summary.outputs.not-found }}
           FAILING_DETAILS: ${{ steps.write-summary.outputs.failing-details }}
+          RECOVERED_DETAILS: ${{ steps.write-summary.outputs.recovered-details }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
 
-          if [[ -z "${WEBHOOK_URL}" ]]; then  
-            echo "GOOGLE_CHAT_WEBHOOK_URL is not set - skipping Google Chat notification."
+          if [[ -z "${WEBHOOK_URL}" ]]; then
+            echo "SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL is not set - skipping Google Chat notification."
             exit 0
           fi
 
@@ -436,7 +561,10 @@ jobs:
             ICON="❔"
           fi
 
-          TEXT="${ICON} *CI Status Report* — ${PASSING:-0} passing, ${FAILING:-0} failing, ${NOT_FOUND:-0} not found (of ${TOTAL:-0} branches checked)"
+          TEXT="${ICON} *CI Status Report* — ${PASSING:-0} passing, ${RECOVERED:-0} recovered after rerun, ${FAILING:-0} failing, ${NOT_FOUND:-0} not found (of ${TOTAL:-0} branches checked)"
+          if [[ -n "${RECOVERED_DETAILS:-}" ]]; then
+            TEXT=$(printf '%s\n\nRecovered after rerun (was flaky, passed on retry):\n%s' "$TEXT" "$RECOVERED_DETAILS")
+          fi
           if [[ -n "${FAILING_DETAILS:-}" ]]; then
             TEXT=$(printf '%s\n\nFailing:\n%s' "$TEXT" "$FAILING_DETAILS")
           fi
