@@ -87,8 +87,10 @@ scan re-reads the list once after a short pause, which resolves it in practice.
 
 ## Milestone and project checks
 
-For PRs on maintained branches the scan also works out what *should* be set, so the triage
-workflow has something to act on and the report can flag gaps:
+For PRs on **release** branches the scan also works out what *should* be set, so the triage
+workflow has something to act on and the report can flag gaps. PRs on
+[extra branches](#the-docs-build-exception) such as `docs-build` are skipped entirely —
+they belong to no release train and need neither a milestone nor a board:
 
 - **Milestone** — the base branch's project version with `-SNAPSHOT` stripped (the same
   string [`post-release.yml`](post-release.yml) creates milestones with). Reported as
@@ -129,6 +131,14 @@ appears in `projects.json` because it is not a release branch. Without an except
 maintained set regardless of repo type, and Dependabot does run against `docs-build` on both
 (e.g. `spring-cloud-gateway-commercial` and `spring-cloud-build-commercial` both have recent
 `docs-build` update runs).
+
+**Extra branches are maintained but are not release branches**, so
+[milestone and project checks are skipped for them](#milestone-and-project-checks) and both
+states report `n/a`. This is not merely tidier: `docs-build` carries its own `pom.xml` with a
+placeholder version (`0.0.1-SNAPSHOT`), so treating it as a release branch would derive an
+expected milestone of `0.0.1` and then report that milestone as missing on every docs PR.
+Such a PR is still classified normally (`ready`, `failing`, and so on) — only the milestone
+and project checks are skipped.
 
 ## Output
 

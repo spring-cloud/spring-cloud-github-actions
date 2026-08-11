@@ -80,13 +80,17 @@ runs:
           try { return JSON.parse(raw); } catch (_) { return fallback; }
         };
 
-        const maintained = new Set();
-        for (const source of [process.env.MAINTAINED_BRANCHES, process.env.EXTRA_BRANCHES]) {
-          for (const b of (source || '').split(',')) {
-            const t = b.trim();
-            if (t) maintained.add(t);
-          }
-        }
+        const toSet = raw =>
+          new Set((raw || '').split(',').map(b => b.trim()).filter(Boolean));
+
+        // Release branches carry a real project version, so their PRs get a milestone and
+        // a project board. Extra branches (docs-build) are maintained but are not part of
+        // any release train - they hold a placeholder version like 0.0.1-SNAPSHOT, which
+        // would otherwise be turned into a demand for a nonexistent "0.0.1" milestone.
+        // Both count as maintained; only release branches get those checks.
+        const releaseBranches = toSet(process.env.MAINTAINED_BRANCHES);
+        const extraBranches = toSet(process.env.EXTRA_BRANCHES);
+        const maintained = new Set([...releaseBranches, ...extraBranches]);
 
         // {type: {project: {version: train}}}, written once by the calling workflow so
         // the releaser config is fetched a single time rather than once per repo.
@@ -301,11 +305,13 @@ runs:
           else if (pr.mergeStateStatus === 'BLOCKED') state = 'blocked';
           else state = 'ready';
 
-          // Milestone and project are only meaningful for a branch we still maintain.
+          // Milestone and project only apply to release branches - a docs-build PR
+          // belongs to no train and needs neither, so both stay 'n/a' and it is never
+          // reported as missing a milestone or having an unresolvable project.
           let expectedMilestone = null, milestoneState = 'n/a';
           let expectedProject = null, projectState = 'n/a';
 
-          if (isMaintained) {
+          if (releaseBranches.has(pr.baseRefName)) {
             const version = branchVersion(pr.baseRefName);
             if (!version) {
               milestoneState = 'unresolved';
