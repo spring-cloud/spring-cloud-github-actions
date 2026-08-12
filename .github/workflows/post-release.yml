@@ -16,18 +16,27 @@ run-name: "Post Release - ${{ inputs.release_version }}${{ inputs.projects != ''
 #
 #   1. setup                   — read the jenkins-releaser-config properties file, validate, filter
 #   2. verify-tags             — every project version must have a v<version> tag (hard gate)
-#   3. milestones-and-releases — close the release milestone, publish the GitHub release
-#   4. next-snapshot-config    — write the next <train>-snapshot.properties file
-#   5. new-milestones          — open a milestone for each new snapshot version
-#   6. merge-back-and-update   — merge release/<version> back into .x, bump to snapshots, push
+#   3. next-snapshot-config    — write the next <train>-snapshot.properties file
+#   4. new-milestones          — open a milestone for each new snapshot version
+#   5. merge-back-and-update   — merge release/<version> back into .x, bump to snapshots, push,
+#                                and push the release tag into this repository
+#   6. milestones-and-releases — close the release milestone, publish the GitHub release
 #   7. summary                 — one report covering everything above
+#
+# release/<version> and the v<version> tag only ever exist in the commercial repository - an OSS
+# release is built there too, on a branch cut from <major>.<minor>.x-internal. So step 5 merges
+# across repositories, and it pushes the tag into the OSS repo once the merge has made the
+# tagged commit reachable there. Step 6 has to follow it for that reason: POST /releases with a
+# tag_name that does not exist creates the tag at the default branch head, so publishing before
+# the tag arrives would stamp v<version> onto whatever main happened to be.
 #
 # Every mutating step is gated on existence rather than on any attempt to work out whether a
 # project was really part of this train. A version carried over from an earlier release already
 # has its release and a closed milestone, so those steps become no-ops on their own.
 #
-# Hotfix releases (a 4-segment release_version, e.g. 2025.1.2.1) stop after step 3: there is no
-# next snapshot train, and no branch to merge a hotfix back into.
+# Hotfix releases (a 4-segment release_version, e.g. 2025.1.2.1) run only steps 1, 2 and 6:
+# there is no next snapshot train, no new milestone, and no branch to merge a hotfix back into
+# (release/<version> is itself the hotfix line).
 #
 # See README-post-release.md for details.
 
@@ -103,7 +112,8 @@ jobs:
               `(e.g. 2025.1.2 or 2025.1.2.1); got '${releaseVersion}'.`);
           }
 
-          // A 4-segment version is a commercial hotfix: only steps 1-3 apply to it.
+          // A 4-segment version is a commercial hotfix: only the tag gate and the
+          // milestone/release step apply to it.
           const hotfix = releaseVersion.split('.').length === 4;
 
           // ── projects filter ─────────────────────────────────────────────────────────
@@ -196,6 +206,10 @@ jobs:
               project: e.key,
               repo: commercial ? `spring-cloud/${e.key}-commercial` : `spring-cloud/${e.key}`,
               ossRepo: `spring-cloud/${e.key}`,
+              // Carried on every entry, including OSS runs, because that is where the release
+              // branch and the tag always live - see verify-tags and merge-back-and-update.
+              // On a commercial run this is the same value as repo.
+              commercialRepo: `spring-cloud/${e.key}-commercial`,
               version: e.version,
               tag: `v${e.version}`,
             }))
@@ -285,24 +299,50 @@ jobs:
           const resolved = [];
           const missing = [];
 
+          // Tags are only ever created on a release/<version> branch, and those only ever exist
+          // in the commercial repo - an OSS release is built there too, from the -internal
+          // branch. So the commercial repo is where the gate really looks, for both flavours;
+          // the difference is what a hit means afterwards.
           for (const e of entries) {
-            if (tagExists(e.repo, e.tag)) {
-              console.log(`✓ ${e.repo} ${e.tag}`);
-              resolved.push({ ...e, resolvedIn: commercial ? 'commercial' : 'oss' });
-              continue;
+            if (commercial) {
+              if (tagExists(e.commercialRepo, e.tag)) {
+                console.log(`✓ ${e.commercialRepo} ${e.tag}`);
+                resolved.push({ ...e, resolvedIn: 'commercial' });
+                continue;
+              }
+
+              // A commercial project with no tag of its own has had no commercial release since
+              // the last OSS one - its properties entry carries the plain OSS version (e.g.
+              // spring-cloud-bus=5.0.2 in 2025_1_2_1.properties). The OSS tag satisfies the
+              // gate, but there is nothing in the commercial repo to attach a release to.
+              if (tagExists(e.ossRepo, e.tag)) {
+                console.log(`✓ ${e.ossRepo} ${e.tag} (no commercial tag - OSS fallback)`);
+                resolved.push({ ...e, resolvedIn: 'oss-fallback' });
+                continue;
+              }
+            } else {
+              // Checked first only because a hit here means there is nothing left to do: the
+              // tag is already where this run needs it, either from a re-run of this workflow
+              // or because the version was carried over from an earlier train.
+              if (tagExists(e.ossRepo, e.tag)) {
+                console.log(`✓ ${e.ossRepo} ${e.tag}`);
+                resolved.push({ ...e, resolvedIn: 'oss' });
+                continue;
+              }
+
+              // The normal path for an OSS release: the tag exists only on the release branch
+              // in the commercial repo. merge-back-and-update pushes it to the OSS repo once
+              // the tagged commit is reachable there, which is why that job now runs before
+              // milestones-and-releases.
+              if (tagExists(e.commercialRepo, e.tag)) {
+                console.log(`✓ ${e.commercialRepo} ${e.tag} ` +
+                  `(not in ${e.ossRepo} yet - the merge back will push it)`);
+                resolved.push({ ...e, resolvedIn: 'commercial-pending' });
+                continue;
+              }
             }
 
-            // A commercial project with no tag of its own has had no commercial release since
-            // the last OSS one - its properties entry carries the plain OSS version (e.g.
-            // spring-cloud-bus=5.0.2 in 2025_1_2_1.properties). The OSS tag satisfies the gate,
-            // but there is nothing in the commercial repo to attach a release to.
-            if (commercial && tagExists(e.ossRepo, e.tag)) {
-              console.log(`✓ ${e.ossRepo} ${e.tag} (no commercial tag - OSS fallback)`);
-              resolved.push({ ...e, resolvedIn: 'oss-fallback' });
-              continue;
-            }
-
-            console.log(`✗ ${e.repo} ${e.tag} - MISSING`);
+            console.log(`✗ ${e.tag} - MISSING`);
             missing.push(e);
           }
 
@@ -313,8 +353,8 @@ jobs:
             console.error('');
             console.error(`ERROR: ${missing.length} tag(s) do not exist:`);
             for (const e of missing) {
-              const where = commercial ? `${e.repo} or ${e.ossRepo}` : e.repo;
-              console.error(`  ${e.tag} (${e.project}) - not found in ${where}`);
+              console.error(`  ${e.tag} (${e.project}) - not found in ` +
+                `${e.commercialRepo} or ${e.ossRepo}`);
             }
             console.error('');
             console.error('The release is not complete. Nothing else has been touched.');
@@ -324,213 +364,6 @@ jobs:
           console.log('');
           console.log(`All ${resolved.length} tags verified.`);
           JSEOF
-
-  milestones-and-releases:
-    name: "Milestone + Release — ${{ matrix.project }}"
-    needs: [setup, verify-tags]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 8
-      matrix: ${{ fromJson(needs.verify-tags.outputs.matrix) }}
-    steps:
-      - name: Close milestone and create release
-        id: run
-        env:
-          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-          PROJECT: ${{ matrix.project }}
-          REPO: ${{ matrix.repo }}
-          VERSION: ${{ matrix.version }}
-          TAG: ${{ matrix.tag }}
-          RESOLVED_IN: ${{ matrix.resolvedIn }}
-          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
-          ENTRIES: ${{ needs.setup.outputs.entries }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          node - << 'JSEOF'
-          const fs = require('fs');
-          const { execFileSync } = require('child_process');
-
-          const project = process.env.PROJECT;
-          const repo = process.env.REPO;
-          const version = process.env.VERSION;
-          const tag = process.env.TAG;
-          const resolvedIn = process.env.RESOLVED_IN;
-          const commercial = process.env.COMMERCIAL === 'true';
-          const dryRun = process.env.DRY_RUN === 'true';
-          const entries = JSON.parse(process.env.ENTRIES);
-
-          const gh = (args, input) => execFileSync('gh', args,
-            { encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] });
-
-          // ── a. close the milestone ──────────────────────────────────────────────────
-          // Milestone titles are bare version numbers, no v prefix - the same lookup the
-          // create-milestone action does. Never fails the job: a version carried over from an
-          // earlier train already has a closed milestone, and some projects have none at all.
-          let milestone = 'not-found';
-          try {
-            const list = JSON.parse(gh(['api', `repos/${repo}/milestones?state=all&per_page=100`]));
-            const found = list.find(m => m.title === version);
-            if (!found) {
-              console.log(`Milestone '${version}' not found in ${repo}.`);
-            } else if (found.state === 'closed') {
-              console.log(`Milestone '${version}' (#${found.number}) is already closed.`);
-              milestone = 'already-closed';
-            } else if (dryRun) {
-              console.log(`[dry run] would close milestone '${version}' (#${found.number}).`);
-              milestone = 'would-close';
-            } else {
-              gh(['api', `repos/${repo}/milestones/${found.number}`,
-                '--method', 'PATCH', '--field', 'state=closed']);
-              console.log(`Closed milestone '${version}' (#${found.number}).`);
-              milestone = 'closed';
-            }
-          } catch (err) {
-            console.log(`Could not read milestones for ${repo}: ${err.message}`);
-            milestone = 'error';
-          }
-
-          // ── b. create the release ───────────────────────────────────────────────────
-          const createRelease = () => {
-            if (resolvedIn === 'oss-fallback') {
-              // The tag only exists in the OSS repo, so there is nothing here to release. The
-              // OSS run of this workflow owns that release.
-              console.log(`No ${tag} in ${repo} - release skipped (satisfied by the OSS tag).`);
-              return { release: 'no-tag-oss-fallback', releaseUrl: '' };
-            }
-
-            let existing = null;
-            try {
-              existing = JSON.parse(gh(['api', `repos/${repo}/releases/tags/${tag}`]));
-            } catch (err) { /* no release yet */ }
-
-            if (existing) {
-              console.log(`Release ${tag} already exists: ${existing.html_url}`);
-              return { release: 'already-exists', releaseUrl: existing.html_url };
-            }
-
-            const generated = JSON.parse(gh(['api', `repos/${repo}/releases/generate-notes`,
-              '--method', 'POST', '--field', `tag_name=${tag}`]));
-            let body = generated.body || '';
-
-            // Commercial release notes are read by people without access to the private repo,
-            // so the PR links and contributor handles are noise. Strip them, matching what the
-            // existing commercial releases look like.
-            if (commercial) {
-              body = body.replace(/ by @\S+ in https?:\/\/\S+/g, '');
-              const kept = [];
-              let skipping = false;
-              for (const line of body.split('\n')) {
-                if (/^##\s/.test(line)) skipping = /contributors/i.test(line);
-                if (skipping) continue;
-                if (/^\*\*Full Changelog\*\*:/.test(line)) continue;
-                kept.push(line);
-              }
-              body = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
-            }
-
-            // The release train's own release lists what shipped in the BOM, taken from the
-            // same properties file the rest of this workflow runs on. spring-cloud-release is
-            // left out of its own list: the hand-written bodies name a "Spring Cloud Starter
-            // Build" repository that does not exist, so including it would emit a dead link.
-            if (project === 'spring-cloud-release') {
-              const titleCase = k =>
-                k.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-
-              // On a commercial train some entries carry the plain OSS version because that
-              // project had no commercial release, and the commercial repo has no such tag. The
-              // link has to follow the tag that actually exists or the release body ships 404s.
-              const linkRepo = e => {
-                if (!commercial) return `spring-cloud/${e.key}`;
-                const commercialRepo = `spring-cloud/${e.key}-commercial`;
-                try {
-                  const refs = gh(['api',
-                    `repos/${commercialRepo}/git/matching-refs/tags/v${e.version}`,
-                    '--jq', '.[].ref']);
-                  if (refs.split('\n').map(r => r.trim()).includes(`refs/tags/v${e.version}`)) {
-                    return commercialRepo;
-                  }
-                } catch (err) { /* fall through to the OSS repo */ }
-                return `spring-cloud/${e.key}`;
-              };
-
-              const included = entries
-                .filter(e => e.key !== 'spring-boot' && e.key !== 'spring-cloud-release')
-                .map(e => ` - ${titleCase(e.key)} \`${e.version}\` ` +
-                  `([issues](https://github.com/${linkRepo(e)}/releases/tag/v${e.version}))`);
-              // Trailing trim matters here: when the generated notes are empty (see below) this
-              // would otherwise leave the list followed by blank lines.
-              body = `## What's Included\n${included.join('\n')}\n\n${body}`.trim() + '\n';
-            }
-
-            // generate-notes is PR-based, so it returns nothing but a Full Changelog link when
-            // there are no merged PRs to list - which the sanitize step above then strips,
-            // leaving an empty body. That happens when the work landed as direct commits rather
-            // than through PRs, and also when there is no predecessor tag at all (commercial
-            // lines are orphan branches, so the first tag on a line has nothing to diff
-            // against). Publish a placeholder; the changes get written up by hand.
-            // Checked after What's Included is prepended, so the release train's own list is
-            // never displaced by the placeholder.
-            if (!body.trim()) {
-              body = `Released from tag ${tag}.\n`;
-              console.log('Generated notes were empty (no predecessor tag on this line) - ' +
-                'using a placeholder body.');
-            }
-
-            // Release titles are inconsistent across the org and this reproduces rather than
-            // normalizes them: OSS projects use the bare version, while spring-cloud-release
-            // and every commercial repo use a v prefix.
-            const name = (commercial || project === 'spring-cloud-release') ? tag : version;
-
-            if (dryRun) {
-              console.log(`[dry run] would create release '${name}' for ${tag} in ${repo}:`);
-              console.log('---');
-              console.log(body);
-              console.log('---');
-              return { release: 'would-create', releaseUrl: '' };
-            }
-
-            // Via --input rather than repeated --field, so a body containing newlines,
-            // backticks or quotes cannot be mangled on the way through.
-            fs.writeFileSync('payload.json', JSON.stringify({ tag_name: tag, name, body }));
-            const created = JSON.parse(gh(['api', `repos/${repo}/releases`,
-              '--method', 'POST', '--input', 'payload.json']));
-            console.log(`Created release ${created.html_url}`);
-            return { release: 'created', releaseUrl: created.html_url };
-          };
-
-          let release = 'skipped';
-          let releaseUrl = '';
-          let failure = null;
-          try {
-            const result = createRelease();
-            release = result.release;
-            releaseUrl = result.releaseUrl;
-          } catch (err) {
-            console.error(`ERROR: ${err.message}`);
-            release = 'error';
-            failure = err;
-          }
-
-          // Written before exiting on failure, so a project that blew up still gets a row in
-          // the summary rather than silently vanishing from the table.
-          const safe = `${repo}`.replace(/\//g, '-');
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `safe-name=${safe}\n`);
-          fs.writeFileSync(`result-milestones-${safe}.json`, JSON.stringify({
-            phase: 'milestones-and-releases',
-            project, repo, version, tag, resolvedIn, milestone, release, releaseUrl,
-          }));
-
-          if (failure) process.exit(1);
-          JSEOF
-
-      - name: Upload result
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: result-milestones-${{ steps.run.outputs.safe-name || matrix.project }}
-          path: result-milestones-*.json
-          if-no-files-found: ignore
 
   next-snapshot-config:
     name: Next Snapshot Config
@@ -832,7 +665,7 @@ jobs:
           # override the credentials baked into the target repo's remote URL below.
           persist-credentials: false
 
-      # ── 6a. resolve the branch to work on ─────────────────────────────────────────────
+      # ── 5a. resolve the branch to work on ─────────────────────────────────────────────
       - name: Resolve target branch
         id: branch
         env:
@@ -930,13 +763,14 @@ jobs:
           emit('branch', 'main');
           JSEOF
 
-      # ── 6b. merge release/<version> back into the .x branch ──────────────────────────
+      # ── 5b. merge release/<version> back into the .x branch ──────────────────────────
       - name: Merge release branch back
         id: merge
         if: steps.branch.outputs.status == 'ok'
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           REPO: ${{ matrix.repo }}
+          COMMERCIAL_REPO: ${{ matrix.commercialRepo }}
           VERSION: ${{ matrix.version }}
           BRANCH: ${{ steps.branch.outputs.branch }}
         run: |
@@ -944,23 +778,29 @@ jobs:
 
           RELEASE_BRANCH="release/${VERSION}"
           REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          # The release branch always lives in the commercial repo, for OSS releases too: they
+          # are built on release/<version>, cut from the -internal branch in <project>-commercial
+          # (create-oss-release-branch.yml), and merged back here afterwards. On a commercial run
+          # this is the same repository as REMOTE, so one code path covers both.
+          COMMERCIAL_REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git"
 
           git clone --quiet "$REMOTE" --branch "$BRANCH" project
           cd project
           git config user.name "Spring Builds"
           git config user.email "svc.spring-builds@broadcom.com"
+          git remote add commercial "$COMMERCIAL_REMOTE"
 
-          if ! git ls-remote --exit-code --heads origin "refs/heads/${RELEASE_BRANCH}" >/dev/null 2>&1; then
+          if ! git ls-remote --exit-code --heads commercial "refs/heads/${RELEASE_BRANCH}" >/dev/null 2>&1; then
             # Expected for a version carried over from an earlier train, for an OSS-fallback
             # entry, and for a release branch that was already merged and deleted.
-            echo "No ${RELEASE_BRANCH} branch in ${REPO} - nothing to merge."
+            echo "No ${RELEASE_BRANCH} branch in ${COMMERCIAL_REPO} - nothing to merge."
             echo "status=no-release-branch" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          git fetch --quiet origin "refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          git fetch --quiet commercial "refs/heads/${RELEASE_BRANCH}:refs/remotes/commercial/${RELEASE_BRANCH}"
 
-          if git merge-base --is-ancestor "origin/${RELEASE_BRANCH}" HEAD; then
+          if git merge-base --is-ancestor "commercial/${RELEASE_BRANCH}" HEAD; then
             echo "${RELEASE_BRANCH} is already merged into ${BRANCH}."
             echo "status=already-merged" >> "$GITHUB_OUTPUT"
             exit 0
@@ -983,7 +823,7 @@ jobs:
           done
 
           AUTO_RESOLVED=()
-          if ! git merge --no-edit -m "Merge ${RELEASE_BRANCH} into ${BRANCH}" "origin/${RELEASE_BRANCH}"; then
+          if ! git merge --no-edit -m "Merge ${RELEASE_BRANCH} into ${BRANCH}" "commercial/${RELEASE_BRANCH}"; then
             # ls-files --unmerged reads the index stages directly, so it lists modify/delete
             # conflicts as reliably as content conflicts. Read with a loop rather than mapfile,
             # which does not exist in bash 3.2 and so cannot be exercised outside a runner.
@@ -1061,7 +901,7 @@ jobs:
 
           echo "status=merged" >> "$GITHUB_OUTPUT"
 
-      # ── 6c. apply the new snapshot versions ──────────────────────────────────────────
+      # ── 5c. apply the new snapshot versions ──────────────────────────────────────────
       # release-train-version rather than the explicit versions input: only that path applies
       # project-version-substitutions, which is what maps spring-cloud-dependencies-parent to
       # spring-cloud-build, verifierVersion to spring-cloud-contract, and so on.
@@ -1087,7 +927,7 @@ jobs:
           token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           directory: project
 
-      # ── 6d. one push carrying the merge commit and the version bump ──────────────────
+      # ── 5d. one push carrying the merge commit and the version bump ──────────────────
       - name: Commit and push
         id: push
         if: steps.bump.outcome == 'success'
@@ -1135,7 +975,59 @@ jobs:
           echo "Pushed to ${REPO}@${BRANCH}."
           echo "status=pushed" >> "$GITHUB_OUTPUT"
 
-      # ── 6e. ask Dependabot to re-evaluate its open PRs ───────────────────────────────
+      # ── 5e. push the release tag into this repository ────────────────────────────────
+      # Only for an OSS run whose tag exists solely in the commercial repo, which is where it
+      # was created - the release is built on release/<version> over there. The merge above is
+      # what puts the tagged commit into this repository; this makes the tag itself exist here,
+      # so milestones-and-releases can publish a release against a real tag rather than having
+      # the API create one at the default branch head.
+      - name: Push release tag
+        id: tag
+        if: |
+          matrix.resolvedIn == 'commercial-pending' &&
+          (steps.push.outputs.status == 'pushed' ||
+           steps.push.outputs.status == 'nothing-to-push' ||
+           steps.push.outputs.status == 'would-push')
+        env:
+          REPO: ${{ matrix.repo }}
+          COMMERCIAL_REPO: ${{ matrix.commercialRepo }}
+          TAG: ${{ matrix.tag }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          cd project
+
+          # By exact refspec, so nothing but this tag comes across.
+          if ! git fetch --quiet commercial "refs/tags/${TAG}:refs/tags/${TAG}"; then
+            echo "::error::Could not fetch ${TAG} from ${COMMERCIAL_REPO}."
+            echo "status=fetch-failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAGGED=$(git rev-parse "${TAG}^{commit}")
+
+          # Pushing a tag whose commit is on no branch here would upload that commit as
+          # unreachable history. The merge is what makes it reachable, so if it is not an
+          # ancestor of what this leg pushed, something landed on the release branch after the
+          # merge and this needs a human rather than a push.
+          if ! git merge-base --is-ancestor "$TAGGED" HEAD; then
+            echo "::error::${TAG} points at ${TAGGED}, which is not reachable from ${BRANCH} in ${REPO}."
+            echo "status=not-reachable" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[dry run] not pushing ${TAG} (${TAGGED}) to ${REPO}."
+            echo "status=would-push" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push --quiet origin "refs/tags/${TAG}"
+          echo "Pushed ${TAG} (${TAGGED}) to ${REPO}."
+          echo "status=pushed" >> "$GITHUB_OUTPUT"
+
+      # ── 5f. ask Dependabot to re-evaluate its open PRs ───────────────────────────────
       # There is no public API to trigger a Dependabot run, so the supported route is the
       # comment command. Dependabot re-runs and closes any PR whose bump the push above
       # already satisfied.
@@ -1208,6 +1100,8 @@ jobs:
           MERGE_CONFLICTS: ${{ steps.merge.outputs.conflicts }}
           BUMP_OUTCOME: ${{ steps.bump.outcome }}
           PUSH_STATUS: ${{ steps.push.outputs.status }}
+          TAG_STATUS: ${{ steps.tag.outputs.status }}
+          RESOLVED_IN: ${{ matrix.resolvedIn }}
           DEPENDABOT_OPEN: ${{ steps.dependabot.outputs.open }}
           DEPENDABOT_MATCHED: ${{ steps.dependabot.outputs.matched }}
           DEPENDABOT_COMMENTED: ${{ steps.dependabot.outputs.commented }}
@@ -1230,6 +1124,8 @@ jobs:
             --arg conflicts "${MERGE_CONFLICTS:-}" \
             --arg bumpOutcome "${BUMP_OUTCOME:-skipped}" \
             --arg pushStatus "${PUSH_STATUS:-skipped}" \
+            --arg tagStatus "${TAG_STATUS:-skipped}" \
+            --arg resolvedIn "${RESOLVED_IN:-}" \
             --arg dependabotOpen "${DEPENDABOT_OPEN:-}" \
             --arg dependabotMatched "${DEPENDABOT_MATCHED:-}" \
             --arg dependabotCommented "${DEPENDABOT_COMMENTED:-}" \
@@ -1237,6 +1133,7 @@ jobs:
               branch: $branch, branchStatus: $branchStatus, mergeStatus: $mergeStatus,
               restored: $restored, autoResolved: $autoResolved, conflicts: $conflicts,
               bumpOutcome: $bumpOutcome, pushStatus: $pushStatus,
+              tagStatus: $tagStatus, resolvedIn: $resolvedIn,
               dependabotOpen: $dependabotOpen, dependabotMatched: $dependabotMatched,
               dependabotCommented: $dependabotCommented}' \
             > "result-mergeback-${SAFE}.json"
@@ -1247,6 +1144,251 @@ jobs:
         with:
           name: result-mergeback-${{ steps.record.outputs.safe-name || matrix.project }}
           path: result-mergeback-*.json
+          if-no-files-found: ignore
+
+  milestones-and-releases:
+    name: "Milestone + Release — ${{ matrix.project }}"
+    # Runs after the merge back, because for an OSS release that is what puts the tag into the
+    # repository this job publishes into. !cancelled() rather than a plain needs: a hotfix run
+    # skips next-snapshot-config and merge-back-and-update entirely, and a skipped dependency
+    # would otherwise skip this job too - leaving a hotfix run doing nothing at all, when
+    # closing the milestone and publishing the release is the whole of a hotfix run.
+    needs: [setup, verify-tags, merge-back-and-update]
+    if: ${{ !cancelled() && needs.verify-tags.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.verify-tags.outputs.matrix) }}
+    steps:
+      - name: Close milestone and create release
+        id: run
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          VERSION: ${{ matrix.version }}
+          TAG: ${{ matrix.tag }}
+          RESOLVED_IN: ${{ matrix.resolvedIn }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+          ENTRIES: ${{ needs.setup.outputs.entries }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const project = process.env.PROJECT;
+          const repo = process.env.REPO;
+          const version = process.env.VERSION;
+          const tag = process.env.TAG;
+          const resolvedIn = process.env.RESOLVED_IN;
+          const commercial = process.env.COMMERCIAL === 'true';
+          const dryRun = process.env.DRY_RUN === 'true';
+          const entries = JSON.parse(process.env.ENTRIES);
+
+          const gh = (args, input) => execFileSync('gh', args,
+            { encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] });
+
+          // matching-refs returns an array, so an exact comparison is required: a plain
+          // git/refs/tags/v5.0.2 lookup also prefix-matches v5.0.20. Same check verify-tags
+          // makes, repeated here because the tag can arrive between the two jobs.
+          const tagExists = (r, t) => {
+            try {
+              return gh(['api', `repos/${r}/git/matching-refs/tags/${t}`, '--jq', '.[].ref'])
+                .split('\n').map(x => x.trim()).includes(`refs/tags/${t}`);
+            } catch (err) {
+              return false;
+            }
+          };
+
+          // ── a. close the milestone ──────────────────────────────────────────────────
+          // Milestone titles are bare version numbers, no v prefix - the same lookup the
+          // create-milestone action does. Never fails the job: a version carried over from an
+          // earlier train already has a closed milestone, and some projects have none at all.
+          let milestone = 'not-found';
+          try {
+            const list = JSON.parse(gh(['api', `repos/${repo}/milestones?state=all&per_page=100`]));
+            const found = list.find(m => m.title === version);
+            if (!found) {
+              console.log(`Milestone '${version}' not found in ${repo}.`);
+            } else if (found.state === 'closed') {
+              console.log(`Milestone '${version}' (#${found.number}) is already closed.`);
+              milestone = 'already-closed';
+            } else if (dryRun) {
+              console.log(`[dry run] would close milestone '${version}' (#${found.number}).`);
+              milestone = 'would-close';
+            } else {
+              gh(['api', `repos/${repo}/milestones/${found.number}`,
+                '--method', 'PATCH', '--field', 'state=closed']);
+              console.log(`Closed milestone '${version}' (#${found.number}).`);
+              milestone = 'closed';
+            }
+          } catch (err) {
+            console.log(`Could not read milestones for ${repo}: ${err.message}`);
+            milestone = 'error';
+          }
+
+          // ── b. create the release ───────────────────────────────────────────────────
+          const createRelease = () => {
+            if (resolvedIn === 'oss-fallback') {
+              // The tag only exists in the OSS repo, so there is nothing here to release. The
+              // OSS run of this workflow owns that release.
+              console.log(`No ${tag} in ${repo} - release skipped (satisfied by the OSS tag).`);
+              return { release: 'no-tag-oss-fallback', releaseUrl: '' };
+            }
+
+            // POST /releases with a tag_name that does not exist does not fail - it creates the
+            // tag, at the default branch head. On an OSS run that would stamp v<version> onto
+            // whatever main happens to be, silently. So the tag is confirmed here rather than
+            // assumed: verify-tags may have resolved it in the commercial repo, and it only
+            // arrives in this one when the merge back pushes it (5e), which a dry run, a merge
+            // conflict, or a failed bump all prevent.
+            if (!tagExists(repo, tag)) {
+              // A dry run pushes nothing, so on an OSS run the tag is expected to be absent
+              // here - reporting that as a failure would make every dry run look broken.
+              if (dryRun) {
+                console.log(`[dry run] ${tag} is not in ${repo}; the merge back would push it. ` +
+                  'Nothing to publish against, so there is no release to preview.');
+                return { release: 'no-tag-dry-run', releaseUrl: '' };
+              }
+              console.log(`${tag} does not exist in ${repo} - release skipped.`);
+              console.log('It is pushed here by the merge back, which did not get that far ' +
+                'for this project (see its leg above, or the summary).');
+              return { release: 'no-tag', releaseUrl: '' };
+            }
+
+            let existing = null;
+            try {
+              existing = JSON.parse(gh(['api', `repos/${repo}/releases/tags/${tag}`]));
+            } catch (err) { /* no release yet */ }
+
+            if (existing) {
+              console.log(`Release ${tag} already exists: ${existing.html_url}`);
+              return { release: 'already-exists', releaseUrl: existing.html_url };
+            }
+
+            const generated = JSON.parse(gh(['api', `repos/${repo}/releases/generate-notes`,
+              '--method', 'POST', '--field', `tag_name=${tag}`]));
+            let body = generated.body || '';
+
+            // Commercial release notes are read by people without access to the private repo,
+            // so the PR links and contributor handles are noise. Strip them, matching what the
+            // existing commercial releases look like.
+            if (commercial) {
+              body = body.replace(/ by @\S+ in https?:\/\/\S+/g, '');
+              const kept = [];
+              let skipping = false;
+              for (const line of body.split('\n')) {
+                if (/^##\s/.test(line)) skipping = /contributors/i.test(line);
+                if (skipping) continue;
+                if (/^\*\*Full Changelog\*\*:/.test(line)) continue;
+                kept.push(line);
+              }
+              body = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+            }
+
+            // The release train's own release lists what shipped in the BOM, taken from the
+            // same properties file the rest of this workflow runs on. spring-cloud-release is
+            // left out of its own list: the hand-written bodies name a "Spring Cloud Starter
+            // Build" repository that does not exist, so including it would emit a dead link.
+            if (project === 'spring-cloud-release') {
+              const titleCase = k =>
+                k.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+              // On a commercial train some entries carry the plain OSS version because that
+              // project had no commercial release, and the commercial repo has no such tag. The
+              // link has to follow the tag that actually exists or the release body ships 404s.
+              const linkRepo = e => {
+                if (!commercial) return `spring-cloud/${e.key}`;
+                const commercialRepo = `spring-cloud/${e.key}-commercial`;
+                try {
+                  const refs = gh(['api',
+                    `repos/${commercialRepo}/git/matching-refs/tags/v${e.version}`,
+                    '--jq', '.[].ref']);
+                  if (refs.split('\n').map(r => r.trim()).includes(`refs/tags/v${e.version}`)) {
+                    return commercialRepo;
+                  }
+                } catch (err) { /* fall through to the OSS repo */ }
+                return `spring-cloud/${e.key}`;
+              };
+
+              const included = entries
+                .filter(e => e.key !== 'spring-boot' && e.key !== 'spring-cloud-release')
+                .map(e => ` - ${titleCase(e.key)} \`${e.version}\` ` +
+                  `([issues](https://github.com/${linkRepo(e)}/releases/tag/v${e.version}))`);
+              // Trailing trim matters here: when the generated notes are empty (see below) this
+              // would otherwise leave the list followed by blank lines.
+              body = `## What's Included\n${included.join('\n')}\n\n${body}`.trim() + '\n';
+            }
+
+            // generate-notes is PR-based, so it returns nothing but a Full Changelog link when
+            // there are no merged PRs to list - which the sanitize step above then strips,
+            // leaving an empty body. That happens when the work landed as direct commits rather
+            // than through PRs, and also when there is no predecessor tag at all (commercial
+            // lines are orphan branches, so the first tag on a line has nothing to diff
+            // against). Publish a placeholder; the changes get written up by hand.
+            // Checked after What's Included is prepended, so the release train's own list is
+            // never displaced by the placeholder.
+            if (!body.trim()) {
+              body = `Released from tag ${tag}.\n`;
+              console.log('Generated notes were empty (no predecessor tag on this line) - ' +
+                'using a placeholder body.');
+            }
+
+            // Release titles are inconsistent across the org and this reproduces rather than
+            // normalizes them: OSS projects use the bare version, while spring-cloud-release
+            // and every commercial repo use a v prefix.
+            const name = (commercial || project === 'spring-cloud-release') ? tag : version;
+
+            if (dryRun) {
+              console.log(`[dry run] would create release '${name}' for ${tag} in ${repo}:`);
+              console.log('---');
+              console.log(body);
+              console.log('---');
+              return { release: 'would-create', releaseUrl: '' };
+            }
+
+            // Via --input rather than repeated --field, so a body containing newlines,
+            // backticks or quotes cannot be mangled on the way through.
+            fs.writeFileSync('payload.json', JSON.stringify({ tag_name: tag, name, body }));
+            const created = JSON.parse(gh(['api', `repos/${repo}/releases`,
+              '--method', 'POST', '--input', 'payload.json']));
+            console.log(`Created release ${created.html_url}`);
+            return { release: 'created', releaseUrl: created.html_url };
+          };
+
+          let release = 'skipped';
+          let releaseUrl = '';
+          let failure = null;
+          try {
+            const result = createRelease();
+            release = result.release;
+            releaseUrl = result.releaseUrl;
+          } catch (err) {
+            console.error(`ERROR: ${err.message}`);
+            release = 'error';
+            failure = err;
+          }
+
+          // Written before exiting on failure, so a project that blew up still gets a row in
+          // the summary rather than silently vanishing from the table.
+          const safe = `${repo}`.replace(/\//g, '-');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `safe-name=${safe}\n`);
+          fs.writeFileSync(`result-milestones-${safe}.json`, JSON.stringify({
+            phase: 'milestones-and-releases',
+            project, repo, version, tag, resolvedIn, milestone, release, releaseUrl,
+          }));
+
+          if (failure) process.exit(1);
+          JSEOF
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-milestones-${{ steps.run.outputs.safe-name || matrix.project }}
+          path: result-milestones-*.json
           if-no-files-found: ignore
 
   summary:
@@ -1323,6 +1465,9 @@ jobs:
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
             skipped: '⏭️', 'merge-conflict': '❌', 'branch-not-found': '❌',
             'version-mismatch': '❌', error: '❌', failure: '❌',
+            // tag push (5e) and the tag check that gates publishing
+            'no-tag': '❌', 'not-reachable': '❌', 'fetch-failed': '❌',
+            'no-tag-dry-run': '🔎',
           };
           const icon = s => ICON[s] || '❔';
 
@@ -1369,8 +1514,8 @@ jobs:
           if (mb.length) {
             L.push('### Merge back and version bump');
             L.push('');
-            L.push('| Project | Branch | Merge | CI files restored | Bump | Push | Dependabot |');
-            L.push('|---|---|---|---|---|---|---|');
+            L.push('| Project | Branch | Merge | CI files restored | Bump | Push | Tag | Dependabot |');
+            L.push('|---|---|---|---|---|---|---|---|');
             for (const r of mb) {
               const branch = r.branch ? `\`${r.branch}\`` : `${icon(r.branchStatus)} ${r.branchStatus}`;
               const dep = r.dependabotMatched
@@ -1384,9 +1529,14 @@ jobs:
                 ...(r.restored ? names(r.restored) : []),
                 ...(r.autoResolved ? names(r.autoResolved).map(n => `${n} (conflict)`) : []),
               ];
+              // The tag column is only meaningful for an entry whose tag was resolved in the
+              // commercial repo and so has to be pushed here; anything else already had it.
+              const tag = r.resolvedIn === 'commercial-pending'
+                ? `${icon(r.tagStatus)} ${r.tagStatus}`
+                : '—';
               L.push(`| \`${r.project}\` | ${branch} | ${icon(r.mergeStatus)} ${r.mergeStatus} | ` +
                 `${kept.length ? kept.join(', ') : '—'} | ${icon(r.bumpOutcome)} ${r.bumpOutcome} | ` +
-                `${icon(r.pushStatus)} ${r.pushStatus} | ${dep} |`);
+                `${icon(r.pushStatus)} ${r.pushStatus} | ${tag} | ${dep} |`);
             }
             L.push('');
 
@@ -1407,6 +1557,7 @@ jobs:
           const noMilestone = mr.filter(r => r.milestone === 'not-found');
           const ossFallback = mr.filter(r => r.resolvedIn === 'oss-fallback');
           const noReleaseBranch = mb.filter(r => r.mergeStatus === 'no-release-branch');
+          const noTag = mr.filter(r => r.release === 'no-tag');
 
           if (blocked.length) {
             L.push('### ❌ Blocked on a manual merge');
@@ -1414,6 +1565,9 @@ jobs:
             L.push('These release branches could not be merged back without conflicts. The merge was');
             L.push('aborted and nothing else was done for them — resolve each one by hand, then');
             L.push('re-run this workflow with `projects` set to just those projects.');
+            L.push('');
+            L.push('For an OSS release this also holds up the GitHub release: the tag reaches this');
+            L.push('repository through the merge, so nothing can be published until it lands.');
             L.push('');
             for (const r of blocked) {
               L.push(`- \`${r.repo}\` — merge \`release/${r.version}\` into \`${r.branch}\``);
@@ -1424,6 +1578,19 @@ jobs:
                 L.push(`  - conflicting: ${paths.map(p => `\`${p}\``).join(', ')}`);
               }
             }
+            L.push('');
+          }
+
+          if (noTag.length) {
+            L.push('### ❌ No tag to release from');
+            L.push('');
+            L.push('The tag was not in the repository when the release step ran, so nothing was');
+            L.push('published — deliberately, since creating a release against a missing tag would');
+            L.push('have GitHub create that tag at the default branch head. The tag is pushed here');
+            L.push('by the merge back, so look at that leg first: a conflict, a failed bump, or a');
+            L.push('dry run all stop it before the tag moves.');
+            L.push('');
+            for (const r of noTag) L.push(`- \`${r.repo}\` — \`${r.tag}\``);
             L.push('');
           }
 
@@ -1469,7 +1636,7 @@ jobs:
           // Chat has its own lightweight formatting (*bold*, <url|text>, no tables), so this
           // is built separately rather than reusing the markdown above. Assembled here, where
           // the data already is, and handed to the posting step as one value.
-          const problems = blocked.length + branchFailed.length;
+          const problems = blocked.length + branchFailed.length + noTag.length;
           const C = [];
           C.push(`${problems ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
             `(${commercial ? 'commercial' : 'OSS'}${hotfix ? ', hotfix' : ''})` +
@@ -1493,6 +1660,9 @@ jobs:
             'would-push': 'would push (dry run)', 'branch-not-found': 'no branch found',
             'version-mismatch': 'version mismatch', 'no-version': 'no version',
             error: 'errored', skipped: 'not reached', unknown: 'unknown',
+            'no-tag': 'NO TAG - not published', 'not-reachable': 'tag not reachable',
+            'fetch-failed': 'tag fetch failed',
+            'no-tag-dry-run': 'would publish once the tag lands (dry run)',
           };
           // overrides let one status read differently per phase - a created release is
           // "published", a created milestone is just "created".
@@ -1516,6 +1686,10 @@ jobs:
           tally('New milestones', nm, 'status');
           tally('Merge back', mb, 'mergeStatus');
           tally('Version bumps', mb, 'pushStatus');
+          // Only the entries that actually needed a tag pushed here, so a commercial run - where
+          // the tag was already in place - does not report a line of "not reached".
+          const tagged = mb.filter(r => r.resolvedIn === 'commercial-pending');
+          if (tagged.length) tally('Tags pushed', tagged, 'tagStatus');
           const kept = n(mb, r => r.restored || r.autoResolved);
           if (kept) C.push(`CI/PR workflow files kept from the maintenance branch: ${kept} project(s)`);
           const nudged = mb.reduce((sum, r) => sum + (Number(r.dependabotCommented) || 0), 0);
@@ -1528,6 +1702,9 @@ jobs:
               C.push(`• ${r.repo} — blocked on a manual merge of release/${r.version} into ${r.branch}`);
             }
             for (const r of branchFailed) C.push(`• ${r.repo} — ${phrase(r.branchStatus)}`);
+            for (const r of noTag) {
+              C.push(`• ${r.repo} — ${r.tag} never reached the repo, so no release was published`);
+            }
           }
 
           C.push('');
@@ -1543,10 +1720,11 @@ jobs:
           const delim = 'ghadelim_post_release_chat';
           fs.appendFileSync(out, `chat-text<<${delim}\n${C.join('\n')}\n${delim}\n`);
 
-          // A blocked merge or an unusable branch means a project was left half-done, which has
-          // to be a red run rather than a green one with a note buried in the table.
-          if (blocked.length || branchFailed.length) {
-            console.error(`\n${blocked.length + branchFailed.length} project(s) need attention.`);
+          // A blocked merge, an unusable branch, or a release that could not be published for
+          // want of its tag all mean a project was left half-done, which has to be a red run
+          // rather than a green one with a note buried in the table.
+          if (problems) {
+            console.error(`\n${problems} project(s) need attention.`);
             process.exit(1);
           }
           JSEOF

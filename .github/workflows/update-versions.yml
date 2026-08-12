@@ -1,0 +1,613 @@
+name: Update Versions
+
+# Names each run for what it targets, so the Actions list distinguishes runs at a glance
+# instead of showing a column of identical "Update Versions" rows:
+#
+#   Update Versions - 2025.1.3-SNAPSHOT
+#   Update Versions - 2024.0.9-SNAPSHOT (commercial)
+#   Update Versions - 2025.1.3-SNAPSHOT [spring-cloud-config] - Dry Run
+run-name: "Update Versions - ${{ inputs.release_train_version }}${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || (inputs.commercial == true && ' (commercial)' || '') }}${{ inputs.dry_run == true && ' - Dry Run' || '' }}"
+
+# A thin wrapper around the update-project-versions action that runs it against every OSS or
+# every commercial project of a release train, in one go:
+#
+#   1. setup  — read <release_train_version>.properties from jenkins-releaser-config, build
+#               the project matrix, and wait until raw.githubusercontent.com serves that file
+#   2. update — per project: resolve the branch, clone it, apply the versions, commit and push
+#   3. summary — one report covering every project
+#
+# The usual reason to run this is the snapshot bump after a release: move every project on the
+# train from the versions it was just released at to the next -SNAPSHOT versions. post-release
+# already does that as part of its merge-back step, but it does it only as part of a full
+# post-release run - this workflow is the same bump on its own, for when the versions have to
+# move before (or independently of) post-release.
+#
+# Nothing here creates the properties file. It must already exist on the jenkins-releaser-config
+# branch of spring-cloud-release-commercial; post-release's next-snapshot-config step is what
+# normally writes the -snapshot one, and it can also be committed by hand.
+#
+# See README-update-versions.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_train_version:
+        description: 'Release train version whose versions should be applied (e.g. 2025.1.3-SNAPSHOT, or 2025.1.2). Must have a matching properties file on the jenkins-releaser-config branch.'
+        required: true
+        type: string
+      commercial:
+        description: 'Run against the -commercial repositories? Ignored when projects is supplied - the -commercial suffix on the project names decides.'
+        required: false
+        type: boolean
+        default: false
+      projects:
+        description: 'Comma-separated list of projects to run against, including the -commercial suffix where applicable (e.g. spring-cloud-config,spring-cloud-build). Must be all OSS or all commercial. When empty, every project in the properties file is processed.'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run, if checked nothing is committed or pushed, but you can see what would change'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      count: ${{ steps.parse.outputs.count }}
+      commercial: ${{ steps.parse.outputs.commercial }}
+      release-repo: ${{ steps.parse.outputs.release-repo }}
+      props-file: ${{ steps.parse.outputs.props-file }}
+    steps:
+      - name: Parse releaser config and build matrix
+        id: parse
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          TRAIN_VERSION: ${{ inputs.release_train_version }}
+          COMMERCIAL: ${{ inputs.commercial }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const trainVersion = (process.env.TRAIN_VERSION || '').trim();
+          const projectsRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const commercialInput = (process.env.COMMERCIAL || 'false') === 'true';
+
+          const fail = (...msg) => { for (const m of msg) console.error(m); process.exit(1); };
+
+          // 3 or 4 numeric segments, optionally with a qualifier: 2025.1.3, 2025.1.3-SNAPSHOT,
+          // 2025.1.0-RC1, 2025.1.2.1. Anything else would resolve to a properties file name
+          // that cannot exist, so it is rejected here rather than as a confusing 404.
+          if (!/^\d+(\.\d+){2,3}(-[A-Za-z][\w.]*)?$/.test(trainVersion)) {
+            fail(`ERROR: release_train_version must be 3 or 4 numeric segments with an optional ` +
+              `qualifier (e.g. 2025.1.3-SNAPSHOT or 2025.1.2); got '${trainVersion}'.`);
+          }
+
+          // Deliberately identical to releaseTrainVersionToFileName in
+          // update-project-versions/src/index.js: this job must read exactly the file the action
+          // will read, or it would validate one file and apply another.
+          const propsFile = trainVersion
+            .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
+            .replace(/\./g, '_') + '.properties';
+
+          // ── projects filter ─────────────────────────────────────────────────────────
+          // Commerciality comes from the names when they are given, because the names are what
+          // the caller actually typed. A mixed list is rejected: one train version addresses one
+          // line, so a mix would apply the wrong versions to half the list.
+          const names = projectsRaw
+            ? projectsRaw.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+
+          let commercial = commercialInput;
+          if (names.length) {
+            const suffixed = names.filter(n => n.endsWith('-commercial'));
+            const unsuffixed = names.filter(n => !n.endsWith('-commercial'));
+            if (suffixed.length && unsuffixed.length) {
+              fail(
+                'ERROR: projects mixes commercial and OSS projects.',
+                `  commercial: ${suffixed.join(', ')}`,
+                `  oss:        ${unsuffixed.join(', ')}`,
+                'A run targets one release train, so every project must be the same type.');
+            }
+            commercial = suffixed.length > 0;
+            if (commercial !== commercialInput) {
+              console.log(`Note: the commercial input (${commercialInput}) is ignored when ` +
+                `projects is supplied; derived commercial=${commercial} from the project names.`);
+            }
+          }
+
+          // Always spring-cloud-release-commercial, for OSS trains too: that repository holds the
+          // releaser config for every train now, so this is deliberately NOT derived from
+          // `commercial`. That input decides only which project repositories are updated.
+          const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
+          const BRANCH = 'jenkins-releaser-config';
+
+          // ── read the properties file ────────────────────────────────────────────────
+          console.log(`Reading ${propsFile} from ${releaseRepo}@${BRANCH}...`);
+          let content;
+          try {
+            const b64 = execFileSync('gh', ['api',
+              `repos/${releaseRepo}/contents/${propsFile}?ref=${BRANCH}`,
+              '--jq', '.content'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+            content = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+          } catch (err) {
+            fail(`ERROR: could not read ${propsFile} from ${releaseRepo}@${BRANCH}.`,
+              'This workflow applies an existing properties file, it does not create one.',
+              'Check that release_train_version matches a file on that branch (post-release',
+              'writes the -snapshot file; it can also be committed by hand), and that the token',
+              'has read access to the repository.');
+          }
+
+          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
+          const entries = [];
+          for (const line of content.split('\n')) {
+            const m = line.match(ENTRY_RE);
+            if (m) entries.push({ key: m[1].trim(), version: m[2].trim() });
+          }
+          if (!entries.length) {
+            fail(`ERROR: ${propsFile} contains no releaser.fixed-versions[...] entries.`);
+          }
+          console.log(`Found ${entries.length} version entries.`);
+
+          // spring-boot is in the properties file so that every project picks up its version, but
+          // it is not a Spring Cloud repository and nothing is pushed to it.
+          const NON_REPO_KEYS = new Set(['spring-boot']);
+
+          let wanted = null;
+          if (names.length) {
+            wanted = new Set(names.map(n => n.replace(/-commercial$/, '')));
+            const known = new Set(entries.map(e => e.key));
+            const unknown = [...wanted].filter(k => !known.has(k));
+            if (unknown.length) {
+              fail(`ERROR: not found in ${propsFile}: ${unknown.join(', ')}`,
+                `Known projects: ${[...known].sort().join(', ')}`);
+            }
+            const nonRepo = [...wanted].filter(k => NON_REPO_KEYS.has(k));
+            if (nonRepo.length) {
+              fail(`ERROR: ${nonRepo.join(', ')} is not a Spring Cloud project repository ` +
+                'and cannot be targeted directly.');
+            }
+          }
+
+          const matrix = entries
+            .filter(e => !NON_REPO_KEYS.has(e.key))
+            .filter(e => !wanted || wanted.has(e.key))
+            .map(e => ({
+              project: e.key,
+              repo: commercial ? `spring-cloud/${e.key}-commercial` : `spring-cloud/${e.key}`,
+              version: e.version,
+            }))
+            .sort((a, b) => a.project.localeCompare(b.project));
+
+          // ── make sure raw serves this exact file ────────────────────────────────────
+          // update-project-versions resolves versions over raw.githubusercontent.com, which is
+          // CDN-cached. A file committed moments ago - by post-release, or by hand, which is the
+          // common case for this workflow - may 404 or still serve its previous contents there.
+          // Applying stale versions across every repository is far worse than waiting, so this
+          // blocks until raw agrees with the API, and fails the run if it never does.
+          const url = `https://raw.githubusercontent.com/${releaseRepo}/${BRANCH}/${propsFile}`;
+          console.log(`Waiting for ${url} to serve these contents...`);
+          let available = false;
+          for (let attempt = 1; attempt <= 30; attempt++) {
+            let served = null;
+            try {
+              // The commercial release repo is private, so raw needs the same bearer token
+              // update-project-versions sends.
+              served = execFileSync('curl', ['-s', '-f',
+                '-H', 'Cache-Control: no-cache',
+                '-H', `Authorization: Bearer ${process.env.GH_TOKEN}`, url],
+                { encoding: 'utf8' });
+            } catch (err) { /* not served yet */ }
+
+            // Compares contents rather than just the status code: an updated file returns 200
+            // immediately while the CDN is still serving the previous version, so a status check
+            // would wave through exactly the stale read this wait exists to prevent.
+            if (served !== null && served.trim() === content.trim()) {
+              console.log(`Serving the expected contents after ${attempt} attempt(s).`);
+              available = true;
+              break;
+            }
+            console.log(`Attempt ${attempt}: ` +
+              (served === null ? 'not served yet' : 'still serving different contents') +
+              ', waiting 10s...');
+            execFileSync('sleep', ['10']);
+          }
+          if (!available) {
+            fail('', `ERROR: ${url} never served the contents the API returned for ${propsFile}.`,
+              'Nothing was changed. Re-run this workflow once the CDN catches up.');
+          }
+
+          console.log('');
+          console.log(`commercial:      ${commercial}`);
+          console.log(`release repo:    ${releaseRepo}`);
+          console.log(`properties file: ${propsFile}`);
+          console.log('');
+          console.log(`Projects to update: ${matrix.length}`);
+          for (const e of matrix) console.log(`  ${e.repo} -> ${e.version}`);
+
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `matrix=${JSON.stringify({ include: matrix })}\n`);
+          fs.appendFileSync(out, `count=${matrix.length}\n`);
+          fs.appendFileSync(out, `commercial=${commercial}\n`);
+          fs.appendFileSync(out, `release-repo=${releaseRepo}\n`);
+          fs.appendFileSync(out, `props-file=${propsFile}\n`);
+          JSEOF
+
+  update:
+    name: "Update — ${{ matrix.project }}"
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Do not persist this repository's GITHUB_TOKEN as a git extraheader; it would
+          # override the credentials baked into the target repo's remote URL below.
+          persist-credentials: false
+
+      # ── resolve the branch to work on ────────────────────────────────────────────────
+      - name: Resolve target branch
+        id: branch
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          VERSION: ${{ matrix.version }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const repo = process.env.REPO;
+          const version = process.env.VERSION;
+          const commercial = process.env.COMMERCIAL === 'true';
+
+          const out = process.env.GITHUB_OUTPUT;
+          const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
+          const stop = (status, message) => {
+            console.log(message);
+            emit('status', status);
+            emit('branch', '');
+            process.exit(0);
+          };
+
+          const branchExists = branch => {
+            try {
+              execFileSync('gh', ['api', `repos/${repo}/branches/${branch}`, '--jq', '.name'],
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              return true;
+            } catch (err) { return false; }
+          };
+
+          // The branch is always derived from the version in the properties file - there is no
+          // input to override it. Between the .x derivation and the main fallback below, every
+          // branch this workflow targets is covered: the only names in projects.json that are
+          // not <major>.<minor>.x are main, and the -internal branches, which are rebased from
+          // the OSS branches this updates and so are never targeted here.
+          //
+          // Drop the last segment and append .x. Works for both lines: OSS 5.0.4-SNAPSHOT ->
+          // 5.0.x, and 3-part commercial 4.2.9-SNAPSHOT -> 4.2.x.
+          const plain = version.replace(/-SNAPSHOT$/, '');
+          const parts = plain.split('.');
+          const target = parts.slice(0, -1).join('.') + '.x';
+
+          if (branchExists(target)) {
+            console.log(`Target branch: ${target}`);
+            emit('status', 'ok');
+            emit('branch', target);
+            process.exit(0);
+          }
+
+          // Commercial repos have no main branch at all - spring-cloud-config-commercial's
+          // default is 4.3.x - so there is no sane fallback to make.
+          if (commercial) {
+            stop('branch-not-found',
+              `ERROR: ${repo} has no ${target} branch, and commercial repos have no main to ` +
+              'fall back to. Skipping this project.');
+          }
+
+          if (!branchExists('main')) {
+            stop('branch-not-found', `ERROR: ${repo} has neither ${target} nor main.`);
+          }
+
+          // Falling back to main is only safe if main really is the line this version belongs
+          // to - otherwise we would bump an unrelated major.minor to these versions.
+          const expected = parts.slice(0, 2).join('.');
+          let pom;
+          try {
+            const b64 = execFileSync('gh', ['api',
+              `repos/${repo}/contents/pom.xml?ref=main`, '--jq', '.content'],
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+            pom = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+          } catch (err) {
+            stop('branch-not-found', `ERROR: no ${target} branch and could not read pom.xml on main.`);
+          }
+
+          // The root <version> is the project's own; fall back to <parent><version> when the
+          // root pom inherits it.
+          const withoutParent = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
+          let m = withoutParent.match(/<version>([^<]+)<\/version>/);
+          if (!m) {
+            const parent = pom.match(/<parent>[\s\S]*?<\/parent>/);
+            if (parent) m = parent[0].match(/<version>([^<]+)<\/version>/);
+          }
+          const pomVersion = m ? m[1].trim() : '';
+
+          if (!pomVersion.startsWith(`${expected}.`)) {
+            stop('version-mismatch',
+              `ERROR: ${repo} has no ${target} branch, and main is at '${pomVersion}', which is ` +
+              `not on the ${expected} line. Refusing to bump main to ${version}.`);
+          }
+
+          console.log(`No ${target} branch; main is at ${pomVersion} - using main.`);
+          emit('status', 'ok');
+          emit('branch', 'main');
+          JSEOF
+
+      - name: Clone project
+        id: clone
+        if: steps.branch.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          set -uo pipefail
+
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+          if ! git clone --quiet "$REMOTE" --branch "$BRANCH" project; then
+            echo "::error::Could not clone ${REPO}@${BRANCH}."
+            echo "status=clone-failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cd project
+          git config user.name "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+
+          echo "Cloned ${REPO}@${BRANCH} at $(git rev-parse --short HEAD)."
+          echo "status=cloned" >> "$GITHUB_OUTPUT"
+
+      # ── apply the versions ───────────────────────────────────────────────────────────
+      # release-train-version rather than the explicit versions input: only that path applies
+      # project-version-substitutions, which is what maps spring-cloud-dependencies-parent to
+      # spring-cloud-build, verifierVersion to spring-cloud-contract, and so on.
+      - name: Apply versions
+        id: bump
+        if: steps.clone.outputs.status == 'cloned'
+        continue-on-error: true
+        uses: ./.github/actions/update-project-versions
+        with:
+          release-train-version: ${{ inputs.release_train_version }}
+          # Hardcoded true, not the run's commercial flavour. This input does one thing in the
+          # action - pick which repo the releaser config is fetched from
+          # (update-project-versions/src/index.js:193-194) - and the config now always lives in
+          # spring-cloud-release-commercial, including for OSS trains. Passing the derived value
+          # would send an OSS run to spring-cloud-release, where the file no longer is.
+          commercial: 'true'
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          directory: project
+
+      - name: Commit and push
+        id: push
+        if: steps.bump.outcome == 'success'
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          TRAIN_VERSION: ${{ inputs.release_train_version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          cd project
+
+          git add -A
+          if git diff --cached --quiet; then
+            # Re-running against versions that are already applied is the normal way this
+            # happens, and it is not a failure.
+            echo "No version changes to commit - already at the ${TRAIN_VERSION} versions."
+            echo "status=no-changes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changes to commit:"
+          git --no-pager diff --cached --stat
+
+          # Deliberately no [skip actions], the same as post-release's bump: the point of moving
+          # a branch onto new versions is to have CI build on them.
+          MESSAGE="Updating project versions to ${TRAIN_VERSION}"
+          git commit --quiet -m "$MESSAGE"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[dry run] not pushing \"${MESSAGE}\" to ${REPO}@${BRANCH}."
+            echo "status=would-push" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push --quiet origin "HEAD:refs/heads/${BRANCH}"
+          echo "Pushed \"${MESSAGE}\" to ${REPO}@${BRANCH}."
+          echo "status=pushed" >> "$GITHUB_OUTPUT"
+
+      - name: Record result
+        if: always()
+        id: record
+        env:
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          VERSION: ${{ matrix.version }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          BRANCH_STATUS: ${{ steps.branch.outputs.status }}
+          CLONE_STATUS: ${{ steps.clone.outputs.status }}
+          BUMP_OUTCOME: ${{ steps.bump.outcome }}
+          PUSH_STATUS: ${{ steps.push.outputs.status }}
+        run: |
+          set -euo pipefail
+
+          SAFE="${REPO//\//-}"
+          echo "safe-name=${SAFE}" >> "$GITHUB_OUTPUT"
+
+          jq -n \
+            --arg project "$PROJECT" \
+            --arg repo "$REPO" \
+            --arg version "$VERSION" \
+            --arg branch "${BRANCH:-}" \
+            --arg branchStatus "${BRANCH_STATUS:-skipped}" \
+            --arg cloneStatus "${CLONE_STATUS:-skipped}" \
+            --arg bumpOutcome "${BUMP_OUTCOME:-skipped}" \
+            --arg pushStatus "${PUSH_STATUS:-skipped}" \
+            '{project: $project, repo: $repo, version: $version, branch: $branch,
+              branchStatus: $branchStatus, cloneStatus: $cloneStatus,
+              bumpOutcome: $bumpOutcome, pushStatus: $pushStatus}' \
+            > "result-update-${SAFE}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-update-${{ steps.record.outputs.safe-name || matrix.project }}
+          path: result-update-*.json
+          if-no-files-found: ignore
+
+  summary:
+    name: Summary
+    needs: [setup, update]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        env:
+          TRAIN_VERSION: ${{ inputs.release_train_version }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+          PROPS_FILE: ${{ needs.setup.outputs.props-file }}
+          RELEASE_REPO: ${{ needs.setup.outputs.release-repo }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+          const commercial = (process.env.COMMERCIAL || 'false') === 'true';
+          const trainVersion = process.env.TRAIN_VERSION || '';
+          const propsFile = process.env.PROPS_FILE || '';
+          const releaseRepo = process.env.RELEASE_REPO || '';
+          const filter = (process.env.PROJECTS_FILTER || '').trim();
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) => (a.project || '').localeCompare(b.project || ''));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const L = [];
+          L.push(dryRun ? '## Update versions summary (dry run — nothing was changed)'
+                        : '## Update versions summary');
+          L.push('');
+          L.push(`Applying **${trainVersion}** · ${commercial ? 'commercial' : 'OSS'}` +
+            (filter ? ` · filtered to \`${filter}\`` : ''));
+          if (propsFile) {
+            L.push('');
+            L.push(`Versions read from \`${propsFile}\` on \`${releaseRepo}\`` +
+              '@`jenkins-releaser-config`.');
+          }
+          L.push('');
+
+          // "Pushed" and "was already at these versions" have to read differently, or a run that
+          // changed nothing looks identical to one that did all the work.
+          const ICON = {
+            pushed: '✅', success: '✅',
+            'would-push': '🔎',
+            'no-changes': '➖', skipped: '⏭️', cancelled: '⚠️',
+            cloned: '✅',
+            'clone-failed': '❌', 'branch-not-found': '❌', 'version-mismatch': '❌',
+            failure: '❌',
+          };
+          const icon = s => ICON[s] || '❔';
+
+          if (results.length) {
+            L.push('| Project | Version | Branch | Update | Push |');
+            L.push('|---|---|---|---|---|');
+            for (const r of results) {
+              const branch = r.branch
+                ? `\`${r.branch}\``
+                : `${icon(r.branchStatus)} ${r.branchStatus}`;
+              // The clone failing is what a blank bump column would otherwise hide.
+              const update = r.cloneStatus === 'clone-failed'
+                ? `${icon('clone-failed')} clone-failed`
+                : `${icon(r.bumpOutcome)} ${r.bumpOutcome}`;
+              L.push(`| \`${r.project}\` | ${r.version} | ${branch} | ${update} | ` +
+                `${icon(r.pushStatus)} ${r.pushStatus} |`);
+            }
+            L.push('');
+
+            const pushed = results.filter(r => r.pushStatus === 'pushed').length;
+            const would = results.filter(r => r.pushStatus === 'would-push').length;
+            const unchanged = results.filter(r => r.pushStatus === 'no-changes').length;
+            const failed = results.filter(r =>
+              r.branchStatus === 'branch-not-found' || r.branchStatus === 'version-mismatch' ||
+              r.cloneStatus === 'clone-failed' || r.bumpOutcome === 'failure');
+
+            L.push(`**${results.length}** project(s) processed — ` +
+              (dryRun ? `**${would}** would be pushed` : `**${pushed}** pushed`) +
+              `, **${unchanged}** already at these versions, **${failed.length}** failed.`);
+            L.push('');
+
+            if (failed.length) {
+              L.push('### ❌ Not updated');
+              L.push('');
+              L.push('Fix these and re-run with `projects` set to just this list — projects that');
+              L.push('were already updated will report no changes rather than being touched again.');
+              L.push('');
+              for (const r of failed) {
+                const why = r.branchStatus === 'branch-not-found'
+                    ? `no branch for ${r.version} to update`
+                  : r.branchStatus === 'version-mismatch'
+                    ? 'only `main` exists and it is on a different line'
+                  : r.cloneStatus === 'clone-failed' ? 'could not be cloned'
+                  : 'the version update failed — see that job\'s log';
+                L.push(`- \`${r.repo}\` — ${why}`);
+              }
+              L.push('');
+            }
+          } else {
+            L.push('No projects were processed.');
+            L.push('');
+          }
+
+          if (dryRun) {
+            L.push('This was a **dry run**. Re-run with `dry_run` unchecked to push these changes.');
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
+          console.log(L.join('\n'));
+          JSEOF

@@ -1,6 +1,6 @@
 # Post Release Workflow
 
-An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, closing milestones, publishing GitHub releases, seeding the next snapshot config, opening the next round of milestones, merging release branches back, bumping the maintenance branches to the new snapshot versions, and nudging Dependabot to drop PRs the release has superseded.
+An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, seeding the next snapshot config, opening the next round of milestones, merging release branches back from the commercial repo, bumping the maintenance branches to the new snapshot versions, pushing the release tags into the OSS repos, closing milestones, publishing GitHub releases, and nudging Dependabot to drop PRs the release has superseded.
 
 Previously all of this was done by hand, repo by repo, for up to 17 projects.
 
@@ -8,13 +8,26 @@ Previously all of this was done by hand, repo by repo, for up to 17 projects.
 
 It:
 
-1. **Reads the properties file** for `release_version` from the `jenkins-releaser-config` branch of `spring-cloud-release-commercial` — for OSS trains too, see [Where the releaser config lives](#where-the-releaser-config-lives) — validates the inputs, and builds a matrix of `{project, repo, version, tag}`
-2. **Verifies a `v<version>` tag exists** for every project — a hard gate, in a single job so an incomplete release produces one consolidated failure naming every missing tag
-3. **Closes the release milestone** and **publishes the GitHub release** for each tag
-4. **Writes the next `<train>-snapshot.properties` file** to `jenkins-releaser-config`, with every version's last segment bumped and `-SNAPSHOT` appended — creating it, or **overwriting an existing one whose versions do not match**
-5. **Opens a milestone** for each new snapshot version, via the [create-milestone](../actions/create-milestone/README.md) action
-6. **Merges `release/<version>` back into the `.x` branch**, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, and comments `@dependabot recreate` on superseded Dependabot PRs
+1. **Reads the properties file** for `release_version` from the `jenkins-releaser-config` branch of `spring-cloud-release-commercial` — for OSS trains too, see [Where the releaser config lives](#where-the-releaser-config-lives) — validates the inputs, and builds a matrix of `{project, repo, ossRepo, commercialRepo, version, tag}`
+2. **Verifies a `v<version>` tag exists** for every project, in the commercial repo — see [Where the release branch and the tag live](#where-the-release-branch-and-the-tag-live) — a hard gate, in a single job so an incomplete release produces one consolidated failure naming every missing tag
+3. **Writes the next `<train>-snapshot.properties` file** to `jenkins-releaser-config`, with every version's last segment bumped and `-SNAPSHOT` appended — creating it, or **overwriting an existing one whose versions do not match**
+4. **Opens a milestone** for each new snapshot version, via the [create-milestone](../actions/create-milestone/README.md) action
+5. **Merges `release/<version>` back into the `.x` branch** from the commercial repo, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, **pushes the release tag into the OSS repo**, and comments `@dependabot recreate` on superseded Dependabot PRs
+6. **Closes the release milestone** and **publishes the GitHub release** for each tag
 7. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
+
+Step 5's version bump also exists on its own, as [update-versions](README-update-versions.md) — for when the projects have to move to a train's versions before, or independently of, a post-release run. The normal end-of-release path is still this workflow; running that one first is not required.
+
+### Where the release branch and the tag live
+
+**Always in the commercial repo, for OSS releases too.** An OSS release is built in `<project>-commercial`: [create-oss-release-branch](create-oss-release-branch.yml) pushes the OSS branch there as `<major>.<minor>.x-internal` (full history, deliberately not an orphan) and cuts `release/<version>` from it. The build, the staging and the tag all happen on that branch, in that repository. Nothing tags the OSS repo directly.
+
+Two things follow, and they are why the job order looks the way it does:
+
+- **Step 2 checks the commercial repo.** For an OSS run it looks there first only in the sense that a hit in the OSS repo means the tag is *already* where this run needs it — from a re-run, or from a version carried over from an earlier train. Otherwise the tag is found in the commercial repo and marked `commercial-pending`: real, but not here yet.
+- **Step 5 runs before step 6.** The merge is what brings the tagged commit into the OSS repo; once it is reachable there, the tag ref is pushed too. Only then can a release be published against it.
+
+**Publishing is gated on the tag actually existing in the target repo.** `POST /releases` with a `tag_name` that does not exist does not fail — it *creates* the tag, at the default branch head. On an OSS run that would silently stamp `v<version>` onto whatever `main` happened to be. So step 6 re-checks and reports `no-tag` rather than publishing, and a merge that could not complete therefore also holds up the release.
 
 ### Gate on existence, never classify
 
@@ -22,8 +35,8 @@ A project listed in the properties file may not have been released *in this trai
 
 | Case | Tag | Release | Milestone |
 |------|-----|---------|-----------|
-| Released in this train | in the primary repo | created | open → closed |
-| Carried over from an earlier train | in the primary repo | already exists → skipped | already closed → skipped |
+| Released in this train | on `release/<version>` in the commercial repo, pushed to the OSS repo by step 5 | created | open → closed |
+| Carried over from an earlier train | already in the primary repo | already exists → skipped | already closed → skipped |
 | No commercial release since the last OSS one | OSS repo only | no tag here → skipped | absent → reported |
 
 This is also what makes re-running the workflow safe, and what lets a `projects`-filtered repair run work after a partial failure.
@@ -45,7 +58,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 **Defaults to a dry run.** Set `dry_run` to `false` to actually close, create, commit and push.
 
-**The workflow exits non-zero** if any project hit a merge conflict or had no usable branch to update, since those leave a project half-done. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
+**The workflow exits non-zero** if any project hit a merge conflict, had no usable branch to update, or could not be published because its tag never reached the repo, since those leave a project half-done. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
 
 ## Inputs
 
@@ -88,7 +101,7 @@ projects: spring-cloud-config-commercial,spring-cloud-gateway-commercial
 - A listed project that is not in the properties file fails the run, naming it and listing the known projects, rather than silently doing nothing.
 - Empty entries are dropped, so a trailing comma (`spring-cloud-config,`) is accepted — matching how [ci-status-report](README-ci-status-report.md) and [rollout-deploy-docs](README-rollout-deploy-docs.md) parse the same input.
 
-**The filter does not apply to step 4.** The snapshot properties file is train-wide and stays complete: `update-project-versions` needs the *whole* versions map to update each project's dependency versions, so a file containing only the filtered projects would produce wrong POMs. Step 4 always writes every entry; only the repo-facing steps are filtered.
+**The filter does not apply to step 3.** The snapshot properties file is train-wide and stays complete: `update-project-versions` needs the *whole* versions map to update each project's dependency versions, so a file containing only the filtered projects would produce wrong POMs. Step 3 always writes every entry; only the repo-facing steps are filtered.
 
 ## Where the releaser config lives
 
@@ -96,7 +109,7 @@ projects: spring-cloud-config-commercial,spring-cloud-gateway-commercial
 
 `commercial` still decides everything else: which project repositories are acted on (`<project>` vs `<project>-commercial`), whether release notes are sanitized, the OSS tag fallback, and whether a missing `.x` branch falls back to `main`.
 
-This also applies to the version bump in step 6c. [update-project-versions](../actions/update-project-versions/README.md) picks its config source from its own `commercial` input, and that input does nothing else in the action — so the workflow passes a hardcoded `true`. Passing the run's actual flavour would send an OSS run to `spring-cloud-release`, where the file no longer is.
+This also applies to the version bump in step 5c. [update-project-versions](../actions/update-project-versions/README.md) picks its config source from its own `commercial` input, and that input does nothing else in the action — so the workflow passes a hardcoded `true`. Passing the run's actual flavour would send an OSS run to `spring-cloud-release`, where the file no longer is.
 
 `spring-cloud/spring-cloud-release` may still contain older copies of the same filenames, and they can disagree. When this changed, `2025_1_3.properties` existed in both, with four projects differing:
 
@@ -131,14 +144,16 @@ So the two conventions coexist without overlapping:
 
 | File | Written by | Purpose |
 |---|---|---|
-| `<next>-snapshot.properties` | this workflow, step 4 | next patch versions, `-SNAPSHOT` |
+| `<next>-snapshot.properties` | this workflow, step 3 | next patch versions, `-SNAPSHOT` |
 | `<train>-internal-snapshot.properties` | maintained separately | `-INTERNAL-SNAPSHOT` stamps for a new OSS release branch |
 
 Note this differs from [ci-status-report](README-ci-status-report.md) and [rollout-deploy-docs](README-rollout-deploy-docs.md), which pair bare project names with a separate `repo_type` input. Here the suffix carries the type, so there is no `repo_type`.
 
 ## Hotfix releases
 
-A **4-segment `release_version`** (e.g. `2025.1.2.1`) is treated as a commercial hotfix and **stops after step 3** — verify tags, close the milestone, create the release. Steps 4 onward are skipped: there is no next snapshot train for a hotfix, no new milestone, no version bump, no Dependabot pass, and **no merge-back, because a hotfix has no branch to merge back into** (the `release/<version>` branch is itself the hotfix line).
+A **4-segment `release_version`** (e.g. `2025.1.2.1`) is treated as a commercial hotfix and **runs only steps 1, 2 and 6** — verify tags, close the milestone, create the release. Steps 3, 4 and 5 are skipped: there is no next snapshot train for a hotfix, no new milestone, no version bump, no Dependabot pass, and **no merge-back, because a hotfix has no branch to merge back into** (the `release/<version>` branch is itself the hotfix line).
+
+Because the merge back is skipped for a hotfix, step 6 cannot simply `needs:` it — a skipped dependency would skip the release step too, and closing the milestone and publishing the release is the whole of a hotfix run. It is gated on `!cancelled()` instead. A hotfix is always commercial, so its tag is already in the repo being published to and needs no push.
 
 Commercial trains come in both shapes — `2024_0_8.properties` is a 3-part commercial release whose projects carry 3-part versions and which runs the full sequence, while `2025_1_2_1.properties` is the 4-part hotfix. So the mode is decided by the version's shape, not by the `commercial` input.
 
@@ -275,7 +290,7 @@ Notes on this:
 - `update-project-versions` is called with `release-train-version` rather than an explicit versions map, because only that path applies `project-version-substitutions` (which maps `spring-cloud-dependencies-parent` → `spring-cloud-build`, `verifierVersion` → `spring-cloud-contract`, and so on). That path resolves over `raw.githubusercontent.com`, which is CDN-cached, so after committing the snapshot file the workflow waits for the raw URL to serve it before any project is updated. If the CDN never catches up, version updates are skipped rather than applied from a stale file, and the run can simply be repeated.
 - Tag existence is checked with `git/matching-refs` and an exact comparison, not a plain `git/refs/tags/<tag>` lookup, which would also prefix-match `v5.0.20` when asked for `v5.0.2`.
 - `max-parallel: 8` keeps the fan-out from saturating the runner pool; `fail-fast: false` so one bad project does not abandon the rest.
-- Step 5 (new milestones) and step 6 (merge back and bump) run in parallel — neither depends on the other.
+- Step 4 (new milestones) and step 5 (merge back, bump and tag) run in parallel — neither depends on the other. Step 6 waits on step 5, because that is where the tag arrives.
 
 ## Related workflows
 
