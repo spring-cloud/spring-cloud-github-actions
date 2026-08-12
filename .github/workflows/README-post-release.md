@@ -8,7 +8,7 @@ Previously all of this was done by hand, repo by repo, for up to 17 projects.
 
 It:
 
-1. **Reads the properties file** for `release_version` from the `jenkins-releaser-config` branch of `spring-cloud-release` (or `spring-cloud-release-commercial`), validates the inputs, and builds a matrix of `{project, repo, version, tag}`
+1. **Reads the properties file** for `release_version` from the `jenkins-releaser-config` branch of `spring-cloud-release-commercial` — for OSS trains too, see [Where the releaser config lives](#where-the-releaser-config-lives) — validates the inputs, and builds a matrix of `{project, repo, version, tag}`
 2. **Verifies a `v<version>` tag exists** for every project — a hard gate, in a single job so an incomplete release produces one consolidated failure naming every missing tag
 3. **Closes the release milestone** and **publishes the GitHub release** for each tag
 4. **Writes the next `<train>-snapshot.properties` file** to `jenkins-releaser-config`, with every version's last segment bumped and `-SNAPSHOT` appended — creating it, or **overwriting an existing one whose versions do not match**
@@ -61,7 +61,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 | Secret | Description | Required |
 |--------|-------------|----------|
-| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus read access to `spring-cloud-release-commercial` for commercial runs. | Yes, unless `token` is passed |
+| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there. | Yes, unless `token` is passed |
 | `SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK` | Incoming webhook URL for the Google Chat space to notify when the run finishes. If unset, the step logs that it is skipping and the run still succeeds. Never used on a dry run. | No |
 
 Cross-repo writes rely entirely on this token — the workflow's own `permissions:` block is `contents: read`.
@@ -90,6 +90,25 @@ projects: spring-cloud-config-commercial,spring-cloud-gateway-commercial
 
 **The filter does not apply to step 4.** The snapshot properties file is train-wide and stays complete: `update-project-versions` needs the *whole* versions map to update each project's dependency versions, so a file containing only the filtered projects would produce wrong POMs. Step 4 always writes every entry; only the repo-facing steps are filtered.
 
+## Where the releaser config lives
+
+**Always `spring-cloud/spring-cloud-release-commercial`, on the `jenkins-releaser-config` branch — including for OSS trains.** That repository holds the releaser config for every train, so the location is deliberately *not* derived from the `commercial` input.
+
+`commercial` still decides everything else: which project repositories are acted on (`<project>` vs `<project>-commercial`), whether release notes are sanitized, the OSS tag fallback, and whether a missing `.x` branch falls back to `main`.
+
+This also applies to the version bump in step 6c. [update-project-versions](../actions/update-project-versions/README.md) picks its config source from its own `commercial` input, and that input does nothing else in the action — so the workflow passes a hardcoded `true`. Passing the run's actual flavour would send an OSS run to `spring-cloud-release`, where the file no longer is.
+
+`spring-cloud/spring-cloud-release` may still contain older copies of the same filenames, and they can disagree. When this changed, `2025_1_3.properties` existed in both, with four projects differing:
+
+| Project | `spring-cloud-release` | `spring-cloud-release-commercial` |
+|---|---|---|
+| `spring-cloud-netflix` | 5.0.3 | 5.0.2 |
+| `spring-cloud-task` | 5.0.3 | 5.0.2 |
+| `spring-cloud-vault` | 5.0.3 | 5.0.2 |
+| `spring-cloud-zookeeper` | 5.0.3 | 5.0.2 |
+
+Only the commercial repository's values are correct — `v5.0.2` is tagged in each of those four OSS repos and `v5.0.3` does not exist, so a run against the old location would have failed the tag gate on all four.
+
 ## The next snapshot properties file
 
 The correct contents are **always computed from the release properties file**, and the target is written whether or not it already exists. An existing snapshot file may have been seeded by hand, or by an earlier run against a different release, so trusting it would leave every downstream project bumped to the wrong versions.
@@ -103,6 +122,17 @@ The correct contents are **always computed from the release properties file**, a
 An update sends the existing blob `sha` with the `PUT`. That is what makes the Contents API replace rather than create, and it also makes the write fail rather than clobber if someone else changed the file between the read and the write.
 
 Only the file for *this* run's next version is touched. Other `-snapshot.properties` files on the branch — older trains, other lines — are left alone.
+
+### Not to be confused with `-internal-snapshot.properties`
+
+The same branch also holds files like `2025_1_3-internal-snapshot.properties`, whose versions carry an `-INTERNAL-SNAPSHOT` suffix. **This workflow neither reads nor writes those.** They belong to [create-oss-release-branch](create-oss-release-branch.yml), which uses them to rewrite a new release branch's versions from `-SNAPSHOT` to `-INTERNAL-SNAPSHOT`, and looks them up by the train version being started (`2026.1.0` → `2026_1_0-internal-snapshot.properties`) rather than by a patch-bumped next version.
+
+So the two conventions coexist without overlapping:
+
+| File | Written by | Purpose |
+|---|---|---|
+| `<next>-snapshot.properties` | this workflow, step 4 | next patch versions, `-SNAPSHOT` |
+| `<train>-internal-snapshot.properties` | maintained separately | `-INTERNAL-SNAPSHOT` stamps for a new OSS release branch |
 
 Note this differs from [ci-status-report](README-ci-status-report.md) and [rollout-deploy-docs](README-rollout-deploy-docs.md), which pair bare project names with a separate `repo_type` input. Here the suffix carries the type, so there is no `repo_type`.
 

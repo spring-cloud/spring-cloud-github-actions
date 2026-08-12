@@ -137,9 +137,11 @@ jobs:
             }
           }
 
-          const releaseRepo = commercial
-            ? 'spring-cloud/spring-cloud-release-commercial'
-            : 'spring-cloud/spring-cloud-release';
+          // Always spring-cloud-release-commercial, for OSS trains too: that repository holds
+          // the releaser config for every train now, so this is deliberately NOT derived from
+          // `commercial`. That input still decides everything else - which project repos are
+          // acted on, whether release notes are sanitized, and the OSS tag fallback.
+          const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
           const propsFile = releaseVersion.replace(/\./g, '_') + '.properties';
 
           // ── read the properties file ────────────────────────────────────────────────
@@ -1076,7 +1078,12 @@ jobs:
         uses: ./.github/actions/update-project-versions
         with:
           release-train-version: ${{ needs.setup.outputs.next-version }}-SNAPSHOT
-          commercial: ${{ needs.setup.outputs.commercial }}
+          # Hardcoded true, not the run's commercial flavour. This input does one thing in the
+          # action - pick which repo the releaser config is fetched from
+          # (update-project-versions/src/index.js:193-194) - and the config now always lives in
+          # spring-cloud-release-commercial, including for OSS trains. Passing the derived value
+          # would send an OSS run to spring-cloud-release, where the file no longer is.
+          commercial: 'true'
           token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           directory: project
 
