@@ -5,7 +5,7 @@ name: Retire Branch
 #
 # Requires a token with:
 #   contents:write       — to update dependabot.yml on the default branch
-#   administration:write — to set branch protection / lock the branch
+#   administration:write — to create and update the ruleset that locks the branch
 
 on:
   workflow_dispatch:
@@ -137,7 +137,11 @@ jobs:
       # -----------------------------------------------------------------------
       # 4. Lock the branch via a repository ruleset so no further commits can
       #    be pushed to it.  All retired branches are accumulated under a single
-      #    ruleset named "Retired Branch Lock" so they are easy to audit.
+      #    ruleset named "Locked Branches" so they are easy to audit.
+      #
+      #    lock-unlock-branches.yml freezes branches during a release through a ruleset
+      #    of its own and never touches this one, so lifting a freeze cannot
+      #    un-retire anything listed here.
       # -----------------------------------------------------------------------
       - name: Lock branch
         shell: bash

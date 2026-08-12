@@ -14,10 +14,10 @@ Retires a branch that is no longer actively maintained by:
    `content.sources.branches` in `antora-playbook.yml` on the repo's
    `docs-build` branch so it is no longer included in documentation builds.
    No-op when the docs-build branch, playbook, or branch entry is absent.
-4. **Locking the branch** — sets `lock_branch: true` on the branch via the
-   GitHub Branch Protection API, preventing any further commits from being
-   pushed. Existing protection rules (required checks, required reviews, etc.)
-   are preserved; only `lock_branch` is added/updated.
+4. **Locking the branch** — adds `refs/heads/<branch>` to the repository
+   ruleset named `Locked Branches`, preventing any further commits from being
+   pushed. The ruleset is created if the repository does not have one yet, and
+   a branch already listed in it is left alone.
 
 ## Required token permissions
 
@@ -26,7 +26,7 @@ The token must have the following permissions on the **target** repository:
 | Permission | Reason |
 |---|---|
 | `contents: write` | Commit the updated `dependabot.yml` to the default branch and update `projects.json` |
-| `administration: write` | Set branch protection / lock the branch |
+| `administration: write` | Create and update the repository ruleset that locks the branch |
 
 ## Inputs
 
@@ -110,15 +110,30 @@ the branch from `content.sources.branches` in `antora-playbook.yml`.
 
 ### Lock branch
 
-Fetches the existing branch protection settings via the GitHub API, then
-re-applies them with `lock_branch: true` set. If no protection rules exist,
-a minimal rule (all other constraints null/false) with `lock_branch: true` is
-created.
+Every retired branch in a repository accumulates in a single repository ruleset
+named `Locked Branches`, so what is retired is auditable in one place.
 
-Once locked, the branch is visible in the repository with a lock icon and
-GitHub will reject any push attempts to it.
+The step lists the repository's rulesets and looks for that name, filtering on
+`source_type == "Repository"` — organization-level rulesets are returned by the
+same endpoint but cannot be written through the repository API. If it is absent,
+the ruleset is created targeting this branch, with rules blocking `creation`,
+`update` (`update_allows_fetch_and_merge: false`), `deletion` and
+`non_fast_forward`. If it exists, the branch's ref is appended to
+`conditions.ref_name.include` and the ruleset is written back — the update
+endpoint is a `PUT` and requires the complete ruleset body, so the existing one
+is fetched and re-sent with the new include list. A branch already in the list
+is a no-op.
+
+Once locked, GitHub will reject any push attempts to the branch.
+
+[lock-branches.yml](README-lock-branches.md) also locks branches, but through a
+separate `Release Freeze` ruleset that it deletes again — a temporary freeze
+during a release, as opposed to the permanent retirement here. The two never
+touch each other's ruleset, and rulesets are additive, so a branch that is both
+retired and frozen stays locked when the freeze is lifted.
 
 ## Related workflows
 
 - [`create-commercial-branch.yml`](README-create-commercial-branch.md) — creates a new commercial branch
 - [`create-hotfix-release-branch.yml`](README-create-hotfix-branch.md) — creates a hotfix branch from an OSS tag
+- [`lock-unlock-branches.yml`](README-lock-branches.md) — temporarily freezes branches during a release, via a separate ruleset

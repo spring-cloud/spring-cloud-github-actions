@@ -1,0 +1,573 @@
+name: Lock/Unlock Branches
+
+# The verb has to be in the run name: an unlock run listed as "Lock Branches" is unreadable in
+# the Actions list, and telling the two apart matters more here than for most workflows.
+#
+#   Lock Branches (oss) - Dry Run
+#   Unlock Branches [spring-cloud-config] (oss)
+#   Lock Branches (both)
+run-name: "${{ inputs.unlock == true && 'Unlock' || 'Lock' }} Branches${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }} (${{ inputs.repo_type }})${{ inputs.dry_run == true && ' - Dry Run' || '' }}"
+
+# Freezes - or unfreezes - the branches of some or all Spring Cloud projects, so nothing can be
+# pushed to them while a release is being staged:
+#
+#   1. setup   — read config/projects.json and build one matrix entry per repository
+#   2. apply   — per repository: create, update or delete its Release Freeze ruleset
+#   3. summary — one report covering every repository
+#
+# The freeze is a repository ruleset named "Release Freeze", holding exactly the branches a run
+# froze. Unlocking deletes it outright.
+#
+# retire-branch.yml also locks branches, with a ruleset of its own named "Locked Branches" that
+# accumulates retired branches permanently. This workflow deliberately never touches that one:
+# rulesets are additive - GitHub aggregates every ruleset matching a ref and applies the most
+# restrictive - so the two coexist, and an unfreeze cannot possibly un-retire a retired branch.
+# Keeping them apart is also what makes this workflow's writes whole-object rather than a
+# read-modify-write of a list somebody else is appending to.
+#
+# A freeze blocks everyone, GH_ACTIONS_REPO_TOKEN included - no bypass_actors is set. So the
+# automation cannot push to a frozen branch either: post-release.yml's merge back, version bump
+# and tag push all need the unlock to have run first.
+#
+# See README-lock-branches.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names, without any -commercial suffix (e.g. spring-cloud-config,spring-cloud-build). When empty, every project in projects.json is processed.'
+        required: false
+        type: string
+        default: ''
+      unlock:
+        description: 'Unlock instead of lock - deletes the Release Freeze ruleset from each repository.'
+        required: false
+        type: boolean
+        default: false
+      repo_type:
+        description: 'Lock commercial, oss, or both?'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      dry_run:
+        description: 'Dry run, if checked nothing is created, updated or deleted, but you can see what would change'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with administration:write on all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  # Callable so the unlock can be wired into a release workflow later - a frozen branch blocks
+  # the automation as well, so something has to unfreeze before post-release runs. The inputs
+  # are repeated rather than shared because workflow_call has no way to reuse a dispatch input
+  # block, and its type set has no `choice`, so repo_type is a plain string here and is
+  # validated in setup instead. Same shape as retire-branch.yml.
+  workflow_call:
+    inputs:
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names, without any -commercial suffix. When empty, every project in projects.json is processed.'
+        required: false
+        type: string
+        default: ''
+      unlock:
+        description: 'Unlock instead of lock - deletes the Release Freeze ruleset from each repository.'
+        required: false
+        type: boolean
+        default: false
+      repo_type:
+        description: 'One of: both, oss, commercial.'
+        required: false
+        type: string
+        default: 'both'
+      dry_run:
+        description: 'Dry run, if true nothing is created, updated or deleted.'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      token:
+        description: 'GitHub token with administration:write on all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+
+permissions:
+  contents: read
+
+# Two runs in opposite directions against the same repository would otherwise resolve by
+# whichever write landed last. Serializing whole runs is the only fix that works across runs -
+# max-parallel only bounds one. Queue rather than cancel: stopping a run mid-write leaves some
+# repositories frozen and others not, which is worse than waiting.
+concurrency:
+  group: lock-branches
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+      branch-count: ${{ steps.build-matrix.outputs.branch-count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type }}
+          UNLOCK: ${{ inputs.unlock }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const filter = filterRaw
+            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
+            : new Set();
+
+          const repoType = (process.env.REPO_TYPE || 'both').trim();
+          const unlock = (process.env.UNLOCK || 'false') === 'true';
+
+          const fail = (...msg) => { for (const m of msg) console.error(m); process.exit(1); };
+
+          // workflow_call cannot declare a choice input, so a caller can pass anything at all.
+          // Checked here rather than left to produce an empty matrix, which would look like a
+          // successful run that froze nothing.
+          if (!['both', 'oss', 'commercial'].includes(repoType)) {
+            fail(`ERROR: repo_type must be one of both, oss, commercial; got '${repoType}'.`);
+          }
+          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
+
+          // A typo in projects would otherwise process nothing and report success, and "no rows"
+          // reads as "nothing needed doing" - the last thing you want to believe about a freeze.
+          if (filter.size) {
+            const known = Object.keys(projects).filter(k => k !== 'defaults');
+            const unknown = [...filter].filter(p => !known.includes(p));
+            if (unknown.length) {
+              fail(`ERROR: not found in projects.json: ${unknown.join(', ')}`,
+                `Known projects: ${known.sort().join(', ')}`,
+                'Names are bare - repo_type decides whether the oss or commercial repo is used.');
+            }
+          }
+
+          // One entry per repository, not per branch. All of a repository's frozen branches live
+          // in one ruleset, so a per-branch fan-out would have several legs writing the same
+          // object at once. The branch list rides along as a comma-separated string because a
+          // matrix cannot carry an array without toJson pretty-printing it and breaking the
+          // consuming YAML - the same reason dependabot-report.yml joins its branches.
+          const entries = [];
+          let branchCount = 0;
+          for (const [projectKey, config] of Object.entries(projects)) {
+            if (projectKey === 'defaults') continue;
+            if (filter.size > 0 && !filter.has(projectKey)) continue;
+            for (const typeKey of typeKeys) {
+              if (!config[typeKey]) continue;
+
+              // Everything under branches, not just scheduled: scheduled is the maintained set
+              // and default is the primary branch, and a freeze that let commits through on the
+              // default branch would be worse than no freeze at all. default is a subset of
+              // scheduled throughout projects.json today, but nothing enforces that.
+              const branches = config[typeKey].branches || {};
+              const all = [...new Set([...(branches.scheduled || []), ...(branches.default || [])])];
+              if (!all.length) continue;
+
+              entries.push({
+                project: projectKey,
+                repo: typeKey === 'commercial'
+                  ? `spring-cloud/${projectKey}-commercial`
+                  : `spring-cloud/${projectKey}`,
+                type: typeKey,
+                branches: all.join(','),
+              });
+              branchCount += all.length;
+            }
+          }
+
+          entries.sort((a, b) => a.repo.localeCompare(b.repo));
+
+          console.log(`Repositories to ${unlock ? 'unlock' : 'lock'}: ${entries.length} ` +
+            `(${branchCount} branches)`);
+          for (const e of entries) {
+            console.log(`  ${e.repo} (${e.type}) [${e.branches.split(',').join(', ')}]`);
+          }
+
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `matrix=${JSON.stringify({ include: entries })}\n`);
+          fs.appendFileSync(out, `count=${entries.length}\n`);
+          fs.appendFileSync(out, `branch-count=${branchCount}\n`);
+          JSEOF
+
+  apply:
+    name: "${{ inputs.unlock == true && 'Unlock' || 'Lock' }} — ${{ matrix.repo }}"
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      # No checkout: this job only talks to the API.
+      - name: Apply the Release Freeze ruleset
+        id: apply
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          TYPE: ${{ matrix.type }}
+          BRANCHES: ${{ matrix.branches }}
+          UNLOCK: ${{ inputs.unlock }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const project = process.env.PROJECT;
+          const repo = process.env.REPO;
+          const type = process.env.TYPE;
+          const branches = process.env.BRANCHES.split(',').filter(Boolean);
+          const unlock = (process.env.UNLOCK || 'false') === 'true';
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+
+          const RULESET_NAME = 'Release Freeze';
+          const refOf = b => `refs/heads/${b}`;
+          const wanted = branches.map(refOf);
+
+          // Every call goes through this rather than being allowed to throw: a leg that dies
+          // writes no result, so the repository silently vanishes from the summary - which, for
+          // a freeze, reads as success. Failures are recorded and reported instead.
+          const gh = (args, body) => {
+            try {
+              return execFileSync('gh', args, {
+                encoding: 'utf8',
+                input: body === undefined ? undefined : body,
+                stdio: [body === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+              });
+            } catch (err) {
+              console.log(`  gh failed: ${(err.stderr || err.message || '').split('\n')[0]}`);
+              return null;
+            }
+          };
+
+          // Writes go in on stdin. The Content-Type header is not optional: without it gh sends
+          // the body form-encoded and the rulesets API rejects it.
+          const write = (method, path, body) => gh(
+            ['api', path, '--method', method, '--header', 'Content-Type: application/json',
+             '--input', '-'],
+            JSON.stringify(body));
+
+          const finish = (status, rulesetAction, note) => {
+            const result = {
+              project, repo, type,
+              action: unlock ? 'unlock' : 'lock',
+              branches: branches.join(','),
+              count: branches.length,
+              status,
+              rulesetAction,
+              note: note || '',
+            };
+            fs.writeFileSync(`result-lock-${repo.replace(/\//g, '-')}.json`,
+              JSON.stringify(result));
+            console.log('');
+            console.log(`${repo}: ${status} (${rulesetAction})`);
+            process.exit(0);
+          };
+
+          console.log(`${unlock ? 'Unlocking' : 'Locking'} ${repo} (${type})`);
+          for (const b of branches) console.log(`  ${b}`);
+          console.log('');
+
+          // --paginate because this endpoint pages at 30. The source_type filter is load-bearing:
+          // org-level rulesets are listed here too and cannot be written through the repo API,
+          // so matching one would produce a confusing 404 on the write.
+          const listed = gh(['api', `repos/${repo}/rulesets`, '--paginate']);
+          if (listed === null) {
+            finish('repo-error', 'none',
+              'could not list rulesets - check the repository exists and the token has ' +
+              'administration:write on it');
+          }
+
+          let rulesets;
+          try {
+            rulesets = JSON.parse(listed);
+          } catch (err) {
+            finish('repo-error', 'none', 'could not parse the rulesets response');
+          }
+
+          const existing = rulesets.find(
+            r => r.name === RULESET_NAME && r.source_type === 'Repository');
+
+          // ── unlock ──────────────────────────────────────────────────────────────────
+          // The whole ruleset goes, which unfreezes every branch in it rather than only the
+          // ones this run named. That matches the filter being per project rather than per
+          // branch, and the ruleset only ever holds what a previous lock run put there.
+          if (unlock) {
+            if (!existing) {
+              console.log(`No '${RULESET_NAME}' ruleset in ${repo} - nothing to unlock.`);
+              finish('already-unlocked', 'none');
+            }
+
+            console.log(`Found '${RULESET_NAME}' (#${existing.id}) covering:`);
+            for (const ref of existing.conditions?.ref_name?.include || []) {
+              console.log(`  ${ref}`);
+            }
+
+            if (dryRun) {
+              console.log(`[dry run] would DELETE repos/${repo}/rulesets/${existing.id}.`);
+              finish('would-unlock', 'would-delete');
+            }
+
+            if (gh(['api', `repos/${repo}/rulesets/${existing.id}`, '--method', 'DELETE']) === null) {
+              finish('error', 'none', 'the ruleset could not be deleted');
+            }
+            console.log(`Deleted '${RULESET_NAME}' (#${existing.id}) from ${repo}.`);
+            finish('unlocked', 'deleted');
+          }
+
+          // ── lock ────────────────────────────────────────────────────────────────────
+          // The four rules retire-branch.yml uses, which between them stop a push, a force
+          // push, a delete and a re-create.
+          const body = {
+            name: RULESET_NAME,
+            target: 'branch',
+            enforcement: 'active',
+            conditions: { ref_name: { include: wanted, exclude: [] } },
+            rules: [
+              { type: 'creation' },
+              { type: 'update', parameters: { update_allows_fetch_and_merge: false } },
+              { type: 'deletion' },
+              { type: 'non_fast_forward' },
+            ],
+          };
+
+          if (!existing) {
+            if (dryRun) {
+              console.log(`[dry run] would POST repos/${repo}/rulesets:`);
+              console.log(JSON.stringify(body, null, 2));
+              finish('would-lock', 'would-create');
+            }
+            const created = write('POST', `repos/${repo}/rulesets`, body);
+            if (created === null) finish('error', 'none', 'the ruleset could not be created');
+            console.log(`Created '${RULESET_NAME}' in ${repo} covering ${wanted.length} branch(es).`);
+            finish('locked', 'created');
+          }
+
+          // An existing freeze is compared rather than rewritten, so a re-run reports honestly
+          // instead of looking like it did work. Order is not significant to the API, so it is
+          // not significant here either.
+          const current = existing.conditions?.ref_name?.include || [];
+          const same = current.length === wanted.length &&
+            [...current].sort().join('\n') === [...wanted].sort().join('\n');
+
+          if (same && existing.enforcement === 'active') {
+            console.log(`'${RULESET_NAME}' (#${existing.id}) already covers exactly these ` +
+              'branches - nothing to do.');
+            finish('already-locked', 'none');
+          }
+
+          // Reached when projects.json gained or lost a branch between two lock runs, or when
+          // someone disabled the ruleset by hand. The ruleset is restated rather than merged:
+          // it is this workflow's own object, and it should say exactly what the last lock run
+          // froze.
+          const added = wanted.filter(r => !current.includes(r));
+          const removed = current.filter(r => !wanted.includes(r));
+          if (added.length) console.log(`Adding:   ${added.join(', ')}`);
+          if (removed.length) console.log(`Removing: ${removed.join(', ')}`);
+          if (existing.enforcement !== 'active') {
+            console.log(`Enforcement was '${existing.enforcement}' - setting it back to active.`);
+          }
+
+          if (dryRun) {
+            console.log(`[dry run] would PUT repos/${repo}/rulesets/${existing.id}:`);
+            console.log(JSON.stringify(body, null, 2));
+            finish('would-lock', 'would-update');
+          }
+
+          const updated = write('PUT', `repos/${repo}/rulesets/${existing.id}`, body);
+          if (updated === null) finish('error', 'none', 'the ruleset could not be updated');
+          console.log(`Updated '${RULESET_NAME}' (#${existing.id}) in ${repo}.`);
+          finish('locked', 'updated');
+          JSEOF
+
+      - name: Record a result for a leg that died
+        if: always()
+        id: record
+        env:
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          TYPE: ${{ matrix.type }}
+          BRANCHES: ${{ matrix.branches }}
+          UNLOCK: ${{ inputs.unlock }}
+        run: |
+          set -euo pipefail
+
+          SAFE="${REPO//\//-}"
+          echo "safe-name=${SAFE}" >> "$GITHUB_OUTPUT"
+
+          # The step above writes its own result and always exits 0, so this only fires when it
+          # died outright - a runner failure, or a bug in the script. Without it that repository
+          # would have no artifact and would be missing from the summary entirely.
+          if [[ -f "result-lock-${SAFE}.json" ]]; then
+            exit 0
+          fi
+
+          echo "The apply step produced no result - recording it as failed."
+          jq -n \
+            --arg project "$PROJECT" \
+            --arg repo "$REPO" \
+            --arg type "$TYPE" \
+            --arg action "$([ "$UNLOCK" == "true" ] && echo unlock || echo lock)" \
+            --arg branches "$BRANCHES" \
+            --argjson count "$(awk -F, '{print NF}' <<< "$BRANCHES")" \
+            '{project: $project, repo: $repo, type: $type, action: $action,
+              branches: $branches, count: $count, status: "failed",
+              rulesetAction: "none", note: "the job step did not complete"}' \
+            > "result-lock-${SAFE}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-lock-${{ steps.record.outputs.safe-name || matrix.project }}
+          path: result-lock-*.json
+          if-no-files-found: ignore
+
+  summary:
+    name: Summary
+    needs: [setup, apply]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        env:
+          UNLOCK: ${{ inputs.unlock }}
+          REPO_TYPE: ${{ inputs.repo_type }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REPO_COUNT: ${{ needs.setup.outputs.count }}
+          BRANCH_COUNT: ${{ needs.setup.outputs.branch-count }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const unlock = (process.env.UNLOCK || 'false') === 'true';
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+          const repoType = (process.env.REPO_TYPE || 'both').trim();
+          const filter = (process.env.PROJECTS_FILTER || '').trim();
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) => (a.repo || '').localeCompare(b.repo || ''));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const verb = unlock ? 'Unlock' : 'Lock';
+          const L = [];
+          L.push(`## ${verb} branches summary` +
+            (dryRun ? ' (dry run — nothing was changed)' : ''));
+          L.push('');
+          L.push(`**${unlock ? 'Unlocking' : 'Locking'}** · ${repoType}` +
+            (filter ? ` · filtered to \`${filter}\`` : ''));
+          L.push('');
+
+          // A repository that was already in the requested state has to read differently from
+          // one this run changed, or a no-op run looks identical to one that froze the org.
+          const ICON = {
+            locked: '✅', unlocked: '✅',
+            'would-lock': '🔎', 'would-unlock': '🔎',
+            'already-locked': '➖', 'already-unlocked': '➖',
+            'repo-error': '❌', error: '❌', failed: '❌',
+          };
+          const icon = s => ICON[s] || '❔';
+
+          if (results.length) {
+            L.push('| | Repository | Type | Branches | Ruleset |');
+            L.push('|---|---|---|---|---|');
+            for (const r of results) {
+              const list = (r.branches || '').split(',').filter(Boolean)
+                .map(b => `\`${b}\``).join(', ');
+              L.push(`| ${icon(r.status)} | \`${r.repo}\` | ${r.type} | ${list || '—'} | ` +
+                `${r.rulesetAction || 'none'} |`);
+            }
+            L.push('');
+
+            const n = s => results.filter(r => r.status === s).length;
+            const branchesIn = s => results.filter(r => r.status === s)
+              .reduce((sum, r) => sum + (Number(r.count) || 0), 0);
+            const changed = unlock ? 'unlocked' : 'locked';
+            const would = unlock ? 'would-unlock' : 'would-lock';
+            const already = unlock ? 'already-unlocked' : 'already-locked';
+            const failed = results.filter(r =>
+              r.status === 'repo-error' || r.status === 'error' || r.status === 'failed');
+
+            L.push(`**${results.length}** repositories, ` +
+              `**${results.reduce((s, r) => s + (Number(r.count) || 0), 0)}** branches — ` +
+              (dryRun
+                ? `**${branchesIn(would)}** would be ${changed}`
+                : `**${branchesIn(changed)}** ${changed}`) +
+              `, **${branchesIn(already)}** already ${changed}` +
+              `, **${failed.length}** ${failed.length === 1 ? 'repository' : 'repositories'} failed.`);
+            L.push('');
+
+            if (failed.length) {
+              L.push(`### ❌ Not ${changed}`);
+              L.push('');
+              L.push('Fix these and re-run with `projects` set to just this list — repositories');
+              L.push(`that were already ${changed} report no change rather than being rewritten.`);
+              L.push('');
+              for (const r of failed) {
+                L.push(`- \`${r.repo}\` — ${r.note || 'see that job\'s log'}`);
+              }
+              L.push('');
+            }
+
+            if (!unlock && !dryRun && n('locked') + n('already-locked') === results.length) {
+              L.push('These branches now reject every push, **including the release ' +
+                'automation\'s** — no `bypass_actors` is set. Run this workflow again with ' +
+                '`unlock` checked before `post-release` needs to merge, bump and tag.');
+              L.push('');
+            }
+          } else {
+            L.push('No repositories were processed.');
+            L.push('');
+          }
+
+          if (dryRun) {
+            L.push('This was a **dry run**. Re-run with `dry_run` unchecked to apply these changes.');
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
+          console.log(L.join('\n'));
+
+          const failed = results.filter(r =>
+            r.status === 'repo-error' || r.status === 'error' || r.status === 'failed');
+          if (failed.length) {
+            console.error(`\n${failed.length} ` +
+              `${failed.length === 1 ? 'repository needs' : 'repositories need'} attention.`);
+            process.exit(1);
+          }
+          JSEOF
