@@ -21,6 +21,8 @@ run-name: "Post Release - ${{ inputs.release_version }}${{ inputs.projects != ''
 #   5. merge-back-and-update   — merge release/<version> back into .x, bump to snapshots, push,
 #                                and push the release tag into this repository
 #   6. milestones-and-releases — close the release milestone, publish the GitHub release
+#                                (skip_close_milestones leaves the milestones open and still
+#                                 publishes the releases)
 #   7. summary                 — one report covering everything above
 #
 # release/<version> and the v<version> tag only ever exist in the commercial repository - an OSS
@@ -57,6 +59,11 @@ on:
         required: false
         type: string
         default: ''
+      skip_close_milestones:
+        description: 'Skip closing the release milestones. Everything else - including publishing the releases - still runs.'
+        required: false
+        type: boolean
+        default: false
       dry_run:
         description: 'Dry run, if checked nothing is created, committed or pushed, but you can see what would happen'
         required: false
@@ -1172,6 +1179,7 @@ jobs:
           RESOLVED_IN: ${{ matrix.resolvedIn }}
           COMMERCIAL: ${{ needs.setup.outputs.commercial }}
           ENTRIES: ${{ needs.setup.outputs.entries }}
+          SKIP_CLOSE_MILESTONES: ${{ inputs.skip_close_milestones }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           node - << 'JSEOF'
@@ -1184,6 +1192,7 @@ jobs:
           const tag = process.env.TAG;
           const resolvedIn = process.env.RESOLVED_IN;
           const commercial = process.env.COMMERCIAL === 'true';
+          const skipCloseMilestones = process.env.SKIP_CLOSE_MILESTONES === 'true';
           const dryRun = process.env.DRY_RUN === 'true';
           const entries = JSON.parse(process.env.ENTRIES);
 
@@ -1206,27 +1215,35 @@ jobs:
           // Milestone titles are bare version numbers, no v prefix - the same lookup the
           // create-milestone action does. Never fails the job: a version carried over from an
           // earlier train already has a closed milestone, and some projects have none at all.
-          let milestone = 'not-found';
-          try {
-            const list = JSON.parse(gh(['api', `repos/${repo}/milestones?state=all&per_page=100`]));
-            const found = list.find(m => m.title === version);
-            if (!found) {
-              console.log(`Milestone '${version}' not found in ${repo}.`);
-            } else if (found.state === 'closed') {
-              console.log(`Milestone '${version}' (#${found.number}) is already closed.`);
-              milestone = 'already-closed';
-            } else if (dryRun) {
-              console.log(`[dry run] would close milestone '${version}' (#${found.number}).`);
-              milestone = 'would-close';
-            } else {
-              gh(['api', `repos/${repo}/milestones/${found.number}`,
-                '--method', 'PATCH', '--field', 'state=closed']);
-              console.log(`Closed milestone '${version}' (#${found.number}).`);
-              milestone = 'closed';
+          // Skipping is a per-run choice rather than a per-project one, so it is decided before
+          // the lookup: with nothing to do either way, there is no reason to spend an API call
+          // reading a milestone that will not be touched.
+          let milestone = 'skipped-by-request';
+          if (skipCloseMilestones) {
+            console.log(`skip_close_milestones is set - leaving milestone '${version}' alone.`);
+          } else {
+            milestone = 'not-found';
+            try {
+              const list = JSON.parse(gh(['api', `repos/${repo}/milestones?state=all&per_page=100`]));
+              const found = list.find(m => m.title === version);
+              if (!found) {
+                console.log(`Milestone '${version}' not found in ${repo}.`);
+              } else if (found.state === 'closed') {
+                console.log(`Milestone '${version}' (#${found.number}) is already closed.`);
+                milestone = 'already-closed';
+              } else if (dryRun) {
+                console.log(`[dry run] would close milestone '${version}' (#${found.number}).`);
+                milestone = 'would-close';
+              } else {
+                gh(['api', `repos/${repo}/milestones/${found.number}`,
+                  '--method', 'PATCH', '--field', 'state=closed']);
+                console.log(`Closed milestone '${version}' (#${found.number}).`);
+                milestone = 'closed';
+              }
+            } catch (err) {
+              console.log(`Could not read milestones for ${repo}: ${err.message}`);
+              milestone = 'error';
             }
-          } catch (err) {
-            console.log(`Could not read milestones for ${repo}: ${err.message}`);
-            milestone = 'error';
           }
 
           // ── b. create the release ───────────────────────────────────────────────────
@@ -1413,12 +1430,14 @@ jobs:
           HOTFIX: ${{ needs.setup.outputs.hotfix }}
           NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
           PROJECTS_FILTER: ${{ inputs.projects }}
+          SKIP_CLOSE_MILESTONES: ${{ inputs.skip_close_milestones }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
 
           const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+          const skipCloseMilestones = (process.env.SKIP_CLOSE_MILESTONES || 'false') === 'true';
           const hotfix = (process.env.HOTFIX || 'false') === 'true';
           const commercial = (process.env.COMMERCIAL || 'false') === 'true';
           const releaseVersion = process.env.RELEASE_VERSION || '';
@@ -1448,7 +1467,8 @@ jobs:
           L.push('');
           L.push(`Release **${releaseVersion}** · ${commercial ? 'commercial' : 'OSS'}` +
             (hotfix ? ' · **hotfix** (steps after the release are skipped)' : '') +
-            (filter ? ` · filtered to \`${filter}\`` : ''));
+            (filter ? ` · filtered to \`${filter}\`` : '') +
+            (skipCloseMilestones ? ' · **milestones left open** (`skip_close_milestones`)' : ''));
           L.push('');
 
           // Anything that already existed is deliberately a no-op, so "done" and "was already
@@ -1463,7 +1483,8 @@ jobs:
             'already-closed': '➖', 'already-exists': '➖', 'already-merged': '➖',
             'nothing-to-push': '➖', 'no-release-branch': '➖',
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
-            skipped: '⏭️', 'merge-conflict': '❌', 'branch-not-found': '❌',
+            skipped: '⏭️', 'skipped-by-request': '⏭️',
+            'merge-conflict': '❌', 'branch-not-found': '❌',
             'version-mismatch': '❌', error: '❌', failure: '❌',
             // tag push (5e) and the tag check that gates publishing
             'no-tag': '❌', 'not-reachable': '❌', 'fetch-failed': '❌',
@@ -1472,7 +1493,9 @@ jobs:
           const icon = s => ICON[s] || '❔';
 
           if (mr.length) {
-            L.push('### Milestones closed and releases published');
+            L.push(skipCloseMilestones
+              ? '### Releases published (milestones left open)'
+              : '### Milestones closed and releases published');
             L.push('');
             L.push('| Project | Version | Milestone | Release |');
             L.push('|---|---|---|---|');
@@ -1640,7 +1663,8 @@ jobs:
           const C = [];
           C.push(`${problems ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
             `(${commercial ? 'commercial' : 'OSS'}${hotfix ? ', hotfix' : ''})` +
-            (filter ? ` · only ${filter}` : ''));
+            (filter ? ` · only ${filter}` : '') +
+            (skipCloseMilestones ? ' · milestones left open' : ''));
           C.push('');
 
           const n = (rows, pred) => rows.filter(pred).length;
@@ -1651,7 +1675,7 @@ jobs:
           // count and the message cannot quietly under-report.
           const PHRASE = {
             closed: 'closed', 'already-closed': 'already closed', 'not-found': 'none found',
-            'would-close': 'would close (dry run)',
+            'would-close': 'would close (dry run)', 'skipped-by-request': 'left open on request',
             created: 'created', 'already-exists': 'already existed',
             'no-tag-oss-fallback': 'skipped (OSS tag)', 'would-create': 'would publish (dry run)',
             merged: 'merged', 'already-merged': 'already merged',
@@ -1680,7 +1704,9 @@ jobs:
             }
           };
 
-          tally('Milestones closed', mr, 'milestone');
+          // "Milestones closed: 12 left open on request" would contradict itself, so the label
+          // follows what the run was actually asked to do.
+          tally(skipCloseMilestones ? 'Milestones' : 'Milestones closed', mr, 'milestone');
           tally('Releases', mr, 'release', { created: 'published' });
           if (sc) C.push(`Next snapshot: ${sc.nextVersion} (${sc.nextFile} ${sc.status})`);
           tally('New milestones', nm, 'status');

@@ -13,7 +13,7 @@ It:
 3. **Writes the next `<train>-snapshot.properties` file** to `jenkins-releaser-config`, with every version's last segment bumped and `-SNAPSHOT` appended — creating it, or **overwriting an existing one whose versions do not match**
 4. **Opens a milestone** for each new snapshot version, via the [create-milestone](../actions/create-milestone/README.md) action
 5. **Merges `release/<version>` back into the `.x` branch** from the commercial repo, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, **pushes the release tag into the OSS repo**, and comments `@dependabot recreate` on superseded Dependabot PRs
-6. **Closes the release milestone** and **publishes the GitHub release** for each tag
+6. **Closes the release milestone** and **publishes the GitHub release** for each tag — `skip_close_milestones` leaves the milestones open and still publishes the releases
 7. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
 
 Step 5's version bump also exists on its own, as [update-versions](README-update-versions.md) — for when the projects have to move to a train's versions before, or independently of, a post-release run. The normal end-of-release path is still this workflow; running that one first is not required.
@@ -67,6 +67,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 | `release_version` | The release train version that just shipped, e.g. `2025.1.2`, or `2025.1.2.1` for a commercial hotfix. Must be a plain numeric version with 3 or 4 segments. | Yes | string |
 | `commercial` | Was this a commercial release? **Ignored when `projects` is supplied.** | No | boolean (default: `false`) |
 | `projects` | Comma-separated project names, `-commercial` suffix included where applicable. Empty processes every project in the properties file. See [The projects filter](#the-projects-filter). | No | string |
+| `skip_close_milestones` | Leave the release milestones open. Nothing else changes — the releases are still published, the next round of milestones is still opened, and the merge back still runs. Use it when issues are still being moved between milestones, then re-run with it unchecked (closing a milestone is idempotent, and everything else is a no-op the second time). | No | boolean (default: `false`) |
 | `dry_run` | When checked, nothing is created, committed or pushed — but the summary shows what would happen. | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
@@ -245,7 +246,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ✅ done — closed, created, merged, pushed
 - ➖ already done — already closed, already exists, already merged, nothing to push
 - 🔎 dry run — would close, would create, would push
-- ⏭️ deliberately skipped — e.g. satisfied by the OSS tag
+- ⏭️ deliberately skipped — e.g. satisfied by the OSS tag, or a milestone left open by `skip_close_milestones`
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
