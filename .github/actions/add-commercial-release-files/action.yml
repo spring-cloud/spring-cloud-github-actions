@@ -146,6 +146,10 @@ runs:
             uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
             with:
               branches: EXPR_inputs.branches_EXPR
+              # Commercial Artifactory only serves runners in the spring-enterprise-builds
+              # group and refuses anything else with a 403, before authentication is even
+              # attempted. This branch resolves its dependencies from there, so a
+              # GitHub-hosted runner will fail no matter how the credentials are set up.
               runs_on: ubuntu22-2-8
               # The branches this workflow builds carry -INTERNAL-SNAPSHOT versions until
               # release-train-ready stamps the release versions. The antora-component-version
