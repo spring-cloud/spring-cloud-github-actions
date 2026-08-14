@@ -203,12 +203,17 @@ jobs:
         with:
           ref: ${{ inputs.sha || github.sha }}
 
+      # preserve-existing-ci-release keeps a ci-release.yml that is already on the branch.
+      # This job re-runs for every release in the minor line, and a project may have
+      # tailored the file: spring-cloud-kubernetes delegates to its own sharded maven.yaml
+      # because the generic template cannot express that pipeline.
       - name: Add commercial release CI files to internal branch
         uses: ./.github/actions/add-commercial-release-files
         with:
-          repository: ${{ needs.derive.outputs.commercial_repo }}
-          branch:     ${{ needs.derive.outputs.internal_branch }}
-          token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          repository:                   ${{ needs.derive.outputs.commercial_repo }}
+          branch:                       ${{ needs.derive.outputs.internal_branch }}
+          preserve-existing-ci-release: 'true'
+          token:                        ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
       # remove-oss-branch is false because the internal branch mirrors the OSS branch
       # rather than replacing it — the OSS branch keeps building on its own schedule.
@@ -308,12 +313,18 @@ jobs:
         with:
           ref: ${{ inputs.sha || github.sha }}
 
+      # The branch was cut from the -internal branch, so it already carries that branch's
+      # ci-release.yml. Retargeting rewrites the branch references rather than regenerating
+      # from the template, so a project whose -internal branch uses a tailored pipeline gets
+      # the same one here: spring-cloud-kubernetes delegates to its own sharded maven.yaml,
+      # which the generic template would run as a single job and time out.
       - name: Add commercial release CI files
         uses: ./.github/actions/add-commercial-release-files
         with:
-          repository: ${{ needs.derive.outputs.commercial_repo }}
-          branch:     ${{ needs.derive.outputs.commercial_branch }}
-          token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          repository:               ${{ needs.derive.outputs.commercial_repo }}
+          branch:                   ${{ needs.derive.outputs.commercial_branch }}
+          retarget-ci-release-from: ${{ needs.derive.outputs.internal_branch }}
+          token:                    ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
   # Create a milestone in the OSS repo (not the commercial repo) for the release version.
   create-milestone:

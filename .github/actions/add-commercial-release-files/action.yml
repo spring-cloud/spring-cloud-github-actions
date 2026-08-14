@@ -18,6 +18,30 @@ inputs:
   token:
     description: 'GitHub token with contents: write permission on the repository'
     required: true
+  retarget-ci-release-from:
+    description: >
+      Branch name to rewrite out of an inherited ci-release.yml. Set to the
+      <major>.<minor>.x-internal branch when initialising a release/<version> branch: the
+      release branch is cut from the internal branch and so arrives carrying its
+      ci-release.yml, which still names the internal branch in the push trigger. Rewriting
+      the references retargets the file at this branch while keeping whatever pipeline the
+      internal branch uses, which the generic template cannot always express.
+
+      When empty, or when the branch has no ci-release.yml, the generic template is used.
+    required: false
+    default: ''
+  preserve-existing-ci-release:
+    description: >
+      Set to "true" to keep an existing .github/workflows/ci-release.yml instead of
+      regenerating it. Use for the long-lived <major>.<minor>.x-internal branch, which is
+      re-initialised on every release in the line and which some projects tailor
+      (spring-cloud-kubernetes delegates to its own sharded maven.yaml).
+
+      Must stay false for release/<version> branches: they are cut from the internal branch
+      and therefore inherit its ci-release.yml, whose push trigger names the internal
+      branch. Regenerating is what points the trigger at the release branch.
+    required: false
+    default: 'false'
   commit-message:
     description: 'Commit message'
     required: false
@@ -56,17 +80,49 @@ runs:
         git config user.email "${{ inputs.git-user-email }}"
 
         # ── ci-release.yml ───────────────────────────────────────────────────────
-        # Generates a dedicated CI workflow for this commercial release branch.
+        # Provides a dedicated CI workflow for this commercial release branch.
         # trigger-branch-ci dispatches this file in preference to ci.yml so the
         # original ci.yml never needs to be modified.
         #
+        # Three modes, so that the generic template is only ever the starting point:
+        #
+        #   retarget  (retarget-ci-release-from set, file present)
+        #     The branch was cut from the -internal branch and so already carries its
+        #     ci-release.yml, referring to the -internal branch. Rewrite those references to
+        #     name this branch and keep everything else. Whatever pipeline the -internal
+        #     branch uses therefore carries into the release branch, including project
+        #     specific ones the template cannot express: spring-cloud-kubernetes delegates to
+        #     its own sharded maven.yaml, which the generic template would run as a single
+        #     job and time out.
+        #
+        #   preserve  (preserve-existing-ci-release true, file present)
+        #     Leave the file completely alone. Used for the -internal branch, which is
+        #     re-initialised on every release in the line and may have been tailored.
+        #     Note that a branch keeping its own copy stops picking up template
+        #     improvements, so the skip is logged prominently rather than quietly.
+        #
+        #   generate  (otherwise)
+        #     Write the generic template. This is the first-time path for a new -internal
+        #     branch.
+        CI_RELEASE_FILE=.github/workflows/ci-release.yml
+        RETARGET_FROM="${{ inputs.retarget-ci-release-from }}"
+
+        if [[ -n "$RETARGET_FROM" && -f "$CI_RELEASE_FILE" ]]; then
+          CI_RELEASE_MODE=retarget
+        elif [[ "${{ inputs.preserve-existing-ci-release }}" == "true" && -f "$CI_RELEASE_FILE" ]]; then
+          CI_RELEASE_MODE=preserve
+        else
+          CI_RELEASE_MODE=generate
+        fi
+        echo "ci-release.yml mode: ${CI_RELEASE_MODE}"
+
         # D/L/R split the GitHub Actions expression delimiter into three bash
         # variables so the template parser never sees a literal dollar-brace-brace
         # in this file (composite actions cannot access the secrets context).
         D='$' L='{{' R='}}'
 
         mkdir -p .github/workflows
-        cat > .github/workflows/ci-release.yml << 'WORKFLOW_EOF'
+        cat > /tmp/ci-release-generated.yml << 'WORKFLOW_EOF'
         name: Spring Cloud CI Job (Commercial Release Branch)
 
         on:
@@ -112,9 +168,40 @@ runs:
         sed -i \
           -e "s|RELEASE_BRANCH_PLACEHOLDER|${BRANCH}|g" \
           -e "s|EXPR_\(.*\)_EXPR|${D}${L} \1 ${R}|g" \
-          .github/workflows/ci-release.yml
+          /tmp/ci-release-generated.yml
 
-        echo "Generated .github/workflows/ci-release.yml"
+        case "$CI_RELEASE_MODE" in
+          retarget)
+            # Every reference is the literal branch name: the workflow_dispatch default, the
+            # push trigger, and for a delegating file the branch input passed to the
+            # project's own workflow. A plain substitution covers all of them.
+            hits=$(grep -c -- "${RETARGET_FROM}" "$CI_RELEASE_FILE" || true)
+            if [[ "$hits" -eq 0 ]]; then
+              echo "::warning title=ci-release.yml not retargeted::Inherited ci-release.yml on ${BRANCH} contains no reference to ${RETARGET_FROM}, so its push trigger may not name this branch. Check it by hand."
+            fi
+            sed -i "s|${RETARGET_FROM}|${BRANCH}|g" "$CI_RELEASE_FILE"
+            echo "Retargeted ${CI_RELEASE_FILE} from ${RETARGET_FROM} to ${BRANCH} (${hits} reference(s))."
+            ;;
+          preserve)
+            echo "::notice title=ci-release.yml preserved::.github/workflows/ci-release.yml already exists on ${BRANCH} and was left unchanged. If the template has changed, apply it to this branch by hand."
+            echo ""
+            echo "  ci-release.yml already present on ${BRANCH} — keeping the existing file."
+            echo "  Delete it from the branch first if you want the generated template back."
+            echo ""
+            # Show what would have been written so a drifted branch is diagnosable from the log.
+            if ! diff -q "$CI_RELEASE_FILE" /tmp/ci-release-generated.yml > /dev/null 2>&1; then
+              echo "The existing ci-release.yml differs from the generated template:"
+              diff "$CI_RELEASE_FILE" /tmp/ci-release-generated.yml || true
+              echo ""
+            else
+              echo "The existing ci-release.yml is identical to the generated template."
+            fi
+            ;;
+          generate)
+            cp /tmp/ci-release-generated.yml "$CI_RELEASE_FILE"
+            echo "Generated ${CI_RELEASE_FILE}"
+            ;;
+        esac
 
         # ── release-ci-settings.xml ──────────────────────────────────────────────
         # Copies the canonical commercial Maven settings template from the
