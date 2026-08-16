@@ -23,7 +23,9 @@ run-name: "Post Release - ${{ inputs.release_version }}${{ inputs.projects != ''
 #   6. milestones-and-releases — close the release milestone, publish the GitHub release
 #                                (skip_close_milestones leaves the milestones open and still
 #                                 publishes the releases)
-#   7. summary                 — one report covering everything above
+#   7. website-pr              — open a PR against spring-website-content: the release blog post
+#                                and the documentation.json version bumps (OSS trains only)
+#   8. summary                 — one report covering everything above
 #
 # release/<version> and the v<version> tag only ever exist in the commercial repository - an OSS
 # release is built there too, on a branch cut from <major>.<minor>.x-internal. So step 5 merges
@@ -64,6 +66,16 @@ on:
         required: false
         type: boolean
         default: false
+      skip_website_pr:
+        description: 'Skip the spring-website-content PR (blog post + documentation.json versions). Only ever run for a full OSS train anyway.'
+        required: false
+        type: boolean
+        default: false
+      blog_author:
+        description: 'author for the blog post front matter'
+        required: false
+        type: string
+        default: 'ryanjbaxter'
       dry_run:
         description: 'Dry run, if checked nothing is created, committed or pushed, but you can see what would happen'
         required: false
@@ -1408,9 +1420,503 @@ jobs:
           path: result-milestones-*.json
           if-no-files-found: ignore
 
+  # ── The spring.io website ────────────────────────────────────────────────────────────
+  # One PR against spring-website-content carrying both halves of the website's release
+  # chores: the announcement blog post, and the documentation.json version bumps for every
+  # project in the train.
+  #
+  # Never runs for a commercial train or a filtered run: both halves are train-wide
+  # statements about a public OSS release, so a partial one would be wrong rather than
+  # merely incomplete. It runs after the releases are published because every row of the
+  # module table links to a release page this workflow creates.
+  #
+  # The blog post is a template. Everything derivable is filled in; the parts that are not -
+  # the train codename in the title, and what was notable in each project - are left as
+  # placeholders for the team to write in the PR.
+  website-pr:
+    name: Website PR
+    needs: [setup, verify-tags, next-snapshot-config, milestones-and-releases]
+    if: |
+      !cancelled() &&
+      needs.next-snapshot-config.result == 'success' &&
+      needs.setup.outputs.commercial != 'true' &&
+      needs.setup.outputs.hotfix != 'true' &&
+      inputs.skip_website_pr != true &&
+      inputs.projects == ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build the website changes and open the PR
+        id: run
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_REPO: ${{ needs.setup.outputs.release-repo }}
+          ENTRIES: ${{ needs.setup.outputs.entries }}
+          NEXT_VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+          BLOG_AUTHOR: ${{ inputs.blog_author }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+
+          const token = process.env.GH_TOKEN;
+          const releaseVersion = process.env.RELEASE_VERSION;
+          const releaseRepo = process.env.RELEASE_REPO;
+          const author = (process.env.BLOG_AUTHOR || '').trim() || 'ryanjbaxter';
+          const dryRun = process.env.DRY_RUN === 'true';
+          const runUrl = process.env.RUN_URL || '';
+          const entries = JSON.parse(process.env.ENTRIES);
+          const nextVersions = JSON.parse(process.env.NEXT_VERSIONS || '{}');
+
+          const WEBSITE = 'spring-io/spring-website-content';
+          const BASE = 'main';
+          const CONFIG_BRANCH = 'jenkins-releaser-config';
+          // Release train codenames (Northfields, Oakwood) live nowhere this workflow reads,
+          // so the title carries a placeholder rather than a guess.
+          const CODENAME = 'CODENAME';
+
+          const gh = args => execFileSync('gh', args,
+            { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+          const git = (args, cwd) => execFileSync('git', args,
+            { encoding: 'utf8', cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+
+          const branch = `spring-cloud-${releaseVersion}`;
+          const result = {
+            phase: 'website-pr', repo: WEBSITE, branch, status: 'skipped',
+            blogFile: '', blogStatus: '', prUrl: '', previousFile: '',
+            listed: [], docs: [],
+          };
+          const out = process.env.GITHUB_OUTPUT;
+          const finish = (status, message) => {
+            if (message) console.log(message);
+            result.status = status;
+            fs.writeFileSync('result-website.json', JSON.stringify(result));
+            fs.appendFileSync(out, `status=${status}\n`);
+            fs.appendFileSync(out, `pr-url=${result.prUrl}\n`);
+            process.exit(0);
+          };
+
+          // ── a. what actually moved in this train ────────────────────────────────────
+          const cmp = (a, b) => {
+            const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+            for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+              const d = (pa[i] || 0) - (pb[i] || 0);
+              if (d) return d;
+            }
+            return 0;
+          };
+
+          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
+          const [major, minor] = releaseVersion.split('.');
+          const trainLine = `${major}.${minor}`;
+
+          // The most recent earlier file on this train line, whatever it happens to be, rather
+          // than the direct predecessor: those are routinely missing (there is no
+          // 2025_0_3.properties), and a hotfix file like 2025_0_2_1.properties describes the
+          // state of the train just as well.
+          let previousVersions = null;
+          try {
+            const names = JSON.parse(gh(['api',
+              `repos/${releaseRepo}/contents?ref=${CONFIG_BRANCH}`, '--jq', '[.[].name]']));
+            const re = new RegExp(`^${major}_${minor}(?:_\\d+)+\\.properties$`);
+            const earlier = names.filter(n => re.test(n))
+              .map(n => ({ name: n, version: n.replace(/\.properties$/, '').replace(/_/g, '.') }))
+              .filter(c => cmp(c.version, releaseVersion) < 0)
+              .sort((a, b) => cmp(a.version, b.version));
+            if (earlier.length) {
+              result.previousFile = earlier[earlier.length - 1].name;
+              const b64 = gh(['api',
+                `repos/${releaseRepo}/contents/${result.previousFile}?ref=${CONFIG_BRANCH}`,
+                '--jq', '.content']);
+              const text = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+              previousVersions = {};
+              for (const line of text.split('\n')) {
+                const m = line.match(ENTRY_RE);
+                if (m) previousVersions[m[1].trim()] = m[2].trim();
+              }
+              console.log(`Comparing against ${result.previousFile} to find what was released.`);
+            }
+          } catch (err) {
+            console.log(`Could not read an earlier properties file: ${err.message}`);
+          }
+
+          const projects = entries.filter(e => e.key !== 'spring-boot');
+          // Everything, when there is nothing to compare against: an over-long list is edited
+          // down in the PR, whereas silently dropping a project that did ship is not noticed.
+          const changed = previousVersions
+            ? projects.filter(e => previousVersions[e.key] !== e.version)
+            : projects.slice();
+          if (!previousVersions) {
+            console.log('No earlier properties file on this line - listing every project.');
+          }
+
+          const titleCase = k =>
+            k.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+          // spring-cloud-release is the train itself. The module table has always called it
+          // Spring Cloud Starter Build, and its release is the one this workflow published.
+          const label = e =>
+            e.key === 'spring-cloud-release' ? 'Spring Cloud Starter Build' : titleCase(e.key);
+          const listed = changed.slice().sort((a, b) => label(a).localeCompare(label(b)));
+          result.listed = listed.map(e => `${e.key}=${e.version}`);
+
+          console.log(`Modules to list (${listed.length}):`);
+          for (const e of listed) console.log(`  ${label(e)} ${e.version}`);
+
+          // ── b. is there already a branch for this release? ──────────────────────────
+          let branchExists = false;
+          try {
+            gh(['api', `repos/${WEBSITE}/branches/${branch}`, '--jq', '.name']);
+            branchExists = true;
+          } catch (err) { /* no branch yet */ }
+
+          if (branchExists) {
+            // Almost certainly an earlier run of this workflow, and the team may have written
+            // the notable-changes sections into that PR since. Force-pushing over it would
+            // throw away the one part of this PR nobody can regenerate.
+            try {
+              const prs = JSON.parse(gh(['api',
+                `repos/${WEBSITE}/pulls?head=spring-io:${branch}&state=all&per_page=1`]));
+              if (prs.length) result.prUrl = prs[0].html_url;
+            } catch (err) { /* leave the url empty */ }
+            finish('branch-exists',
+              `${branch} already exists in ${WEBSITE} - leaving it alone. ${result.prUrl}`);
+          }
+
+          // ── c. clone and write ──────────────────────────────────────────────────────
+          console.log(`Cloning ${WEBSITE}@${BASE}...`);
+          git(['clone', '--quiet', '--depth', '1', '--branch', BASE,
+            `https://x-access-token:${token}@github.com/${WEBSITE}.git`, 'website']);
+
+          const boot = (entries.find(e => e.key === 'spring-boot') || {}).version || '';
+          const today = new Date().toISOString().slice(0, 10);
+          const dashed = releaseVersion.replace(/\./g, '-');
+
+          // A post for this version may already be on the site - this is a re-run after the
+          // first PR was merged, or the release was announced by hand. Never overwrite it.
+          const existingPosts = [];
+          const walk = dir => {
+            for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+              const p = `${dir}/${d.name}`;
+              if (d.isDirectory()) walk(p);
+              else if (new RegExp(`^spring-cloud-${dashed}(-|\\.)`).test(d.name)) {
+                existingPosts.push(p.replace(/^website\//, ''));
+              }
+            }
+          };
+          try { walk('website/blog'); } catch (err) { /* no blog directory */ }
+
+          // No codename in the file name: it is a placeholder in the title, and a published
+          // URL reading spring-cloud-2025-0-4-aka-codename-... is worse than one that simply
+          // leaves it out. Renaming the file is on the checklist in the PR body.
+          const blogFile =
+            `blog/${today.slice(0, 4)}/${today.slice(5, 7)}/spring-cloud-${dashed}-has-been-released.md`;
+
+          if (existingPosts.length) {
+            result.blogFile = existingPosts[0];
+            result.blogStatus = 'already-exists';
+            console.log(`A post for ${releaseVersion} already exists (${existingPosts[0]}) - ` +
+              'not writing another one.');
+          } else {
+            result.blogFile = blogFile;
+            result.blogStatus = 'created';
+
+            const B = [];
+            B.push('---');
+            B.push(`title: "Spring Cloud ${releaseVersion} (aka ${CODENAME}) Has Been Released"`);
+            B.push('category: Releases');
+            B.push(`publishedAt: ${today}`);
+            B.push(`author: ${author}`);
+            B.push('---');
+            B.push('');
+            B.push('On behalf of the community, I am pleased to announce that the General ' +
+              `Availability (RELEASE) of the [Spring Cloud ${releaseVersion}]` +
+              '(https://cloud.spring.io) Release Train is available today. The release can be ' +
+              'found in [Maven Central](https://repo1.maven.org/maven2/org/springframework/' +
+              `cloud/spring-cloud-dependencies/${releaseVersion}/). You can check out the ` +
+              `${releaseVersion} [release notes for more information](https://github.com/` +
+              `spring-cloud/spring-cloud-release/wiki/Spring-Cloud-${trainLine}-Release-Notes).`);
+            B.push('');
+            B.push(`## Notable Changes in the ${releaseVersion} Release Train`);
+            B.push('');
+            if (boot) {
+              B.push('This release is based on Spring Boot `' + boot + '`.');
+              B.push('');
+            }
+            // One heading per project that shipped, each left as TODO: what was notable about
+            // a release is in nobody's properties file. The train itself gets no heading - it
+            // is the BOM, and the hand-written posts have never given it one.
+            for (const e of listed) {
+              if (e.key === 'spring-cloud-release') continue;
+              B.push(`### ${titleCase(e.key)}`);
+              B.push('');
+              B.push('TODO');
+              B.push('');
+            }
+            B.push(`The following modules were updated as part of ${releaseVersion}:`);
+            B.push('');
+            B.push('| Module | Version | Issues |');
+            B.push('| ------ | ------- |------- |');
+            for (const e of listed) {
+              B.push(`| ${label(e)}    | ${e.version}    | ([issues](https://github.com/` +
+                `spring-cloud/${e.key}/releases/tag/v${e.version})) |`);
+            }
+            B.push('');
+            B.push('');
+            B.push('As always, we welcome feedback on [GitHub](https://github.com/spring-cloud/), ' +
+              'on [Gitter](https://gitter.im/spring-cloud/spring-cloud), on [Stack Overflow]' +
+              '(https://stackoverflow.com/questions/tagged/spring-cloud), or on [Twitter]' +
+              '(https://twitter.com/SpringCloud).');
+            B.push('');
+            B.push('To get started with Maven with a BOM (dependency management only):');
+            B.push('');
+            B.push('```');
+            B.push('');
+            B.push('<dependencyManagement>');
+            B.push('    <dependencies>');
+            B.push('        <dependency>');
+            B.push('            <groupId>org.springframework.cloud</groupId>');
+            B.push('            <artifactId>spring-cloud-dependencies</artifactId>');
+            B.push(`            <version>${releaseVersion}</version>`);
+            B.push('            <type>pom</type>');
+            B.push('            <scope>import</scope>');
+            B.push('        </dependency>');
+            B.push('    </dependencies>');
+            B.push('</dependencyManagement>');
+            B.push('<dependencies>');
+            B.push('    <dependency>');
+            B.push('        <groupId>org.springframework.cloud</groupId>');
+            B.push('        <artifactId>spring-cloud-starter-config</artifactId>');
+            B.push('    </dependency>');
+            B.push('    <dependency>');
+            B.push('        <groupId>org.springframework.cloud</groupId>');
+            B.push('        <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>');
+            B.push('    </dependency>');
+            B.push('    ...');
+            B.push('</dependencies>');
+            B.push('```');
+            B.push('');
+            B.push('or with Gradle:');
+            B.push('');
+            B.push('```');
+            B.push('buildscript {');
+            B.push('dependencies {');
+            B.push('classpath "io.spring.gradle:dependency-management-plugin:1.0.2.RELEASE"');
+            B.push('}');
+            B.push('}');
+            B.push('');
+            B.push('');
+            B.push('');
+            B.push('apply plugin: "io.spring.dependency-management"');
+            B.push('');
+            B.push('dependencyManagement {');
+            B.push('imports {');
+            B.push(`mavenBom 'org.springframework.cloud:spring-cloud-dependencies:${releaseVersion}'`);
+            B.push('}');
+            B.push('}');
+            B.push('');
+            B.push('dependencies {');
+            B.push("compile 'org.springframework.cloud:spring-cloud-starter-config'");
+            B.push("compile 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'");
+            B.push('...');
+            B.push('}');
+            B.push('```');
+
+            fs.mkdirSync(path.dirname(`website/${blogFile}`), { recursive: true });
+            fs.writeFileSync(`website/${blogFile}`, B.join('\n') + '\n');
+            console.log(`Wrote ${blogFile}.`);
+          }
+
+          // ── d. documentation.json ───────────────────────────────────────────────────
+          // Applied to every project in the train, not just the ones that moved: a project
+          // whose version is unchanged simply produces no diff, and its snapshot entry still
+          // has to follow the new snapshot train. Each file holds one GENERAL_AVAILABILITY
+          // and one SNAPSHOT entry per major.minor line, so the released version's line
+          // picks out exactly the two entries to update.
+          const docFor = key => key === 'spring-cloud-release' ? 'spring-cloud' : key;
+          const lineOf = v => v.split('.').slice(0, 2).join('.');
+
+          for (const e of projects) {
+            const rel = `project/${docFor(e.key)}/documentation.json`;
+            const file = `website/${rel}`;
+            const rec = { project: e.key, file: rel, ga: '', snapshot: '', status: 'unchanged' };
+            result.docs.push(rec);
+
+            // spring-cloud-build has no page on the website, so it has no file here.
+            if (!fs.existsSync(file)) {
+              rec.status = 'no-file';
+              console.log(`${rel}: not on the website - skipped.`);
+              continue;
+            }
+
+            const original = fs.readFileSync(file, 'utf8');
+            let text = original;
+            let list;
+            try {
+              list = JSON.parse(text);
+            } catch (err) {
+              rec.status = 'unparseable';
+              console.log(`${rel}: could not be parsed - skipped.`);
+              continue;
+            }
+
+            // Edited as text rather than parsed and reserialized: these files are not
+            // formatted alike across projects (some write "version" : x, others "version": x)
+            // so reserializing would bury two version bumps under a whole-file reindentation.
+            const replaceVersion = (oldV, newV) => {
+              const quoted = oldV.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const re = new RegExp(`("version"\\s*:\\s*")${quoted}(")`, 'g');
+              // Exactly one match or nothing: two entries carrying the same version would make
+              // the edit a guess, and this file is better left to a human than half-edited.
+              if ((text.match(re) || []).length !== 1) return false;
+              text = text.replace(re, `$1${newV}$2`);
+              return true;
+            };
+
+            const target = lineOf(e.version);
+            const ga = list.find(x =>
+              x.status === 'GENERAL_AVAILABILITY' && lineOf(x.version) === target);
+            const snap = list.find(x =>
+              x.status === 'SNAPSHOT' && lineOf(x.version) === target);
+            const nextSnap = nextVersions[e.key] || '';
+
+            if (!ga && !snap) {
+              rec.status = 'no-entry';
+              console.log(`${rel}: no ${target} entry - skipped.`);
+              continue;
+            }
+            if (ga && ga.version !== e.version) {
+              if (replaceVersion(ga.version, e.version)) rec.ga = `${ga.version} → ${e.version}`;
+              else rec.status = 'ambiguous';
+            }
+            if (snap && nextSnap && snap.version !== nextSnap) {
+              if (replaceVersion(snap.version, nextSnap)) {
+                rec.snapshot = `${snap.version} → ${nextSnap}`;
+              } else {
+                rec.status = 'ambiguous';
+              }
+            }
+
+            if (text !== original) {
+              fs.writeFileSync(file, text);
+              if (rec.status === 'unchanged') rec.status = 'updated';
+            }
+            console.log(`${rel}: ${rec.status}` +
+              `${rec.ga ? ` · GA ${rec.ga}` : ''}${rec.snapshot ? ` · ${rec.snapshot}` : ''}`);
+          }
+
+          // ── e. commit, push, open the PR ────────────────────────────────────────────
+          git(['config', 'user.name', 'Spring Builds'], 'website');
+          git(['config', 'user.email', 'svc.spring-builds@broadcom.com'], 'website');
+          git(['checkout', '--quiet', '-b', branch], 'website');
+          git(['add', '-A'], 'website');
+
+          const staged = git(['diff', '--cached', '--name-only'], 'website').trim();
+          if (!staged) {
+            finish('no-changes',
+              'The website already has this blog post and these versions - nothing to do.');
+          }
+
+          console.log('');
+          console.log('Files to change:');
+          console.log(staged);
+          fs.writeFileSync('website-changes.diff', git(['diff', '--cached'], 'website'));
+
+          const docRows = result.docs
+            .filter(d => d.ga || d.snapshot)
+            .map(d => `| \`${d.project}\` | ${d.ga || '—'} | ${d.snapshot || '—'} |`);
+
+          const P = [];
+          P.push(`Generated by the [post release workflow](${runUrl}) for Spring Cloud ` +
+            `${releaseVersion}.`);
+          P.push('');
+          P.push('### Before merging');
+          P.push('');
+          P.push(`- [ ] Replace \`${CODENAME}\` in the blog post title with the release train ` +
+            `codename, and rename the file to \`spring-cloud-${dashed}-aka-<codename>-has-been-` +
+            'released.md\`');
+          P.push('- [ ] Write the `TODO` sections under **Notable Changes** — there is one ' +
+            'heading per project whose version changed in this release, and any with nothing ' +
+            'worth calling out should just be deleted');
+          P.push('- [ ] Check the Spring Boot compatibility line');
+          P.push(`- [ ] Check \`publishedAt: ${today}\``);
+          P.push('');
+          if (docRows.length) {
+            P.push('### documentation.json');
+            P.push('');
+            P.push('| Project | General availability | Snapshot |');
+            P.push('|---|---|---|');
+            P.push(...docRows);
+            P.push('');
+          }
+          const problemDocs = result.docs.filter(d =>
+            d.status === 'ambiguous' || d.status === 'unparseable' || d.status === 'no-entry');
+          if (problemDocs.length) {
+            P.push('### Needs a look');
+            P.push('');
+            for (const d of problemDocs) P.push(`- \`${d.file}\` — ${d.status}`);
+            P.push('');
+          }
+          const body = P.join('\n');
+
+          if (dryRun) {
+            console.log('');
+            console.log('[dry run] would open this PR:');
+            console.log('---');
+            console.log(body);
+            console.log('---');
+            console.log('[dry run] not pushing. The full diff is in the website-changes ' +
+              'artifact on this run.');
+            finish('would-create');
+          }
+
+          git(['commit', '--quiet', '-m', `Spring Cloud ${releaseVersion} release updates`],
+            'website');
+          git(['push', '--quiet', 'origin', `HEAD:refs/heads/${branch}`], 'website');
+          console.log(`Pushed ${branch} to ${WEBSITE}.`);
+
+          fs.writeFileSync('pr-body.md', body);
+          result.prUrl = gh(['pr', 'create', '--repo', WEBSITE, '--base', BASE, '--head', branch,
+            '--title', `Spring Cloud ${releaseVersion} release updates`,
+            '--body-file', 'pr-body.md']).trim().split('\n').pop();
+          console.log(`Opened ${result.prUrl}`);
+          finish('created');
+          JSEOF
+
+      # The script writes its own result on every path it exits through deliberately; this
+      # covers the one it does not - an exception - so the summary still gets a row rather
+      # than quietly omitting the website from a red run.
+      - name: Record failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [[ ! -f result-website.json ]]; then
+            printf '%s' '{"phase":"website-pr","status":"error"}' > result-website.json
+          fi
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-website
+          path: result-website.json
+          if-no-files-found: ignore
+
+      # Separate from the result artifact, which the summary job downloads and parses - this
+      # one is only ever read by a person, and on a dry run it is the whole point of the run.
+      - name: Upload the diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-changes
+          path: website-changes.diff
+          if-no-files-found: ignore
+
   summary:
     name: Summary
-    needs: [setup, verify-tags, milestones-and-releases, next-snapshot-config, new-milestones, merge-back-and-update]
+    needs: [setup, verify-tags, milestones-and-releases, next-snapshot-config, new-milestones, merge-back-and-update, website-pr]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1460,6 +1966,7 @@ jobs:
           const nm = byPhase('new-milestones');
           const mb = byPhase('merge-back-and-update');
           const sc = all.find(r => r.phase === 'next-snapshot-config');
+          const web = all.find(r => r.phase === 'website-pr');
 
           const L = [];
           L.push(dryRun ? '## Post-release summary (dry run — nothing was changed)'
@@ -1482,6 +1989,8 @@ jobs:
             updated: '✅', unchanged: '➖', 'would-update': '🔎',
             'already-closed': '➖', 'already-exists': '➖', 'already-merged': '➖',
             'nothing-to-push': '➖', 'no-release-branch': '➖',
+            // website-pr
+            'branch-exists': '➖', 'no-changes': '➖',
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
             skipped: '⏭️', 'skipped-by-request': '⏭️',
             'merge-conflict': '❌', 'branch-not-found': '❌',
@@ -1570,6 +2079,34 @@ jobs:
                 `**${restoredAny.length}** project(s) had them restored after the merge deleted ` +
                 `them, **${autoAny.length}** had a conflict on them auto-resolved in favour of ` +
                 'the maintenance branch.');
+              L.push('');
+            }
+          }
+
+          if (web) {
+            L.push('### Website PR');
+            L.push('');
+            const link = web.prUrl ? `[${web.status}](${web.prUrl})` : `**${web.status}**`;
+            L.push(`${icon(web.status)} \`${web.repo}\` — ${link} on \`${web.branch}\``);
+            L.push('');
+            if (web.blogFile) {
+              L.push(`- blog post \`${web.blogFile}\` — ${web.blogStatus}`);
+            }
+            const touched = (web.docs || []).filter(d => d.ga || d.snapshot);
+            L.push(`- \`documentation.json\` — ${touched.length} project(s) updated`);
+            L.push(web.previousFile
+              ? `- modules listed: everything that changed since \`${web.previousFile}\``
+              : '- modules listed: every project in the train — there was no earlier ' +
+                'properties file on this line to compare against');
+            // Anything the version bump could not be applied to cleanly. Reported rather than
+            // failed: the PR is still worth having with one file left for a human.
+            const odd = (web.docs || []).filter(d =>
+              d.status === 'ambiguous' || d.status === 'unparseable' || d.status === 'no-entry');
+            for (const d of odd) L.push(`- ⚠️ \`${d.file}\` — ${d.status}`);
+            L.push('');
+            if (web.status === 'created') {
+              L.push('The post is a template: the codename is still `CODENAME` in the title and ' +
+                'every project section still says `TODO`. The PR body has the checklist.');
               L.push('');
             }
           }
@@ -1684,6 +2221,7 @@ jobs:
             'would-push': 'would push (dry run)', 'branch-not-found': 'no branch found',
             'version-mismatch': 'version mismatch', 'no-version': 'no version',
             error: 'errored', skipped: 'not reached', unknown: 'unknown',
+            'branch-exists': 'branch already existed, left alone', 'no-changes': 'nothing to change',
             'no-tag': 'NO TAG - not published', 'not-reachable': 'tag not reachable',
             'fetch-failed': 'tag fetch failed',
             'no-tag-dry-run': 'would publish once the tag lands (dry run)',
@@ -1716,6 +2254,10 @@ jobs:
           // the tag was already in place - does not report a line of "not reached".
           const tagged = mb.filter(r => r.resolvedIn === 'commercial-pending');
           if (tagged.length) tally('Tags pushed', tagged, 'tagStatus');
+          if (web) {
+            C.push(`Website PR: ${phrase(web.status)}` +
+              (web.prUrl ? ` — <${web.prUrl}|${web.repo}>` : ''));
+          }
           const kept = n(mb, r => r.restored || r.autoResolved);
           if (kept) C.push(`CI/PR workflow files kept from the maintenance branch: ${kept} project(s)`);
           const nudged = mb.reduce((sum, r) => sum + (Number(r.dependabotCommented) || 0), 0);

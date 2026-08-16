@@ -1,6 +1,6 @@
 # Post Release Workflow
 
-An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, seeding the next snapshot config, opening the next round of milestones, merging release branches back from the commercial repo, bumping the maintenance branches to the new snapshot versions, pushing the release tags into the OSS repos, closing milestones, publishing GitHub releases, and nudging Dependabot to drop PRs the release has superseded.
+An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, seeding the next snapshot config, opening the next round of milestones, merging release branches back from the commercial repo, bumping the maintenance branches to the new snapshot versions, pushing the release tags into the OSS repos, closing milestones, publishing GitHub releases, nudging Dependabot to drop PRs the release has superseded, and — for an OSS train — opening the spring.io website PR with the announcement blog post and the documentation version bumps.
 
 Previously all of this was done by hand, repo by repo, for up to 17 projects.
 
@@ -14,7 +14,8 @@ It:
 4. **Opens a milestone** for each new snapshot version, via the [create-milestone](../actions/create-milestone/README.md) action
 5. **Merges `release/<version>` back into the `.x` branch** from the commercial repo, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, **pushes the release tag into the OSS repo**, and comments `@dependabot recreate` on superseded Dependabot PRs
 6. **Closes the release milestone** and **publishes the GitHub release** for each tag — `skip_close_milestones` leaves the milestones open and still publishes the releases
-7. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
+7. **Opens a PR against [spring-website-content](https://github.com/spring-io/spring-website-content)** with the release blog post and the `documentation.json` version bumps — OSS trains only, see [The website PR](#the-website-pr)
+8. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
 
 Step 5's version bump also exists on its own, as [update-versions](README-update-versions.md) — for when the projects have to move to a train's versions before, or independently of, a post-release run. The normal end-of-release path is still this workflow; running that one first is not required.
 
@@ -68,6 +69,8 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 | `commercial` | Was this a commercial release? **Ignored when `projects` is supplied.** | No | boolean (default: `false`) |
 | `projects` | Comma-separated project names, `-commercial` suffix included where applicable. Empty processes every project in the properties file. See [The projects filter](#the-projects-filter). | No | string |
 | `skip_close_milestones` | Leave the release milestones open. Nothing else changes — the releases are still published, the next round of milestones is still opened, and the merge back still runs. Use it when issues are still being moved between milestones, then re-run with it unchecked (closing a milestone is idempotent, and everything else is a no-op the second time). | No | boolean (default: `false`) |
+| `skip_website_pr` | Skip the [spring-website-content PR](#the-website-pr). It is already skipped for a commercial run, a hotfix, and a run with `projects` set. | No | boolean (default: `false`) |
+| `blog_author` | `author` in the blog post front matter. | No | string (default: `ryanjbaxter`) |
 | `dry_run` | When checked, nothing is created, committed or pushed — but the summary shows what would happen. | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
@@ -75,7 +78,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 | Secret | Description | Required |
 |--------|-------------|----------|
-| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there. | Yes, unless `token` is passed |
+| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there — and, for the website PR, push and pull-request access to `spring-io/spring-website-content`. | Yes, unless `token` is passed |
 | `SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK` | Incoming webhook URL for the Google Chat space to notify when the run finishes. If unset, the step logs that it is skipping and the run still succeeds. Never used on a dry run. | No |
 
 Cross-repo writes rely entirely on this token — the workflow's own `permissions:` block is `contents: read`.
@@ -152,7 +155,7 @@ Note this differs from [ci-status-report](README-ci-status-report.md) and [rollo
 
 ## Hotfix releases
 
-A **4-segment `release_version`** (e.g. `2025.1.2.1`) is treated as a commercial hotfix and **runs only steps 1, 2 and 6** — verify tags, close the milestone, create the release. Steps 3, 4 and 5 are skipped: there is no next snapshot train for a hotfix, no new milestone, no version bump, no Dependabot pass, and **no merge-back, because a hotfix has no branch to merge back into** (the `release/<version>` branch is itself the hotfix line).
+A **4-segment `release_version`** (e.g. `2025.1.2.1`) is treated as a commercial hotfix and **runs only steps 1, 2 and 6** — verify tags, close the milestone, create the release. Steps 3, 4, 5 and 7 are skipped: there is no next snapshot train for a hotfix, no new milestone, no version bump, no Dependabot pass, no website PR (a hotfix is always commercial), and **no merge-back, because a hotfix has no branch to merge back into** (the `release/<version>` branch is itself the hotfix line).
 
 Because the merge back is skipped for a hotfix, step 6 cannot simply `needs:` it — a skipped dependency would skip the release step too, and closing the milestone and publishing the release is the whole of a hotfix run. It is gated on `!cancelled()` instead. A hotfix is always commercial, so its tag is already in the repo being published to and needs no push.
 
@@ -239,6 +242,60 @@ There is no public API to trigger a Dependabot run, so the workflow uses the sup
 
 This only runs for projects that were actually pushed to.
 
+## The website PR
+
+One PR against [spring-io/spring-website-content](https://github.com/spring-io/spring-website-content), on a branch named `spring-cloud-<version>`, carrying both halves of the website's release chores.
+
+**It is skipped** for a commercial run, for a hotfix, when `projects` is set, and when `skip_website_pr` is checked. The blog post and the documentation versions are train-wide statements about a public OSS release, so a partial one would be wrong rather than merely incomplete.
+
+It runs **after** the releases are published, because every row of the module table links to a release page this workflow creates.
+
+### The blog post
+
+Written to `blog/<year>/<month>/spring-cloud-<version-dashed>-has-been-released.md`, following the hand-written posts exactly — the boilerplate, the Maven and Gradle snippets, and the module table are reproduced byte for byte with the version substituted.
+
+Everything derivable is filled in:
+
+| Part | Where it comes from |
+|------|---------------------|
+| Version, Maven Central link, release notes wiki link | `release_version` |
+| `This release is based on Spring Boot X` | the `spring-boot` entry in the properties file |
+| The module table, and one `###` heading per project | the projects whose version changed in this release, see below |
+| `publishedAt` | the date the workflow runs |
+| `author` | the `blog_author` input |
+
+Two parts **cannot** be derived and are left as placeholders for the team to write in the PR, with a checklist in the PR body:
+
+- **The train codename.** The title reads `Spring Cloud 2025.0.4 (aka CODENAME) Has Been Released` — "Northfields", "Oakwood" and the rest are recorded nowhere this workflow reads. The file name deliberately leaves the codename out rather than carrying the placeholder into a published URL, so renaming the file to `...-aka-<codename>-has-been-released.md` is on the checklist too.
+- **Notable changes.** Each project that shipped gets a `### Spring Cloud X` heading with `TODO` under it. Delete the ones with nothing worth calling out.
+
+A post for this version anywhere under `blog/` means one already exists — a re-run after the first PR merged, or an announcement written by hand — and it is never overwritten. The documentation updates still go ahead.
+
+### Which projects are listed
+
+The `###` headings and the module table cover the projects whose version **changed in this release**, matching the hand-written posts, which do not list a project that was carried over untouched.
+
+That comparison is against the most recent earlier properties file on the same train line — whatever it happens to be, not necessarily the direct predecessor, since those are routinely missing (there is no `2025_0_3.properties`) and a hotfix file such as `2025_0_2_1.properties` describes the state of the train just as well. **With no earlier file at all, every project is listed** and the summary says so: an over-long list is edited down in the PR, whereas a project silently dropped from the announcement is not noticed.
+
+`spring-cloud-release` is listed in the table as **Spring Cloud Starter Build**, as it always has been, but linked to its own release rather than to `spring-cloud-starter-build`, which does not exist. It gets no `###` heading — it is the BOM.
+
+### documentation.json
+
+Applied to **every** project in the train, not just the ones that changed. Each `project/<name>/documentation.json` holds one `GENERAL_AVAILABILITY` and one `SNAPSHOT` entry per `major.minor` line, so the released version's line picks out exactly two entries:
+
+- the GA entry becomes the released version — `4.3.5` → `4.3.6`
+- the SNAPSHOT entry becomes the new snapshot version from step 3 — `4.3.6-SNAPSHOT` → `4.3.7-SNAPSHOT`
+
+A project whose version did not change simply produces no diff, so there is nothing to filter. `spring-cloud-release` maps to `project/spring-cloud/`, and `spring-cloud-build` has no page on the website and is skipped.
+
+These files are **edited as text, not parsed and reserialized** — they are not formatted alike across projects (some write `"version" : x`, others `"version": x`), so reserializing one would bury two version bumps under a whole-file reindentation. A version that appears more than once in a file is reported as `ambiguous` and left for a human rather than half-edited.
+
+### Re-runs
+
+**If the branch already exists in the website repo, the job does nothing** beyond reporting it and linking the PR. Almost certainly it is there from an earlier run of this workflow, and the notable-changes sections written into that PR since are the one part of it nobody can regenerate — force-pushing over them is not a trade worth making. Delete the branch to have it rebuilt.
+
+On a dry run everything is computed and nothing is pushed: the full diff is uploaded as the `website-changes` artifact, and the PR body is printed to the log.
+
 ## Output
 
 The job summary has one table per phase. Because most steps are no-ops when their target already exists, the icons distinguish *did it* from *it was already done* — otherwise a run that changed nothing would look identical to one that did all the work.
@@ -250,7 +307,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by explicit sections for anything that needs a human: **Blocked on a manual merge**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were updated, and which properties file the module list was compared against — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 
@@ -291,7 +348,7 @@ Notes on this:
 - `update-project-versions` is called with `release-train-version` rather than an explicit versions map, because only that path applies `project-version-substitutions` (which maps `spring-cloud-dependencies-parent` → `spring-cloud-build`, `verifierVersion` → `spring-cloud-contract`, and so on). That path resolves over `raw.githubusercontent.com`, which is CDN-cached, so after committing the snapshot file the workflow waits for the raw URL to serve it before any project is updated. If the CDN never catches up, version updates are skipped rather than applied from a stale file, and the run can simply be repeated.
 - Tag existence is checked with `git/matching-refs` and an exact comparison, not a plain `git/refs/tags/<tag>` lookup, which would also prefix-match `v5.0.20` when asked for `v5.0.2`.
 - `max-parallel: 8` keeps the fan-out from saturating the runner pool; `fail-fast: false` so one bad project does not abandon the rest.
-- Step 4 (new milestones) and step 5 (merge back, bump and tag) run in parallel — neither depends on the other. Step 6 waits on step 5, because that is where the tag arrives.
+- Step 4 (new milestones) and step 5 (merge back, bump and tag) run in parallel — neither depends on the other. Step 6 waits on step 5, because that is where the tag arrives, and step 7 waits on step 6, because the blog post links to the releases it publishes.
 
 ## Related workflows
 
