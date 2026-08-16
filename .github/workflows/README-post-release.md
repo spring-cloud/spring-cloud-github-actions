@@ -70,7 +70,6 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 | `projects` | Comma-separated project names, `-commercial` suffix included where applicable. Empty processes every project in the properties file. See [The projects filter](#the-projects-filter). | No | string |
 | `skip_close_milestones` | Leave the release milestones open. Nothing else changes — the releases are still published, the next round of milestones is still opened, and the merge back still runs. Use it when issues are still being moved between milestones, then re-run with it unchecked (closing a milestone is idempotent, and everything else is a no-op the second time). | No | boolean (default: `false`) |
 | `skip_website_pr` | Skip the [spring-website-content PR](#the-website-pr). It is already skipped for a commercial run, a hotfix, and a run with `projects` set. | No | boolean (default: `false`) |
-| `blog_author` | `author` in the blog post front matter. | No | string (default: `ryanjbaxter`) |
 | `dry_run` | When checked, nothing is created, committed or pushed — but the summary shows what would happen. | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
@@ -262,12 +261,16 @@ Everything derivable is filled in:
 | `This release is based on Spring Boot X` | the `spring-boot` entry in the properties file |
 | The module table, and one `###` heading per project | the projects whose version changed in this release, see below |
 | `publishedAt` | the date the workflow runs |
-| `author` | the `blog_author` input |
 
-Two parts **cannot** be derived and are left as placeholders for the team to write in the PR, with a checklist in the PR body:
+The rest **cannot** be derived and is left as a placeholder for the team to write in the PR. **The PR body lists every one of them as a checklist**, in the order they appear in the file:
 
+- **`author`** — written as `TODO`. It is whoever writes the post up, which is not necessarily whoever ran the release.
+- **`publishedAt`** — the date the workflow ran, so it needs changing if the post goes out on another day.
 - **The train codename.** The title reads `Spring Cloud 2025.0.4 (aka CODENAME) Has Been Released` — "Northfields", "Oakwood" and the rest are recorded nowhere this workflow reads. The file name deliberately leaves the codename out rather than carrying the placeholder into a published URL, so renaming the file to `...-aka-<codename>-has-been-released.md` is on the checklist too.
+- **The Spring Boot line**, which only ever says which version the train is based on. The recent posts say more than that.
 - **Notable changes.** Each project that shipped gets a `### Spring Cloud X` heading with `TODO` under it. Delete the ones with nothing worth calling out.
+
+When a post for this version already exists the checklist is left out entirely, and the PR body says the PR carries nothing but the documentation versions.
 
 A post for this version anywhere under `blog/` means one already exists — a re-run after the first PR merged, or an announcement written by hand — and it is never overwritten. The documentation updates still go ahead.
 
