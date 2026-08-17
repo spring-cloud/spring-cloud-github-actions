@@ -109,8 +109,53 @@ together or DCO fails.
 | `repo_type` | `both`, `oss`, or `commercial` | No | `both` |
 | `maven_version` | Target Maven version. Empty uses the newest stable 3.9.x. | No | `''` |
 | `wrapper_version` | Target `maven-wrapper` version. Empty uses the newest stable release. | No | `''` |
-| `dry_run` | Report what would be opened without creating anything | No | `true` |
+| `auto_merge` | Merge existing wrapper PRs whose checks have all passed. **Manual runs only** — see [Auto-merge](#auto-merge) | No | `true` |
+| `merge_method` | `squash`, `merge`, or `rebase` | No | `squash` |
+| `dry_run` | Report what would happen without creating, updating or merging anything | No | `true` |
 | `token` | Needs `contents:write` and `pull-requests:write` on all targets. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | `''` |
+
+### Dry run and the schedule
+
+A **manual dispatch defaults to a dry run**, so you can look before anything happens. A
+**scheduled run always acts** — a scheduled event carries no inputs, so `dry_run` would
+otherwise be its default of `true` and the weekly job would report forever without ever
+opening a PR.
+
+## Auto-merge
+
+**The weekly scheduled run never merges.** These are real Maven upgrades, so the schedule
+opens and refreshes PRs and a human decides when they land. `auto_merge` applies to a manual
+dispatch only — which makes merging every green wrapper PR one deliberate click, rather than
+something that happens overnight. To let the schedule merge unattended later, remove the
+`github.event_name != 'schedule'` clause from the merge step.
+
+A scheduled run says so in its summary, so an empty Merge column next to open green PRs reads
+as policy rather than as merging having quietly failed.
+
+With `auto_merge` enabled on a manual run (the default), a wrapper PR that is **open, already
+at the target version, and fully green** is merged with `merge_method` and its head branch
+deleted.
+
+Only a PR that was *already* open when the run started is eligible. One opened or moved up in
+the same run is deliberately skipped — its checks have not started yet, so merging it would
+defeat the point of routing this through CI at all.
+
+Checks are read from `statusCheckRollup` rather than inferred from `mergeStateStatus`, which
+conflates failing checks with "needs review" and with a locked branch — the same distinction
+[`dependabot-report.yml`](README-dependabot-report.md) makes. A PR is merged only when every
+check passes *and* `mergeable` is `MERGEABLE` *and* `mergeStateStatus` is `CLEAN`.
+
+| Merge status | Meaning |
+|---|---|
+| `merged` | Merged and the head branch deleted |
+| `would-merge` | Dry run — it would have been merged |
+| `not-merged` | Reported with the reason: failing checks (named), checks still running, conflicts, no checks reported yet, or green-but-`BLOCKED` |
+| `error` | The merge call itself failed |
+
+`BLOCKED` with everything green usually means a required review, or a `Release Freeze` on the
+base branch. The merge API would refuse it anyway, so it is reported rather than attempted.
+
+Set `auto_merge` to false to only open and update PRs and leave merging to a human.
 
 ## Statuses
 
@@ -134,7 +179,8 @@ than from a queue, so rerunning never duplicates work:
 
 | On rerun | Result |
 |---|---|
-| PR still open at the target | `pr-open` — nothing done |
+| PR still open at the target, checks green | `pr-open` — merged only on a manual run with `auto_merge` on; a scheduled run leaves it |
+| PR still open at the target, checks red or pending | `pr-open` — left for a human |
 | PR merged | The branch is now current → `up-to-date` |
 | PR open, but a **newer Maven** has since shipped | `pr-updated` — the commit lands on the **existing** PR's branch, moving it up in place |
 | PR closed unmerged, branch still present | `branch-exists` — left alone, so a deliberate rejection is not re-litigated |

@@ -51,8 +51,22 @@ on:
         required: false
         type: string
         default: ''
+      auto_merge:
+        description: 'Merge existing wrapper PRs whose checks have all passed. Applies to this manual run only - the weekly scheduled run never merges.'
+        required: false
+        type: boolean
+        default: true
+      merge_method:
+        description: 'How to merge a green wrapper PR.'
+        required: false
+        type: choice
+        default: 'squash'
+        options:
+          - squash
+          - merge
+          - rebase
       dry_run:
-        description: 'Dry run, if checked no branches or pull requests are created, but you can see what would change'
+        description: 'Dry run, if checked nothing is created, updated or merged, but you can see what would change'
         required: false
         type: boolean
         default: true
@@ -221,7 +235,10 @@ jobs:
           TYPE: ${{ matrix.type }}
           MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
-          DRY_RUN: ${{ inputs.dry_run != false }}
+          # A scheduled run has no inputs, so `inputs.dry_run != false` would be true and the
+          # weekly job would never actually do anything. Schedule therefore acts, while a
+          # manual dispatch still defaults to a dry run so a human can look first.
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -267,6 +284,11 @@ jobs:
               branch: BRANCH, status, detail, dryRun: DRY, ...extra };
             fs.writeFileSync(`wrapper-${safe}.json`, JSON.stringify(result, null, 2));
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `safe-name=${safe}\n`);
+            // Only a PR that is already open AND already at the target is a merge
+            // candidate. One just opened, or just moved up, has no finished CI yet.
+            if (status === 'pr-open' && extra.prNumber) {
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `merge-candidate=${extra.prNumber}\n`);
+            }
             console.log(`${REPO}@${BRANCH}: ${status}${detail ? ` - ${detail}` : ''}`);
             process.exit(0);
           };
@@ -384,7 +406,7 @@ jobs:
 
             if (headUpdated === headBody) {
               finish('pr-open', `#${pr.number} already open for ${MAVEN}`,
-                { current, target: MAVEN, prUrl: pr.html_url });
+                { current, target: MAVEN, prUrl: pr.html_url, prNumber: pr.number });
             }
             if (DRY) {
               finish('would-update-pr', `#${pr.number} would be moved up to ${MAVEN}`,
@@ -476,6 +498,106 @@ jobs:
             { current, target: MAVEN, prUrl: created.html_url });
           JSEOF
 
+      # Only runs when the previous step found a PR that is open and already at the target
+      # version - i.e. one whose CI has had a chance to finish. A PR opened or moved up in
+      # this same run is deliberately not a candidate: its checks have not started yet.
+      #
+      # Auto-merge is switched off for the weekly scheduled run: these are real Maven
+      # upgrades, so the schedule opens and refreshes PRs and a human decides when they
+      # land. A manual dispatch still honours the auto_merge input, so merging green PRs in
+      # bulk is one deliberate click away. To let the schedule merge unattended later,
+      # delete the `github.event_name != 'schedule'` clause below.
+      - name: Merge PR if all checks pass
+        if: >-
+          always()
+          && github.event_name != 'schedule'
+          && inputs.auto_merge != false
+          && steps.update.outputs.merge-candidate != ''
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          PR_NUMBER: ${{ steps.update.outputs.merge-candidate }}
+          SAFE_NAME: ${{ steps.update.outputs.safe-name }}
+          MERGE_METHOD: ${{ inputs.merge_method || 'squash' }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const REPO = process.env.REPO;
+          const PR = process.env.PR_NUMBER;
+          const DRY = process.env.DRY_RUN !== 'false';
+          const METHOD = process.env.MERGE_METHOD || 'squash';
+          const FILE = `wrapper-${process.env.SAFE_NAME}.json`;
+
+          const gh = args => {
+            try {
+              return { ok: true, out: execFileSync('gh', args,
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 }) };
+            } catch (err) {
+              return { ok: false, out: err.stdout || '',
+                err: (err.stderr || err.message || '').split('\n')[0].trim() };
+            }
+          };
+
+          // Merge outcome is folded back into the result the previous step wrote, so the
+          // summary reports one row per repo/branch rather than two disjoint views.
+          const record = (mergeStatus, mergeDetail) => {
+            let result = {};
+            try { result = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { /* first write */ }
+            fs.writeFileSync(FILE, JSON.stringify({ ...result, mergeStatus, mergeDetail }, null, 2));
+            console.log(`${REPO} #${PR}: ${mergeStatus}${mergeDetail ? ` - ${mergeDetail}` : ''}`);
+            process.exit(0);
+          };
+
+          const view = gh(['pr', 'view', PR, '--repo', REPO, '--json',
+            'mergeable,mergeStateStatus,statusCheckRollup,url']);
+          if (!view.ok) record('error', `could not read PR: ${view.err}`);
+          const pr = JSON.parse(view.out);
+
+          // Checks are read from statusCheckRollup rather than inferred from
+          // mergeStateStatus, which conflates failing checks with "needs review" and a
+          // locked branch - the same distinction dependabot-report.yml makes.
+          const FAILING = new Set(['FAILURE', 'TIMED_OUT', 'ERROR', 'STARTUP_FAILURE', 'CANCELLED']);
+          const PASSING = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+          const checks = (pr.statusCheckRollup || []).map(c => {
+            if (c.__typename === 'StatusContext' || c.state) {
+              return { name: c.context || 'status', state: (c.state || '').toUpperCase() };
+            }
+            const status = (c.status || '').toUpperCase();
+            if (status && status !== 'COMPLETED') return { name: c.name, state: 'PENDING' };
+            return { name: c.name, state: (c.conclusion || 'PENDING').toUpperCase() };
+          });
+
+          const failing = checks.filter(c => FAILING.has(c.state));
+          const pending = checks.filter(c => !FAILING.has(c.state) && !PASSING.has(c.state));
+
+          if (!checks.length) record('not-merged', 'no checks have reported yet');
+          if (failing.length) {
+            record('not-merged', `failing checks: ${failing.map(c => c.name).join(', ')}`);
+          }
+          if (pending.length) {
+            record('not-merged', `checks still running: ${pending.map(c => c.name).join(', ')}`);
+          }
+          if (pr.mergeable === 'CONFLICTING') record('not-merged', 'conflicts with the base branch');
+          if (pr.mergeable !== 'MERGEABLE') record('not-merged', `mergeable is ${pr.mergeable}`);
+
+          // Green but not CLEAN means branch protection is holding it - a required review,
+          // or a Release Freeze on the base branch. The merge API would refuse anyway, so
+          // this is reported rather than attempted.
+          if (pr.mergeStateStatus !== 'CLEAN') {
+            record('not-merged', `all checks pass but GitHub reports ${pr.mergeStateStatus}`);
+          }
+
+          if (DRY) record('would-merge', `all ${checks.length} check(s) pass`);
+
+          const merged = gh(['pr', 'merge', PR, '--repo', REPO, `--${METHOD}`, '--delete-branch']);
+          if (!merged.ok) record('error', `merge failed: ${merged.err}`);
+          record('merged', `${METHOD}, all ${checks.length} check(s) passed`);
+          JSEOF
+
       # Guarded on safe-name: if the script died before writing its result, the artifact
       # name would be a bare "wrapper-", which GitHub rejects and which would turn a
       # reporting gap into a job failure.
@@ -504,6 +626,7 @@ jobs:
         env:
           MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -529,6 +652,8 @@ jobs:
               'Re-run with `dry_run` unchecked to open them.', '');
           }
 
+          const withMerge = s => results.filter(r => r.mergeStatus === s);
+
           md.push(`${results.length} repo/branch combination(s) checked — ` +
             `**${of('pr-opened').length}** PR(s) opened, ` +
             `**${of('pr-updated').length}** existing PR(s) moved up, ` +
@@ -537,16 +662,33 @@ jobs:
             `**${of('up-to-date').length}** up to date, ` +
             `**${of('error').length}** error(s).`, '');
 
+          const merged = withMerge('merged');
+          const wouldMerge = withMerge('would-merge');
+          if (merged.length || wouldMerge.length) {
+            md.push(`**${merged.length}** PR(s) merged` +
+              (wouldMerge.length ? `, **${wouldMerge.length}** would be merged` : '') + '.', '');
+          }
+
+          // Said plainly, so a weekly run with open green PRs and an empty Merge column
+          // reads as a deliberate policy rather than as merging having quietly failed.
+          if (process.env.EVENT_NAME === 'schedule') {
+            md.push('> Auto-merge is off for scheduled runs — open PRs are left for a human. ' +
+              'Run this workflow manually with `auto_merge` checked to merge the green ones.', '');
+          }
+
           const interesting = results.filter(r =>
             !['up-to-date', 'no-wrapper'].includes(r.status));
 
           if (!interesting.length) {
             md.push('Every maintained branch is already on the target wrapper.');
           } else {
-            md.push('| Repo | Branch | Status | Detail |', '|---|---|---|---|');
+            md.push('| Repo | Branch | Status | Merge | Detail |', '|---|---|---|---|---|');
             for (const r of interesting) {
               const detail = r.prUrl ? `[${r.detail}](${r.prUrl})` : (r.detail || '');
-              md.push(`| \`${r.repo}\` | \`${r.branch}\` | ${r.status} | ${detail} |`);
+              const merge = r.mergeStatus
+                ? `${r.mergeStatus}${r.mergeDetail ? ` — ${r.mergeDetail}` : ''}`
+                : '';
+              md.push(`| \`${r.repo}\` | \`${r.branch}\` | ${r.status} | ${merge} | ${detail} |`);
             }
           }
 
