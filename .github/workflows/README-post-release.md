@@ -1,6 +1,6 @@
 # Post Release Workflow
 
-An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, seeding the next snapshot config, opening the next round of milestones, merging release branches back from the commercial repo, bumping the maintenance branches to the new snapshot versions, pushing the release tags into the OSS repos, closing milestones, publishing GitHub releases, nudging Dependabot to drop PRs the release has superseded, and — for an OSS train — opening the spring.io website PR with the announcement blog post and the documentation version bumps.
+An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, seeding the next snapshot config, opening the next round of milestones, merging release branches back from the commercial repo, bumping the maintenance branches to the new snapshot versions, pushing the release tags into the OSS repos, closing milestones, publishing GitHub releases, nudging Dependabot to drop PRs the release has superseded, and opening the website PR that documents the released versions — with the announcement blog post too, on an OSS train.
 
 Previously all of this was done by hand, repo by repo, for up to 17 projects.
 
@@ -14,7 +14,7 @@ It:
 4. **Opens a milestone** for each new snapshot version, via the [create-milestone](../actions/create-milestone/README.md) action
 5. **Merges `release/<version>` back into the `.x` branch** from the commercial repo, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, **pushes the release tag into the OSS repo**, and comments `@dependabot recreate` on superseded Dependabot PRs
 6. **Closes the release milestone** and **publishes the GitHub release** for each tag — `skip_close_milestones` leaves the milestones open and still publishes the releases
-7. **Opens a PR against [spring-website-content](https://github.com/spring-io/spring-website-content)** with the release blog post and the `documentation.json` version bumps — OSS trains only, see [The website PR](#the-website-pr)
+7. **Opens a PR against the website content repository** — the blog post and the `documentation.json` version bumps on the OSS site, a new `documentation.json` entry per released project on the commercial one, see [The website PR](#the-website-pr)
 8. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
 
 Step 5's version bump also exists on its own, as [update-versions](README-update-versions.md) — for when the projects have to move to a train's versions before, or independently of, a post-release run. The normal end-of-release path is still this workflow; running that one first is not required.
@@ -69,7 +69,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 | `commercial` | Was this a commercial release? **Ignored when `projects` is supplied.** | No | boolean (default: `false`) |
 | `projects` | Comma-separated project names, `-commercial` suffix included where applicable. Empty processes every project in the properties file. See [The projects filter](#the-projects-filter). | No | string |
 | `skip_close_milestones` | Leave the release milestones open. Nothing else changes — the releases are still published, the next round of milestones is still opened, and the merge back still runs. Use it when issues are still being moved between milestones, then re-run with it unchecked (closing a milestone is idempotent, and everything else is a no-op the second time). | No | boolean (default: `false`) |
-| `skip_website_pr` | Skip the [spring-website-content PR](#the-website-pr). It is already skipped for a commercial run, a hotfix, and a run with `projects` set. | No | boolean (default: `false`) |
+| `skip_website_pr` | Skip the [website PR](#the-website-pr). It is already skipped for a run with `projects` set. | No | boolean (default: `false`) |
 | `dry_run` | When checked, nothing is created, committed or pushed — but the summary shows what would happen. | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
@@ -77,7 +77,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 | Secret | Description | Required |
 |--------|-------------|----------|
-| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there — and, for the website PR, push and pull-request access to `spring-io/spring-website-content`. | Yes, unless `token` is passed |
+| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there — and, for the website PR, push and pull-request access to `spring-io/spring-website-content` on an OSS run or `spring-io/spring-website-commercial-content` on a commercial one. | Yes, unless `token` is passed |
 | `SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK` | Incoming webhook URL for the Google Chat space to notify when the run finishes. If unset, the step logs that it is skipping and the run still succeeds. Never used on a dry run. | No |
 
 Cross-repo writes rely entirely on this token — the workflow's own `permissions:` block is `contents: read`.
@@ -154,7 +154,9 @@ Note this differs from [ci-status-report](README-ci-status-report.md) and [rollo
 
 ## Hotfix releases
 
-A **4-segment `release_version`** (e.g. `2025.1.2.1`) is treated as a commercial hotfix and **runs only steps 1, 2 and 6** — verify tags, close the milestone, create the release. Steps 3, 4, 5 and 7 are skipped: there is no next snapshot train for a hotfix, no new milestone, no version bump, no Dependabot pass, no website PR (a hotfix is always commercial), and **no merge-back, because a hotfix has no branch to merge back into** (the `release/<version>` branch is itself the hotfix line).
+A **4-segment `release_version`** (e.g. `2025.1.2.1`) is treated as a commercial hotfix and **runs only steps 1, 2, 6 and 7** — verify tags, close the milestone, create the release, document the versions on the commercial site. Steps 3, 4 and 5 are skipped: there is no next snapshot train for a hotfix, no new milestone, no version bump, no Dependabot pass, and **no merge-back, because a hotfix has no branch to merge back into** (the `release/<version>` branch is itself the hotfix line).
+
+Step 7 does run, and has to: a hotfix is a commercial release like any other, and the commercial site documents every one of them — the `2025.0.2.1` and `2025.1.1.1` entries in `project/spring-cloud/documentation.json` are hotfixes. That is why the job is not gated on step 3, which a hotfix skips outright; nothing the commercial site needs comes from it.
 
 Because the merge back is skipped for a hotfix, step 6 cannot simply `needs:` it — a skipped dependency would skip the release step too, and closing the milestone and publishing the release is the whole of a hotfix run. It is gated on `!cancelled()` instead. A hotfix is always commercial, so its tag is already in the repo being published to and needs no push.
 
@@ -243,13 +245,22 @@ This only runs for projects that were actually pushed to.
 
 ## The website PR
 
-One PR against [spring-io/spring-website-content](https://github.com/spring-io/spring-website-content), on a branch named `spring-cloud-<version>`, carrying both halves of the website's release chores.
+One PR, on a branch named `spring-cloud-<version>`, against whichever content repository this run's flavour belongs to:
 
-**It is skipped** for a commercial run, for a hotfix, when `projects` is set, and when `skip_website_pr` is checked. The blog post and the documentation versions are train-wide statements about a public OSS release, so a partial one would be wrong rather than merely incomplete.
+| Run | Repository | Contents |
+|-----|------------|----------|
+| OSS | [spring-io/spring-website-content](https://github.com/spring-io/spring-website-content) | the [blog post](#the-blog-post-oss-only), and [`documentation.json` bumped in place](#documentationjson-on-the-oss-site) |
+| commercial | [spring-io/spring-website-commercial-content](https://github.com/spring-io/spring-website-commercial-content) | [one new `documentation.json` entry](#documentationjson-on-the-commercial-site) per released project |
 
-It runs **after** the releases are published, because every row of the module table links to a release page this workflow creates.
+**The two sites record their versions in ways that have nothing in common beyond the file name**, so the two halves share only the plumbing — clone, branch, commit, PR. The OSS site lists the versions currently being documented and is edited in place; the commercial site is an archive in which every release ever made keeps its own entry, so a release appends to it.
 
-### The blog post
+**It is skipped** when `projects` is set and when `skip_website_pr` is checked. This is a train-wide statement about a release, so a partial one would be wrong rather than merely incomplete.
+
+It runs **after** the releases are published, because every row of the blog post's module table links to a release page this workflow creates.
+
+### The blog post (OSS only)
+
+Commercial releases are not announced on the commercial site — it has no blog — so a commercial run's PR is the documentation entries and nothing else.
 
 Written to `blog/<year>/<month>/spring-cloud-<version-dashed>-has-been-released.md`, following the hand-written posts exactly — the boilerplate, the Maven and Gradle snippets, and the module table are reproduced byte for byte with the version substituted.
 
@@ -274,7 +285,7 @@ When a post for this version already exists the checklist is left out entirely, 
 
 A post for this version anywhere under `blog/` means one already exists — a re-run after the first PR merged, or an announcement written by hand — and it is never overwritten. The documentation updates still go ahead.
 
-### Which projects are listed
+### Which projects the blog post lists
 
 The `###` headings and the module table cover the projects whose version **changed in this release**, matching the hand-written posts, which do not list a project that was carried over untouched.
 
@@ -282,20 +293,59 @@ That comparison is against the most recent earlier properties file on the same t
 
 `spring-cloud-release` is listed in the table as **Spring Cloud Starter Build**, as it always has been, but linked to its own release rather than to `spring-cloud-starter-build`, which does not exist. It gets no `###` heading — it is the BOM.
 
-### documentation.json
+In both cases `spring-cloud-release` maps to `project/spring-cloud/`, and `spring-cloud-build` has no page on either site and is skipped.
+
+### `documentation.json` on the OSS site
 
 Applied to **every** project in the train, not just the ones that changed. Each `project/<name>/documentation.json` holds one `GENERAL_AVAILABILITY` and one `SNAPSHOT` entry per `major.minor` line, so the released version's line picks out exactly two entries:
 
 - the GA entry becomes the released version — `4.3.5` → `4.3.6`
 - the SNAPSHOT entry becomes the new snapshot version from step 3 — `4.3.6-SNAPSHOT` → `4.3.7-SNAPSHOT`
 
-A project whose version did not change simply produces no diff, so there is nothing to filter. `spring-cloud-release` maps to `project/spring-cloud/`, and `spring-cloud-build` has no page on the website and is skipped.
+A project whose version did not change simply produces no diff, so there is nothing to filter.
 
 These files are **edited as text, not parsed and reserialized** — they are not formatted alike across projects (some write `"version" : x`, others `"version": x`), so reserializing one would bury two version bumps under a whole-file reindentation. A version that appears more than once in a file is reported as `ambiguous` and left for a human rather than half-edited.
 
+### `documentation.json` on the commercial site
+
+Nothing is edited. Every commercial release keeps its own `GENERAL_AVAILABILITY` entry — there are no `SNAPSHOT` entries and no `current` flag — so a release **appends one entry per project**:
+
+```json
+  {
+    "version": "5.0.2.1",
+    "api": "",
+    "ref": "https://docs.enterprise.spring.io/spring-cloud-config/reference/",
+    "githubTag": "v5.0.2.1",
+    "status": "GENERAL_AVAILABILITY"
+  }
+```
+
+**Only projects with a tag of their own in the commercial repo** get one. On a commercial train some properties entries carry the plain OSS version because that project has had no commercial release since the last OSS one — step 2 marks those `oss-fallback` — and there is no commercial documentation of them to add. A version that is **already listed is left exactly as it is**, which is what makes a re-run, or a version carried over from an earlier train, a no-op without any comparison against a previous properties file.
+
+The new entry is **cloned from an existing entry**, as raw text with the version substituted everywhere it appears, rather than assembled from fields. There is no single shape to assemble:
+
+- field order differs between files — `spring-cloud-gateway` writes `version` first, `spring-cloud-task` writes `api` first
+- `githubTag` carries a `v` prefix in most files, but not all of `spring-cloud-gateway`'s
+- `ref` comes in two shapes, and which one is right is decided by the docs layout, not the project:
+
+  | Shape | Example | Means |
+  |---|---|---|
+  | versioned | `.../spring-cloud-config/docs/4.0.11/reference/html/index.html` | the pre-Antora layout, where every version was published under its own path |
+  | version-free | `.../spring-cloud-config/reference/` | Antora, which does not put the version in the URL |
+
+Cloning an existing entry inherits all of that for free. Which entry, in order:
+
+1. **The newest entry on the same `major.minor` line.** Same line, same docs layout, so whichever shape its `ref` has is the right one — and if it is versioned, substituting this version into the path is correct.
+2. **The newest entry with a version-free `ref`**, when the line has no entry yet. A new line means a new release, a new release means Antora, and Antora means the `ref` must not carry a version — so an Antora entry is the template even when a pre-Antora one is newer. This is the ordinary case for the first commercial release of a line and needs no review: the `ref` it copies has no version in it, so it is correct exactly as it stands.
+3. **The newest entry of any kind**, when the file has nothing but pre-Antora entries. The substituted `ref` then points at a versioned path that the Antora layout does not serve, so this is the one case that **is** flagged, in both the PR body and the summary. Every project in a current train already has an Antora entry, so it should only come up for a project being documented with Antora for the first time — or a long-retired one, which is why `spring-cloud-cloudfoundry`, `spring-cloud-dataflow` and `spring-cloud-sleuth` are the only three files it would apply to today.
+
+The PR body's table names the entry each one was cloned from either way, so the provenance is always visible without a warning attached to it.
+
+It is **spliced in at line level**, next to the newest entry on its line, on whichever side keeps that group's own ordering: the groups are contiguous but not consistently sorted (the `4.1` group in `spring-cloud-config` runs `4.1.10`, `4.1.9`, `4.1.8`), and following the local direction keeps the change to one added block sitting with its siblings instead of a reordering of the file. A line with no entries yet goes at the end. Every file in that repository is laid out identically — one entry per `  {` … `  }` block, one field per line — which is what makes that safe; a file that is not is reported as `unrecognised-format` and left alone. After the splice the result is re-parsed and checked to be the same JSON plus exactly one entry before it is written.
+
 ### Re-runs
 
-**If the branch already exists in the website repo, the job does nothing** beyond reporting it and linking the PR. Almost certainly it is there from an earlier run of this workflow, and the notable-changes sections written into that PR since are the one part of it nobody can regenerate — force-pushing over them is not a trade worth making. Delete the branch to have it rebuilt.
+**If the branch already exists in the website repo, the job does nothing** beyond reporting it and linking the PR. Almost certainly it is there from an earlier run of this workflow, and on an OSS run the notable-changes sections written into that PR since are the one part of it nobody can regenerate — force-pushing over them is not a trade worth making. Delete the branch to have it rebuilt.
 
 On a dry run everything is computed and nothing is pushed: the full diff is uploaded as the `website-changes` artifact, and the PR body is printed to the log.
 
@@ -310,7 +360,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were updated, and which properties file the module list was compared against — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, and any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 

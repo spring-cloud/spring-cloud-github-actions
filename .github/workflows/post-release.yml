@@ -1416,28 +1416,34 @@ jobs:
           if-no-files-found: ignore
 
   # ── The spring.io website ────────────────────────────────────────────────────────────
-  # One PR against spring-website-content carrying both halves of the website's release
-  # chores: the announcement blog post, and the documentation.json version bumps for every
-  # project in the train.
+  # One PR against the website content repository for whichever flavour this run is:
   #
-  # Never runs for a commercial train or a filtered run: both halves are train-wide
-  # statements about a public OSS release, so a partial one would be wrong rather than
-  # merely incomplete. It runs after the releases are published because every row of the
-  # module table links to a release page this workflow creates.
+  #   OSS         spring-website-content             blog post + documentation.json bumps
+  #   commercial  spring-website-commercial-content  documentation.json entries, no blog post
   #
-  # The blog post is a template. Everything derivable is filled in; the parts that are not -
-  # the train codename in the title, and what was notable in each project - are left as
-  # placeholders for the team to write in the PR.
+  # The two sites keep their versions in completely different ways, so the documentation
+  # halves have nothing in common beyond the file name. The OSS site lists the versions
+  # currently being documented and is edited in place; the commercial site is an archive
+  # where every release ever made keeps its own entry, so a release appends rather than
+  # edits. See README-post-release.md.
+  #
+  # Never runs for a filtered run: this is a train-wide statement about a release, so a
+  # partial one would be wrong rather than merely incomplete. It runs after the releases
+  # are published because the blog post's module table links to release pages this
+  # workflow creates.
   website-pr:
     name: Website PR
     needs: [setup, verify-tags, next-snapshot-config, milestones-and-releases]
+    # next-snapshot-config only for OSS, and only because the snapshot entries on that site
+    # follow it. A commercial run needs nothing from it - the commercial site has no
+    # snapshot entries at all - and must not be gated on a job a hotfix skips outright.
     if: |
       !cancelled() &&
-      needs.next-snapshot-config.result == 'success' &&
-      needs.setup.outputs.commercial != 'true' &&
-      needs.setup.outputs.hotfix != 'true' &&
+      needs.verify-tags.result == 'success' &&
       inputs.skip_website_pr != true &&
-      inputs.projects == ''
+      inputs.projects == '' &&
+      (needs.setup.outputs.commercial == 'true' ||
+       needs.next-snapshot-config.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: Build the website changes and open the PR
@@ -1446,7 +1452,9 @@ jobs:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           RELEASE_VERSION: ${{ inputs.release_version }}
           RELEASE_REPO: ${{ needs.setup.outputs.release-repo }}
+          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
           ENTRIES: ${{ needs.setup.outputs.entries }}
+          RESOLVED: ${{ needs.verify-tags.outputs.matrix }}
           NEXT_VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
           DRY_RUN: ${{ inputs.dry_run }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -1459,12 +1467,16 @@ jobs:
           const token = process.env.GH_TOKEN;
           const releaseVersion = process.env.RELEASE_VERSION;
           const releaseRepo = process.env.RELEASE_REPO;
+          const commercial = process.env.COMMERCIAL === 'true';
           const dryRun = process.env.DRY_RUN === 'true';
           const runUrl = process.env.RUN_URL || '';
           const entries = JSON.parse(process.env.ENTRIES);
+          const resolved = JSON.parse(process.env.RESOLVED).include;
           const nextVersions = JSON.parse(process.env.NEXT_VERSIONS || '{}');
 
-          const WEBSITE = 'spring-io/spring-website-content';
+          const WEBSITE = commercial
+            ? 'spring-io/spring-website-commercial-content'
+            : 'spring-io/spring-website-content';
           const BASE = 'main';
           const CONFIG_BRANCH = 'jenkins-releaser-config';
           // Release train codenames (Northfields, Oakwood) live nowhere this workflow reads,
@@ -1494,7 +1506,7 @@ jobs:
             process.exit(0);
           };
 
-          // ── a. what actually moved in this train ────────────────────────────────────
+          // ── a. which projects this run has anything to say about ────────────────────
           const cmp = (a, b) => {
             const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
             for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
@@ -1508,57 +1520,83 @@ jobs:
           const [major, minor] = releaseVersion.split('.');
           const trainLine = `${major}.${minor}`;
 
-          // The most recent earlier file on this train line, whatever it happens to be, rather
-          // than the direct predecessor: those are routinely missing (there is no
-          // 2025_0_3.properties), and a hotfix file like 2025_0_2_1.properties describes the
-          // state of the train just as well.
-          let previousVersions = null;
-          try {
-            const names = JSON.parse(gh(['api',
-              `repos/${releaseRepo}/contents?ref=${CONFIG_BRANCH}`, '--jq', '[.[].name]']));
-            const re = new RegExp(`^${major}_${minor}(?:_\\d+)+\\.properties$`);
-            const earlier = names.filter(n => re.test(n))
-              .map(n => ({ name: n, version: n.replace(/\.properties$/, '').replace(/_/g, '.') }))
-              .filter(c => cmp(c.version, releaseVersion) < 0)
-              .sort((a, b) => cmp(a.version, b.version));
-            if (earlier.length) {
-              result.previousFile = earlier[earlier.length - 1].name;
-              const b64 = gh(['api',
-                `repos/${releaseRepo}/contents/${result.previousFile}?ref=${CONFIG_BRANCH}`,
-                '--jq', '.content']);
-              const text = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
-              previousVersions = {};
-              for (const line of text.split('\n')) {
-                const m = line.match(ENTRY_RE);
-                if (m) previousVersions[m[1].trim()] = m[2].trim();
-              }
-              console.log(`Comparing against ${result.previousFile} to find what was released.`);
-            }
-          } catch (err) {
-            console.log(`Could not read an earlier properties file: ${err.message}`);
-          }
-
-          const projects = entries.filter(e => e.key !== 'spring-boot');
-          // Everything, when there is nothing to compare against: an over-long list is edited
-          // down in the PR, whereas silently dropping a project that did ship is not noticed.
-          const changed = previousVersions
-            ? projects.filter(e => previousVersions[e.key] !== e.version)
-            : projects.slice();
-          if (!previousVersions) {
-            console.log('No earlier properties file on this line - listing every project.');
-          }
-
           const titleCase = k =>
             k.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
           // spring-cloud-release is the train itself. The module table has always called it
           // Spring Cloud Starter Build, and its release is the one this workflow published.
           const label = e =>
             e.key === 'spring-cloud-release' ? 'Spring Cloud Starter Build' : titleCase(e.key);
-          const listed = changed.slice().sort((a, b) => label(a).localeCompare(label(b)));
-          result.listed = listed.map(e => `${e.key}=${e.version}`);
 
-          console.log(`Modules to list (${listed.length}):`);
-          for (const e of listed) console.log(`  ${label(e)} ${e.version}`);
+          // Every project in the train, for the OSS site: it documents the versions currently
+          // being documented, and even a project that did not move needs its snapshot entry
+          // following the new snapshot train.
+          const projects = entries.filter(e => e.key !== 'spring-boot');
+
+          // For the commercial site, only the projects with a tag of their own in the
+          // commercial repo. An oss-fallback entry carries the plain OSS version because that
+          // project has had no commercial release since the last OSS one, so there is no
+          // commercial documentation of it to add.
+          const releasedCommercially = resolved
+            .filter(e => e.resolvedIn === 'commercial')
+            .map(e => ({ key: e.project, version: e.version }))
+            .sort((a, b) => a.key.localeCompare(b.key));
+
+          // The blog post's module table and its per-project headings cover what actually
+          // shipped, matching the hand-written posts, which never list a project that was
+          // carried over untouched. Compared against the most recent earlier file on this
+          // train line, whatever it happens to be, rather than the direct predecessor: those
+          // are routinely missing (there is no 2025_0_3.properties), and a hotfix file like
+          // 2025_0_2_1.properties describes the state of the train just as well.
+          let listed = [];
+          if (!commercial) {
+            let previousVersions = null;
+            try {
+              const names = JSON.parse(gh(['api',
+                `repos/${releaseRepo}/contents?ref=${CONFIG_BRANCH}`, '--jq', '[.[].name]']));
+              const re = new RegExp(`^${major}_${minor}(?:_\\d+)+\\.properties$`);
+              const earlier = names.filter(n => re.test(n))
+                .map(n => ({ name: n, version: n.replace(/\.properties$/, '').replace(/_/g, '.') }))
+                .filter(c => cmp(c.version, releaseVersion) < 0)
+                .sort((a, b) => cmp(a.version, b.version));
+              if (earlier.length) {
+                result.previousFile = earlier[earlier.length - 1].name;
+                const b64 = gh(['api',
+                  `repos/${releaseRepo}/contents/${result.previousFile}?ref=${CONFIG_BRANCH}`,
+                  '--jq', '.content']);
+                const text = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+                previousVersions = {};
+                for (const line of text.split('\n')) {
+                  const m = line.match(ENTRY_RE);
+                  if (m) previousVersions[m[1].trim()] = m[2].trim();
+                }
+                console.log(`Comparing against ${result.previousFile} to find what was released.`);
+              }
+            } catch (err) {
+              console.log(`Could not read an earlier properties file: ${err.message}`);
+            }
+
+            // Everything, when there is nothing to compare against: an over-long list is edited
+            // down in the PR, whereas silently dropping a project that did ship is not noticed.
+            const changed = previousVersions
+              ? projects.filter(e => previousVersions[e.key] !== e.version)
+              : projects.slice();
+            if (!previousVersions) {
+              console.log('No earlier properties file on this line - listing every project.');
+            }
+            listed = changed.slice().sort((a, b) => label(a).localeCompare(label(b)));
+            result.listed = listed.map(e => `${e.key}=${e.version}`);
+
+            console.log(`Modules to list (${listed.length}):`);
+            for (const e of listed) console.log(`  ${label(e)} ${e.version}`);
+          } else {
+            result.listed = releasedCommercially.map(e => `${e.key}=${e.version}`);
+            console.log(`Released commercially (${releasedCommercially.length}):`);
+            for (const e of releasedCommercially) console.log(`  ${e.key} ${e.version}`);
+            const fallback = resolved.filter(e => e.resolvedIn !== 'commercial');
+            for (const e of fallback) {
+              console.log(`  ${e.project} ${e.version} - no commercial tag, nothing to document`);
+            }
+          }
 
           // ── b. is there already a branch for this release? ──────────────────────────
           let branchExists = false;
@@ -1568,9 +1606,10 @@ jobs:
           } catch (err) { /* no branch yet */ }
 
           if (branchExists) {
-            // Almost certainly an earlier run of this workflow, and the team may have written
-            // the notable-changes sections into that PR since. Force-pushing over it would
-            // throw away the one part of this PR nobody can regenerate.
+            // Almost certainly an earlier run of this workflow, and the PR it opened may have
+            // been edited since - on an OSS run that is where the notable-changes sections get
+            // written. Force-pushing over it would throw away the one part of this PR nobody
+            // can regenerate.
             try {
               const prs = JSON.parse(gh(['api',
                 `repos/${WEBSITE}/pulls?head=spring-io:${branch}&state=all&per_page=1`]));
@@ -1589,6 +1628,7 @@ jobs:
           const today = new Date().toISOString().slice(0, 10);
           const dashed = releaseVersion.replace(/\./g, '-');
 
+          // ── c1. the blog post ───────────────────────────────────────────────────────
           // A post for this version may already be on the site - this is a re-run after the
           // first PR was merged, or the release was announced by hand. Never overwrite it.
           const existingPosts = [];
@@ -1601,7 +1641,10 @@ jobs:
               }
             }
           };
-          try { walk('website/blog'); } catch (err) { /* no blog directory */ }
+          // Nothing to look for on the commercial site: it has no blog directory at all.
+          if (!commercial) {
+            try { walk('website/blog'); } catch (err) { /* no blog directory */ }
+          }
 
           // No codename in the file name: it is a placeholder in the title, and a published
           // URL reading spring-cloud-2025-0-4-aka-codename-... is worse than one that simply
@@ -1609,7 +1652,11 @@ jobs:
           const blogFile =
             `blog/${today.slice(0, 4)}/${today.slice(5, 7)}/spring-cloud-${dashed}-has-been-released.md`;
 
-          if (existingPosts.length) {
+          if (commercial) {
+            // Commercial releases are not announced on the commercial site - it has no blog -
+            // so this PR is the documentation entries and nothing else.
+            result.blogStatus = 'none';
+          } else if (existingPosts.length) {
             result.blogFile = existingPosts[0];
             result.blogStatus = 'already-exists';
             console.log(`A post for ${releaseVersion} already exists (${existingPosts[0]}) - ` +
@@ -1725,15 +1772,186 @@ jobs:
           }
 
           // ── d. documentation.json ───────────────────────────────────────────────────
+          // The two sites record their versions in ways that have nothing in common beyond
+          // the file name, so this is two separate passes - each iterating an empty list on
+          // the other flavour's run.
+          const docFor = key => key === 'spring-cloud-release' ? 'spring-cloud' : key;
+          const lineOf = v => v.split('.').slice(0, 2).join('.');
+
+          // ── d1. the commercial site: one appended entry per released version ────────
+          // These files are an archive. Every commercial release keeps its own
+          // GENERAL_AVAILABILITY entry, nothing is ever edited, and there are no SNAPSHOT
+          // entries - so a release appends.
+          //
+          // The new entry is cloned from the newest existing entry on the same major.minor
+          // line, as raw text with the version substituted, rather than assembled from
+          // fields: there is no single shape to assemble. Field order differs between files
+          // (spring-cloud-gateway writes version first, spring-cloud-task writes api first),
+          // ref is a versioned URL on the older lines and a static one on the newer, and
+          // githubTag carries a v prefix in most files but not all. The newest entry on the
+          // line is the only reliable statement of what this project's entries look like now.
+          //
+          // Splicing at line level is safe because every file in that repository is laid out
+          // identically: one entry per '  {' ... '  }' block, one field per line. A file that
+          // is not is reported rather than guessed at.
+          const NUMERIC = /^\d+(\.\d+)*$/;
+          const entryBlocks = fileLines => {
+            const blocks = [];
+            let start = -1;
+            for (let i = 0; i < fileLines.length; i++) {
+              if (fileLines[i] === '  {') start = i;
+              else if (start >= 0 && (fileLines[i] === '  }' || fileLines[i] === '  },')) {
+                blocks.push({ start, end: i });
+                start = -1;
+              }
+            }
+            return blocks;
+          };
+
+          for (const e of (commercial ? releasedCommercially : [])) {
+            const rel = `project/${docFor(e.key)}/documentation.json`;
+            const file = `website/${rel}`;
+            const rec = {
+              project: e.key, file: rel, added: '', from: '', fallback: false,
+              legacyTemplate: false, status: 'unchanged',
+            };
+            result.docs.push(rec);
+
+            // spring-cloud-build has no page on the site, so it has no file here.
+            if (!fs.existsSync(file)) {
+              rec.status = 'no-file';
+              console.log(`${rel}: not on the site - skipped.`);
+              continue;
+            }
+
+            const original = fs.readFileSync(file, 'utf8');
+            let list;
+            try {
+              list = JSON.parse(original);
+            } catch (err) {
+              rec.status = 'unparseable';
+              console.log(`${rel}: could not be parsed - skipped.`);
+              continue;
+            }
+
+            const lines = original.split('\n');
+            const blocks = entryBlocks(lines);
+            if (blocks.length !== list.length) {
+              rec.status = 'unrecognised-format';
+              console.log(`${rel}: ${list.length} entries but ${blocks.length} recognised ` +
+                'blocks - skipped.');
+              continue;
+            }
+
+            // Idempotent on its own: a version carried over from an earlier train was
+            // documented when it was released, and is left exactly as it is.
+            if (list.some(x => x.version === e.version)) {
+              rec.status = 'already-listed';
+              console.log(`${rel}: ${e.version} is already listed.`);
+              continue;
+            }
+
+            const target = lineOf(e.version);
+            const usable = list
+              .map((x, i) => i)
+              .filter(i => NUMERIC.test(list[i].version || ''));
+            const newest = candidates => candidates.reduce(
+              (best, i) => (best < 0 || cmp(list[i].version, list[best].version) > 0 ? i : best),
+              -1);
+
+            // A version in a ref means the pre-Antora docs layout, where every version was
+            // published under its own path. Antora URLs carry no version at all.
+            const versionInRef = x => {
+              const ref = x.ref || '';
+              return ref.includes('{version}') || (!!x.version && ref.includes(x.version));
+            };
+
+            let anchor = newest(usable.filter(i => lineOf(list[i].version) === target));
+            if (anchor < 0) {
+              // No entry on this line yet, so this is the first commercial release of a new
+              // line - which means Antora, which means the ref must not carry a version. So
+              // the template has to be an entry whose ref already has none, even if a legacy
+              // entry is newer: cloning a .../docs/<version>/reference/html/ ref would
+              // substitute this version into a path that only exists for the old layout.
+              rec.fallback = true;
+              anchor = newest(usable.filter(i => !versionInRef(list[i])));
+              if (anchor < 0) {
+                // Nothing but legacy entries in the whole file. Every project in a current
+                // train has an Antora entry by now, so this is either a project long retired
+                // or one being documented with Antora for the first time - and the ref needs
+                // writing by hand either way, so the PR says so.
+                anchor = newest(usable);
+                rec.legacyTemplate = true;
+              }
+            }
+            if (anchor < 0) {
+              rec.status = 'no-template';
+              console.log(`${rel}: no entry to clone one from - skipped.`);
+              continue;
+            }
+
+            const template = list[anchor];
+            // Bounded so a template version of 4.1.1 cannot rewrite the 4.1.10 next to it,
+            // and unbounded enough that the v of githubTag and the slashes around a versioned
+            // ref path do not stop it matching.
+            const bounded = new RegExp(
+              `(?<![\\d.])${template.version.replace(/\./g, '\\.')}(?![\\d.])`, 'g');
+            const block = lines.slice(blocks[anchor].start, blocks[anchor].end + 1)
+              .map(l => l.replace(bounded, e.version));
+
+            // Where it goes: alongside the newest entry on its line, on whichever side keeps
+            // that group's own ordering. The groups are contiguous but not consistently
+            // sorted - the 4.1 group in spring-cloud-config runs 4.1.10, 4.1.9, 4.1.8 - and
+            // following the local direction is what keeps this to one added block sitting
+            // with its siblings rather than a reordering of the file.
+            let first = list.length - 1, last = list.length - 1;
+            if (!rec.fallback) {
+              first = last = anchor;
+              while (first > 0 && lineOf(list[first - 1].version) === target) first--;
+              while (last < list.length - 1 && lineOf(list[last + 1].version) === target) last++;
+            }
+
+            if (cmp(list[first].version, list[last].version) > 0) {
+              block[block.length - 1] = '  },';
+              lines.splice(blocks[first].start, 0, ...block);
+            } else if (lines[blocks[last].end] === '  }') {
+              // Going in after the array's last entry, which moves the trailing comma onto it.
+              lines[blocks[last].end] = '  },';
+              block[block.length - 1] = '  }';
+              lines.splice(blocks[last].end + 1, 0, ...block);
+            } else {
+              block[block.length - 1] = '  },';
+              lines.splice(blocks[last].end + 1, 0, ...block);
+            }
+
+            // The splice is a text edit, so prove the result is still the same JSON plus one
+            // entry before writing it. Cheap, and the alternative is a broken site.
+            const updated = lines.join('\n');
+            let check = null;
+            try { check = JSON.parse(updated); } catch (err) { /* check stays null */ }
+            if (!check || check.length !== list.length + 1 ||
+                !check.some(x => x.version === e.version)) {
+              rec.status = 'error';
+              console.log(`${rel}: the edit did not produce the expected JSON - left alone.`);
+              continue;
+            }
+
+            fs.writeFileSync(file, updated);
+            rec.status = 'added';
+            rec.added = e.version;
+            rec.from = template.version;
+            console.log(`${rel}: added ${e.version}, cloned from ${template.version}` +
+              (rec.fallback ? ` - first ${target} entry` : '') +
+              (rec.legacyTemplate ? ', and only pre-Antora refs to clone - CHECK THE REF' : ''));
+          }
+
+          // ── d2. the OSS site: the versions bumped in place ─────────────────────────
           // Applied to every project in the train, not just the ones that moved: a project
           // whose version is unchanged simply produces no diff, and its snapshot entry still
           // has to follow the new snapshot train. Each file holds one GENERAL_AVAILABILITY
           // and one SNAPSHOT entry per major.minor line, so the released version's line
           // picks out exactly the two entries to update.
-          const docFor = key => key === 'spring-cloud-release' ? 'spring-cloud' : key;
-          const lineOf = v => v.split('.').slice(0, 2).join('.');
-
-          for (const e of projects) {
+          for (const e of (commercial ? [] : projects)) {
             const rel = `project/${docFor(e.key)}/documentation.json`;
             const file = `website/${rel}`;
             const rec = { project: e.key, file: rel, ga: '', snapshot: '', status: 'unchanged' };
@@ -1811,7 +2029,7 @@ jobs:
           const staged = git(['diff', '--cached', '--name-only'], 'website').trim();
           if (!staged) {
             finish('no-changes',
-              'The website already has this blog post and these versions - nothing to do.');
+              'The site already documents these versions - nothing to do.');
           }
 
           console.log('');
@@ -1819,13 +2037,13 @@ jobs:
           console.log(staged);
           fs.writeFileSync('website-changes.diff', git(['diff', '--cached'], 'website'));
 
-          const docRows = result.docs
-            .filter(d => d.ga || d.snapshot)
-            .map(d => `| \`${d.project}\` | ${d.ga || '—'} | ${d.snapshot || '—'} |`);
+          const title = commercial
+            ? `Update documentation for Spring Cloud ${releaseVersion} commercial release`
+            : `Spring Cloud ${releaseVersion} release updates`;
 
           const P = [];
           P.push(`Generated by the [post release workflow](${runUrl}) for Spring Cloud ` +
-            `${releaseVersion}.`);
+            `${releaseVersion}${commercial ? ' (commercial)' : ''}.`);
           P.push('');
           // Only when this run wrote the post. When one already existed the PR is nothing but
           // documentation.json bumps, and a checklist about a file it does not touch would
@@ -1852,16 +2070,41 @@ jobs:
               'this PR only carries the documentation versions.');
             P.push('');
           }
-          if (docRows.length) {
+          const added = result.docs.filter(d => d.status === 'added');
+          const bumped = result.docs.filter(d => d.ga || d.snapshot);
+          if (added.length) {
+            P.push('### documentation.json');
+            P.push('');
+            P.push('One new `GENERAL_AVAILABILITY` entry per project released in this train, ' +
+              'each cloned from an existing entry so it keeps that project\'s `ref` and ' +
+              '`githubTag` conventions — the newest on the same line, or the newest with an ' +
+              'Antora `ref` when the line is new.');
+            P.push('');
+            P.push('| Project | Added | Cloned from |');
+            P.push('|---|---|---|');
+            for (const d of added) {
+              // Cloning across lines is normal for the first release of a line and needs no
+              // comment - the ref it copied carries no version, so it is right as it stands.
+              // Having had nothing but pre-Antora entries to clone from does need one.
+              P.push(`| \`${d.project}\` | ${d.added} | ${d.from}` +
+                `${d.legacyTemplate ? ' — **only pre-Antora `ref`s in this file, check it**' : ''} |`);
+            }
+            P.push('');
+          }
+          if (bumped.length) {
             P.push('### documentation.json');
             P.push('');
             P.push('| Project | General availability | Snapshot |');
             P.push('|---|---|---|');
-            P.push(...docRows);
+            for (const d of bumped) {
+              P.push(`| \`${d.project}\` | ${d.ga || '—'} | ${d.snapshot || '—'} |`);
+            }
             P.push('');
           }
           const problemDocs = result.docs.filter(d =>
-            d.status === 'ambiguous' || d.status === 'unparseable' || d.status === 'no-entry');
+            d.status === 'ambiguous' || d.status === 'unparseable' || d.status === 'no-entry' ||
+            d.status === 'unrecognised-format' || d.status === 'no-template' ||
+            d.status === 'error');
           if (problemDocs.length) {
             P.push('### Needs a look');
             P.push('');
@@ -1881,15 +2124,13 @@ jobs:
             finish('would-create');
           }
 
-          git(['commit', '--quiet', '-m', `Spring Cloud ${releaseVersion} release updates`],
-            'website');
+          git(['commit', '--quiet', '-m', title], 'website');
           git(['push', '--quiet', 'origin', `HEAD:refs/heads/${branch}`], 'website');
           console.log(`Pushed ${branch} to ${WEBSITE}.`);
 
           fs.writeFileSync('pr-body.md', body);
           result.prUrl = gh(['pr', 'create', '--repo', WEBSITE, '--base', BASE, '--head', branch,
-            '--title', `Spring Cloud ${releaseVersion} release updates`,
-            '--body-file', 'pr-body.md']).trim().split('\n').pop();
+            '--title', title, '--body-file', 'pr-body.md']).trim().split('\n').pop();
           console.log(`Opened ${result.prUrl}`);
           finish('created');
           JSEOF
@@ -1982,7 +2223,7 @@ jobs:
                         : '## Post-release summary');
           L.push('');
           L.push(`Release **${releaseVersion}** · ${commercial ? 'commercial' : 'OSS'}` +
-            (hotfix ? ' · **hotfix** (steps after the release are skipped)' : '') +
+            (hotfix ? ' · **hotfix** (no snapshot train, new milestone or merge back)' : '') +
             (filter ? ` · filtered to \`${filter}\`` : '') +
             (skipCloseMilestones ? ' · **milestones left open** (`skip_close_milestones`)' : ''));
           L.push('');
@@ -2101,16 +2342,32 @@ jobs:
             if (web.blogFile) {
               L.push(`- blog post \`${web.blogFile}\` — ${web.blogStatus}`);
             }
-            const touched = (web.docs || []).filter(d => d.ga || d.snapshot);
-            L.push(`- \`documentation.json\` — ${touched.length} project(s) updated`);
-            L.push(web.previousFile
-              ? `- modules listed: everything that changed since \`${web.previousFile}\``
-              : '- modules listed: every project in the train — there was no earlier ' +
-                'properties file on this line to compare against');
-            // Anything the version bump could not be applied to cleanly. Reported rather than
-            // failed: the PR is still worth having with one file left for a human.
-            const odd = (web.docs || []).filter(d =>
-              d.status === 'ambiguous' || d.status === 'unparseable' || d.status === 'no-entry');
+            const docs = web.docs || [];
+            // The commercial site is appended to, the OSS site is edited in place, so the two
+            // have nothing to report in common.
+            const addedDocs = docs.filter(d => d.status === 'added');
+            if (addedDocs.length || commercial) {
+              L.push(`- \`documentation.json\` — ${addedDocs.length} new ` +
+                `${addedDocs.length === 1 ? 'entry' : 'entries'}`);
+              for (const d of addedDocs.filter(d => d.legacyTemplate)) {
+                L.push(`  - ⚠️ \`${d.project}\` ${d.added} — this file has nothing but ` +
+                  'pre-Antora entries, so its `ref` was cloned from ' +
+                  `\`${d.from}\` and carries a version in the path. Check it.`);
+              }
+            } else {
+              const touched = docs.filter(d => d.ga || d.snapshot);
+              L.push(`- \`documentation.json\` — ${touched.length} project(s) updated`);
+              L.push(web.previousFile
+                ? `- modules listed: everything that changed since \`${web.previousFile}\``
+                : '- modules listed: every project in the train — there was no earlier ' +
+                  'properties file on this line to compare against');
+            }
+            // Anything the edit could not be applied to cleanly. Reported rather than failed:
+            // the PR is still worth having with one file left for a human.
+            const odd = docs.filter(d =>
+              d.status === 'ambiguous' || d.status === 'unparseable' || d.status === 'no-entry' ||
+              d.status === 'unrecognised-format' || d.status === 'no-template' ||
+              d.status === 'error');
             for (const d of odd) L.push(`- ⚠️ \`${d.file}\` — ${d.status}`);
             L.push('');
             if (web.blogStatus === 'created') {
