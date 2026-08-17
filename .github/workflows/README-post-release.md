@@ -1,6 +1,6 @@
 # Post Release Workflow
 
-An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, seeding the next snapshot config, opening the next round of milestones, merging release branches back from the commercial repo, bumping the maintenance branches to the new snapshot versions, pushing the release tags into the OSS repos, closing milestones, publishing GitHub releases, nudging Dependabot to drop PRs the release has superseded, and opening the website PR that documents the released versions — with the announcement blog post too, on an OSS train.
+An on-demand workflow that performs the chores that follow a Spring Cloud release train: verifying every project was actually tagged, seeding the next snapshot config, opening the next round of milestones, merging release branches back from the commercial repo, bumping the maintenance branches to the new snapshot versions, pushing the release tags into the OSS repos, closing milestones, publishing GitHub releases, nudging Dependabot to drop PRs the release has superseded, opening the website PR that documents the released versions — with the announcement blog post too, on an OSS train — and bumping the Spring Cloud version on start.spring.io.
 
 Previously all of this was done by hand, repo by repo, for up to 17 projects.
 
@@ -15,7 +15,8 @@ It:
 5. **Merges `release/<version>` back into the `.x` branch** from the commercial repo, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, **pushes the release tag into the OSS repo**, and comments `@dependabot recreate` on superseded Dependabot PRs
 6. **Closes the release milestone** and **publishes the GitHub release** for each tag — `skip_close_milestones` leaves the milestones open and still publishes the releases
 7. **Opens a PR against the website content repository** — the blog post and the `documentation.json` version bumps on the OSS site, a new `documentation.json` entry per released project on the commercial one, see [The website PR](#the-website-pr)
-8. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
+8. **Opens a PR against [start.spring.io](https://github.com/spring-io/start.spring.io)** bumping the Spring Cloud version the Initializr offers — OSS only, see [The start.spring.io PR](#the-startspringio-pr)
+9. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
 
 Step 5's version bump also exists on its own, as [update-versions](README-update-versions.md) — for when the projects have to move to a train's versions before, or independently of, a post-release run. The normal end-of-release path is still this workflow; running that one first is not required.
 
@@ -70,6 +71,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 | `projects` | Comma-separated project names, `-commercial` suffix included where applicable. Empty processes every project in the properties file. See [The projects filter](#the-projects-filter). | No | string |
 | `skip_close_milestones` | Leave the release milestones open. Nothing else changes — the releases are still published, the next round of milestones is still opened, and the merge back still runs. Use it when issues are still being moved between milestones, then re-run with it unchecked (closing a milestone is idempotent, and everything else is a no-op the second time). | No | boolean (default: `false`) |
 | `skip_website_pr` | Skip the [website PR](#the-website-pr). It is already skipped for a run with `projects` set. | No | boolean (default: `false`) |
+| `skip_start_site_pr` | Skip the [start.spring.io PR](#the-startspringio-pr). It is already skipped for a commercial run, a hotfix, and a run with `projects` set. | No | boolean (default: `false`) |
 | `dry_run` | When checked, nothing is created, committed or pushed — but the summary shows what would happen. | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
@@ -77,7 +79,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 | Secret | Description | Required |
 |--------|-------------|----------|
-| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there — and, for the website PR, push and pull-request access to `spring-io/spring-website-content` on an OSS run or `spring-io/spring-website-commercial-content` on a commercial one. | Yes, unless `token` is passed |
+| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there — and, for the website PR, push and pull-request access to `spring-io/spring-website-content` on an OSS run or `spring-io/spring-website-commercial-content` on a commercial one, plus `spring-io/start.spring.io` on an OSS run. | Yes, unless `token` is passed |
 | `SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK` | Incoming webhook URL for the Google Chat space to notify when the run finishes. If unset, the step logs that it is skipping and the run still succeeds. Never used on a dry run. | No |
 
 Cross-repo writes rely entirely on this token — the workflow's own `permissions:` block is `contents: read`.
@@ -364,6 +366,49 @@ Blocks are fenced with more backticks than they contain, because the blog post i
 
 The complete diff is also uploaded as the `website-changes` artifact, and on a dry run the PR body is printed to the log.
 
+## The start.spring.io PR
+
+A one-line PR against [spring-io/start.spring.io](https://github.com/spring-io/start.spring.io), on a branch named `<version>-release`, titled `Upgrade to Spring Cloud <version>` — the shape of [PR #2139](https://github.com/spring-io/start.spring.io/pull/2139).
+
+**OSS only.** start.spring.io serves the public Initializr, so a commercial version has no place in it. Also skipped for a hotfix, when `projects` is set, and when `skip_start_site_pr` is checked.
+
+The version lives in `start-site/src/main/resources/application.yml`, in one mapping under the `spring-cloud` bom. Each mapping pins a Spring Cloud version to a range of Spring Boot versions:
+
+```yaml
+      spring-cloud:
+        groupId: org.springframework.cloud
+        artifactId: spring-cloud-dependencies
+        versionProperty: spring-cloud.version
+        order: 50
+        mappings:
+          - compatibilityRange: "[4.0.0,4.2.0-M1)"
+            version: 2025.1.2
+```
+
+The mapping already on the released train's `major.minor` line is bumped, and nothing else — the `compatibilityRange` is untouched.
+
+**Scoped to that bom by reading the file, not by pattern.** Half a dozen boms in that file are called `spring-cloud`-something — `spring-cloud-azure`, `spring-cloud-gcp`, `spring-cloud-services`, `solace-spring-cloud` — and each has `version:` lines of its own. The block is found by its unique `artifactId: spring-cloud-dependencies` line, then bounded by indentation: its key is the nearest line above indented less than it, and the block runs to the next line indented no further than that key. Only `version:` lines inside those bounds are considered, so a reindentation upstream cannot silently retarget this at a neighbour.
+
+### When the line has no mapping
+
+**No PR is opened, and the run says so.** A new mapping needs a `compatibilityRange` declaring which Spring Boot versions the train supports, and that is a judgement nothing here can make.
+
+This is not hypothetical: as of writing, the only mapping is `[4.0.0,4.2.0-M1) → 2025.1.2`, so a `2025.1.x` release bumps it and **a `2025.0.x` release has nothing to bump** — Boot 3.5 has aged off the site. It happens the other way round too, for the first release of a brand-new train line.
+
+The summary gets its own **start.spring.io PR** section spelling out the reason and listing what is currently mapped, and the Google Chat message carries a `Needs attention` bullet and a ⚠️ header.
+
+**It does not fail the run.** Nothing is half-done — the workflow made the right decision and reported it — and a train line that has legitimately aged off the site would otherwise turn every one of its releases red. Everything that *does* fail the run still does.
+
+### Other outcomes
+
+| Status | Meaning |
+|--------|---------|
+| `created` / `would-create` | the mapping was bumped; the diff is in the job's own summary |
+| `already-current` | the mapping already names this version — a re-run, or a hand-made PR that already landed |
+| `branch-exists` | `<version>-release` is already in the repo; it is left alone and the existing PR is linked |
+| `no-mapping` | ⚠️ nothing to bump, see above |
+| `file-not-found` / `bom-not-found` | ❌ `application.yml` moved, or the `spring-cloud` bom is no longer identifiable in it |
+
 ## Output
 
 The job summary has one table per phase. Because most steps are no-ops when their target already exists, the icons distinguish *did it* from *it was already done* — otherwise a run that changed nothing would look identical to one that did all the work.
@@ -375,7 +420,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — a **start.spring.io PR** section, and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 
@@ -416,7 +461,7 @@ Notes on this:
 - `update-project-versions` is called with `release-train-version` rather than an explicit versions map, because only that path applies `project-version-substitutions` (which maps `spring-cloud-dependencies-parent` → `spring-cloud-build`, `verifierVersion` → `spring-cloud-contract`, and so on). That path resolves over `raw.githubusercontent.com`, which is CDN-cached, so after committing the snapshot file the workflow waits for the raw URL to serve it before any project is updated. If the CDN never catches up, version updates are skipped rather than applied from a stale file, and the run can simply be repeated.
 - Tag existence is checked with `git/matching-refs` and an exact comparison, not a plain `git/refs/tags/<tag>` lookup, which would also prefix-match `v5.0.20` when asked for `v5.0.2`.
 - `max-parallel: 8` keeps the fan-out from saturating the runner pool; `fail-fast: false` so one bad project does not abandon the rest.
-- Step 4 (new milestones) and step 5 (merge back, bump and tag) run in parallel — neither depends on the other. Step 6 waits on step 5, because that is where the tag arrives, and step 7 waits on step 6, because the blog post links to the releases it publishes.
+- Step 4 (new milestones) and step 5 (merge back, bump and tag) run in parallel — neither depends on the other. Step 6 waits on step 5, because that is where the tag arrives, and steps 7 and 8 wait on step 6 — the blog post links to the releases it publishes, and neither PR should be opened for a release that did not complete.
 
 ## Related workflows
 

@@ -76,6 +76,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_start_site_pr:
+        description: 'Skip the start.spring.io PR that bumps the Spring Cloud version. OSS releases only.'
+        required: false
+        type: boolean
+        default: false
       token:
         description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
@@ -2289,9 +2294,243 @@ jobs:
           path: website-changes.diff
           if-no-files-found: ignore
 
+  # ── start.spring.io ──────────────────────────────────────────────────────────────────
+  # A one-line PR against start.spring.io bumping the Spring Cloud version the Initializr
+  # offers, on a branch named <version>-release.
+  #
+  # OSS only: start.spring.io serves the public Initializr, and a commercial version has
+  # no place in it.
+  #
+  # The version lives in one mapping under the spring-cloud bom, each mapping pinning a
+  # Spring Cloud version to a range of Spring Boot versions:
+  #
+  #   spring-cloud:
+  #     artifactId: spring-cloud-dependencies
+  #     mappings:
+  #       - compatibilityRange: "[4.0.0,4.2.0-M1)"
+  #         version: 2025.1.2
+  #
+  # This bumps the mapping already on the released train's line and nothing else. When that
+  # line has no mapping at all - a new train line, or one whose Boot range has aged off the
+  # site, as 2025.0 has - the compatibilityRange a new mapping needs is a judgement nobody
+  # here can make, so the run reports it and opens no PR.
+  start-site-pr:
+    name: start.spring.io PR
+    needs: [setup, verify-tags, milestones-and-releases]
+    if: |
+      !cancelled() &&
+      needs.verify-tags.result == 'success' &&
+      needs.setup.outputs.commercial != 'true' &&
+      needs.setup.outputs.hotfix != 'true' &&
+      inputs.skip_start_site_pr != true &&
+      inputs.projects == ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bump the Spring Cloud version and open the PR
+        id: run
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const token = process.env.GH_TOKEN;
+          const releaseVersion = process.env.RELEASE_VERSION;
+          const dryRun = process.env.DRY_RUN === 'true';
+          const runUrl = process.env.RUN_URL || '';
+
+          const REPO = 'spring-io/start.spring.io';
+          const BASE = 'main';
+          const FILE = 'start-site/src/main/resources/application.yml';
+          // The one line that identifies the Spring Cloud bom among the dozen boms in that
+          // file, several of which are also called spring-cloud-something.
+          const ANCHOR = /^\s*artifactId:\s*spring-cloud-dependencies\s*$/;
+          const VERSION_RE = /^(\s*version:\s*)(["']?)([^"'\s]+)\2(\s*)$/;
+
+          const gh = args => execFileSync('gh', args,
+            { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+          const git = (args, cwd) => execFileSync('git', args,
+            { encoding: 'utf8', cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+
+          const branch = `${releaseVersion}-release`;
+          const result = {
+            phase: 'start-site-pr', repo: REPO, branch, file: FILE, status: 'skipped',
+            from: '', to: releaseVersion, prUrl: '', mappings: [],
+          };
+          const out = process.env.GITHUB_OUTPUT;
+          const finish = (status, message) => {
+            if (message) console.log(message);
+            result.status = status;
+            fs.writeFileSync('result-startsite.json', JSON.stringify(result));
+            fs.appendFileSync(out, `status=${status}\n`);
+            process.exit(0);
+          };
+
+          const lineOf = v => v.split('.').slice(0, 2).join('.');
+          const target = lineOf(releaseVersion);
+
+          // ── a. is there already a branch for this release? ──────────────────────────
+          let branchExists = false;
+          try {
+            gh(['api', `repos/${REPO}/branches/${branch}`, '--jq', '.name']);
+            branchExists = true;
+          } catch (err) { /* no branch yet */ }
+
+          if (branchExists) {
+            try {
+              const prs = JSON.parse(gh(['api',
+                `repos/${REPO}/pulls?head=spring-io:${branch}&state=all&per_page=1`]));
+              if (prs.length) result.prUrl = prs[0].html_url;
+            } catch (err) { /* leave the url empty */ }
+            finish('branch-exists',
+              `${branch} already exists in ${REPO} - leaving it alone. ${result.prUrl}`);
+          }
+
+          // ── b. find the mapping for this train line ─────────────────────────────────
+          console.log(`Cloning ${REPO}@${BASE}...`);
+          git(['clone', '--quiet', '--depth', '1', '--branch', BASE,
+            `https://x-access-token:${token}@github.com/${REPO}.git`, 'start']);
+
+          const path = `start/${FILE}`;
+          if (!fs.existsSync(path)) {
+            finish('file-not-found', `${FILE} is not in ${REPO} - it has moved.`);
+          }
+
+          const original = fs.readFileSync(path, 'utf8');
+          const lines = original.split('\n');
+          const indentOf = l => l.match(/^(\s*)/)[1].length;
+
+          const anchor = lines.findIndex(l => ANCHOR.test(l));
+          if (anchor < 0) {
+            finish('bom-not-found',
+              `Could not find the spring-cloud bom in ${FILE} - no line matching ` +
+              '"artifactId: spring-cloud-dependencies".');
+          }
+
+          // The bom's own key is the nearest earlier line indented less than its body, and
+          // the block runs to the next line indented no further than that key. Read from the
+          // file rather than assumed, so a reindentation upstream does not silently retarget
+          // this at the neighbouring bom.
+          const bodyIndent = indentOf(lines[anchor]);
+          let keyLine = -1;
+          for (let i = anchor - 1; i >= 0; i--) {
+            if (!lines[i].trim()) continue;
+            if (indentOf(lines[i]) < bodyIndent) { keyLine = i; break; }
+          }
+          if (keyLine < 0) finish('bom-not-found', `Could not find the key above ${FILE}:${anchor + 1}.`);
+          const keyIndent = indentOf(lines[keyLine]);
+
+          let blockEnd = lines.length;
+          for (let i = anchor + 1; i < lines.length; i++) {
+            if (!lines[i].trim()) continue;
+            if (indentOf(lines[i]) <= keyIndent) { blockEnd = i; break; }
+          }
+          console.log(`spring-cloud bom: ${FILE}:${keyLine + 1}-${blockEnd}`);
+
+          const mappings = [];
+          for (let i = keyLine + 1; i < blockEnd; i++) {
+            const m = lines[i].match(VERSION_RE);
+            if (m) mappings.push({ index: i, version: m[3], prefix: m[1], quote: m[2], trail: m[4] });
+          }
+          result.mappings = mappings.map(m => m.version);
+          console.log(`Versions currently mapped: ${result.mappings.join(', ') || 'none'}`);
+
+          const hit = mappings.find(m => lineOf(m.version) === target);
+          if (!hit) {
+            // Deliberately not a PR. A new mapping needs a compatibilityRange saying which
+            // Spring Boot versions this train supports, and that is not derivable from
+            // anything this workflow reads.
+            finish('no-mapping',
+              `No ${target}.x mapping in ${FILE} - start.spring.io does not currently offer ` +
+              `this train line. Add a mapping with the right compatibilityRange by hand; ` +
+              'nothing was changed.');
+          }
+
+          result.from = hit.version;
+          if (hit.version === releaseVersion) {
+            finish('already-current',
+              `${FILE} already maps ${target}.x to ${releaseVersion}.`);
+          }
+
+          // ── c. the one-line change ─────────────────────────────────────────────────
+          lines[hit.index] = `${hit.prefix}${hit.quote}${releaseVersion}${hit.quote}${hit.trail}`;
+          fs.writeFileSync(path, lines.join('\n'));
+          console.log(`${FILE}:${hit.index + 1}  ${hit.version} -> ${releaseVersion}`);
+
+          git(['config', 'user.name', 'Spring Builds'], 'start');
+          git(['config', 'user.email', 'svc.spring-builds@broadcom.com'], 'start');
+          git(['checkout', '--quiet', '-b', branch], 'start');
+          git(['add', '-A'], 'start');
+
+          const diff = git(['diff', '--cached'], 'start');
+          console.log('');
+          console.log(diff);
+
+          const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+          if (summaryFile) {
+            fs.appendFileSync(summaryFile, [
+              `## start.spring.io${dryRun ? ' — dry run, nothing was pushed' : ''}`,
+              '',
+              `\`${REPO}\` · \`${branch}\` · \`${FILE}\` line ${hit.index + 1}: ` +
+                `\`${hit.version}\` → \`${releaseVersion}\``,
+              '',
+              '```diff',
+              diff.replace(/\n+$/, ''),
+              '```',
+              '',
+            ].join('\n'));
+          }
+
+          const title = `Upgrade to Spring Cloud ${releaseVersion}`;
+          const body = [
+            `Generated by the [post release workflow](${runUrl}).`,
+            '',
+            `Spring Cloud ${releaseVersion} has been released, so the \`spring-cloud\` bom ` +
+              `mapping for the ${target} line moves from \`${hit.version}\` to ` +
+              `\`${releaseVersion}\`. The \`compatibilityRange\` is unchanged.`,
+          ].join('\n');
+
+          if (dryRun) {
+            console.log(`[dry run] would open '${title}' from ${branch}.`);
+            finish('would-create');
+          }
+
+          git(['commit', '--quiet', '-m', title], 'start');
+          git(['push', '--quiet', 'origin', `HEAD:refs/heads/${branch}`], 'start');
+          console.log(`Pushed ${branch} to ${REPO}.`);
+
+          fs.writeFileSync('pr-body.md', body);
+          result.prUrl = gh(['pr', 'create', '--repo', REPO, '--base', BASE, '--head', branch,
+            '--title', title, '--body-file', 'pr-body.md']).trim().split('\n').pop();
+          console.log(`Opened ${result.prUrl}`);
+          finish('created');
+          JSEOF
+
+      # As in the website job: the script records a result on every path it exits through
+      # deliberately, and this covers the one it does not.
+      - name: Record failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [[ ! -f result-startsite.json ]]; then
+            printf '%s' '{"phase":"start-site-pr","status":"error"}' > result-startsite.json
+          fi
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-startsite
+          path: result-startsite.json
+          if-no-files-found: ignore
+
   summary:
     name: Summary
-    needs: [setup, verify-tags, milestones-and-releases, next-snapshot-config, new-milestones, merge-back-and-update, website-pr]
+    needs: [setup, verify-tags, milestones-and-releases, next-snapshot-config, new-milestones, merge-back-and-update, website-pr, start-site-pr]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -2342,6 +2581,7 @@ jobs:
           const mb = byPhase('merge-back-and-update');
           const sc = all.find(r => r.phase === 'next-snapshot-config');
           const web = all.find(r => r.phase === 'website-pr');
+          const start = all.find(r => r.phase === 'start-site-pr');
 
           const L = [];
           L.push(dryRun ? '## Post-release summary (dry run — nothing was changed)'
@@ -2366,6 +2606,9 @@ jobs:
             'nothing-to-push': '➖', 'no-release-branch': '➖',
             // website-pr
             'branch-exists': '➖', 'no-changes': '➖',
+            // start-site-pr
+            'already-current': '➖', 'no-mapping': '⚠️',
+            'file-not-found': '❌', 'bom-not-found': '❌',
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
             skipped: '⏭️', 'skipped-by-request': '⏭️',
             'merge-conflict': '❌', 'branch-not-found': '❌',
@@ -2507,6 +2750,34 @@ jobs:
             }
           }
 
+          if (start) {
+            L.push('### start.spring.io PR');
+            L.push('');
+            const link = start.prUrl ? `[${start.status}](${start.prUrl})` : `**${start.status}**`;
+            L.push(`${icon(start.status)} \`${start.repo}\` — ${link} on \`${start.branch}\``);
+            L.push('');
+            if (start.status === 'no-mapping') {
+              // The one outcome that needs a person. Spelled out rather than left as a status
+              // word, because doing nothing was the right call and the reason matters.
+              L.push(`**No mapping for the ${releaseVersion.split('.').slice(0, 2).join('.')} ` +
+                'line, so no PR was opened.** `start.spring.io` pins a Spring Cloud version ' +
+                'per Spring Boot `compatibilityRange`, and this train line has no mapping to ' +
+                'bump — either it is new to the site, or its Boot range has aged off it.');
+              L.push('');
+              L.push('Adding one means choosing that `compatibilityRange`, which is a ' +
+                'judgement this workflow cannot make. Edit `' + start.file + '` by hand if ' +
+                'this release should be on the site.');
+              L.push('');
+              if (start.mappings && start.mappings.length) {
+                L.push(`Currently mapped: ${start.mappings.map(v => `\`${v}\``).join(', ')}.`);
+                L.push('');
+              }
+            } else if (start.from) {
+              L.push(`\`${start.file}\` — \`${start.from}\` → \`${start.to}\``);
+              L.push('');
+            }
+          }
+
           const blocked = mb.filter(r => r.mergeStatus === 'merge-conflict');
           // Git could not reach the repository at all, after retrying. Counted as a problem
           // like any other half-done project: the alternative is a row of "skipped" that reads
@@ -2614,8 +2885,12 @@ jobs:
           // the data already is, and handed to the posting step as one value.
           const problems =
             blocked.length + unreachable.length + branchFailed.length + noTag.length;
+          // Called out in the message but deliberately not counted as a problem: nothing is
+          // half-done, the run made the right decision, and a train line that has aged off
+          // start.spring.io would otherwise turn every one of its releases red.
+          const startNeedsAttention = !!start && start.status === 'no-mapping';
           const C = [];
-          C.push(`${problems ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
+          C.push(`${problems || startNeedsAttention ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
             `(${commercial ? 'commercial' : 'OSS'}${hotfix ? ', hotfix' : ''})` +
             (filter ? ` · only ${filter}` : '') +
             (skipCloseMilestones ? ' · milestones left open' : ''));
@@ -2640,6 +2915,8 @@ jobs:
             'version-mismatch': 'version mismatch', 'no-version': 'no version',
             error: 'errored', skipped: 'not reached', unknown: 'unknown',
             'branch-exists': 'branch already existed, left alone', 'no-changes': 'nothing to change',
+            'already-current': 'already up to date', 'no-mapping': 'NO MAPPING - nothing opened',
+            'file-not-found': 'application.yml has moved', 'bom-not-found': 'could not find the bom',
             'no-tag': 'NO TAG - not published', 'not-reachable': 'tag not reachable',
             'fetch-failed': 'tag fetch failed',
             'no-tag-dry-run': 'would publish once the tag lands (dry run)',
@@ -2672,18 +2949,33 @@ jobs:
           // the tag was already in place - does not report a line of "not reached".
           const tagged = mb.filter(r => r.resolvedIn === 'commercial-pending');
           if (tagged.length) tally('Tags pushed', tagged, 'tagStatus');
+          // "would publish" is right for a release and wrong for a pull request, so both of
+          // these say what they actually do.
+          const PR_PHRASE = { created: 'PR opened', 'would-create': 'would open a PR (dry run)' };
           if (web) {
-            C.push(`Website PR: ${phrase(web.status)}` +
+            C.push(`Website PR: ${phrase(web.status, PR_PHRASE)}` +
               (web.prUrl ? ` — <${web.prUrl}|${web.repo}>` : ''));
+          }
+          if (start) {
+            C.push(`start.spring.io: ${phrase(start.status, PR_PHRASE)}` +
+              (start.from ? ` (${start.from} → ${start.to})` : '') +
+              (start.prUrl ? ` — <${start.prUrl}|PR>` : ''));
           }
           const kept = n(mb, r => r.restored || r.autoResolved);
           if (kept) C.push(`CI/PR workflow files kept from the maintenance branch: ${kept} project(s)`);
           const nudged = mb.reduce((sum, r) => sum + (Number(r.dependabotCommented) || 0), 0);
           if (nudged) C.push(`Dependabot: ${nudged} PR(s) asked to recreate`);
 
-          if (problems) {
+          if (problems || startNeedsAttention) {
             C.push('');
-            C.push(`*${problems} project(s) need attention:*`);
+            C.push(problems
+              ? `*${problems} project(s) need attention:*`
+              : '*Needs attention:*');
+            if (startNeedsAttention) {
+              C.push(`• start.spring.io has no mapping for the ` +
+                `${releaseVersion.split('.').slice(0, 2).join('.')} line, so no PR was ` +
+                'opened - adding one means choosing a compatibilityRange by hand');
+            }
             for (const r of blocked) {
               C.push(`• ${r.repo} — blocked on a manual merge of release/${r.version} into ${r.branch}`);
             }
