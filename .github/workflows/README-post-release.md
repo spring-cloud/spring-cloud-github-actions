@@ -59,7 +59,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 **Defaults to a dry run.** Set `dry_run` to `false` to actually close, create, commit and push.
 
-**The workflow exits non-zero** if any project hit a merge conflict, had no usable branch to update, or could not be published because its tag never reached the repo, since those leave a project half-done. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
+**The workflow exits non-zero** if any project hit a merge conflict, could not be reached by git at all, had no usable branch to update, or could not be published because its tag never reached the repo, since those leave a project half-done. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
 
 ## Inputs
 
@@ -214,6 +214,15 @@ The commit each tag points at lives on a `release/<version>` branch, which has t
 - **No `release/<version>` branch** → nothing to merge; the run continues to the version bump. Expected for carried-over versions, OSS-fallback entries, and branches already merged and deleted.
 - **Already merged** → reported as such, no commit. The merge check is `git merge-base --is-ancestor`, so this is naturally idempotent.
 - **Conflict** → the merge is aborted, and **the version bump, the push and the Dependabot pass are all skipped for that project**. Other projects continue. The summary flags it under **Blocked on a manual merge** and the run exits non-zero. Resolve it by hand, then re-run with `projects` set to just the affected projects.
+- **Git could not reach the repository** → `clone-failed` or `branch-fetch-failed`, reported under **Could not reach the repository**, counted as a problem, and nothing else is done for that project. See below.
+
+### Remote reads are retried, and always end in a status
+
+Every remote read in this step — the clone, the `ls-remote` for the release branch, and the fetch of it — is **retried three times** with a 10s and then 20s wait. Sixteen legs clone a private repo apiece, at once, every run, and github.com fails often enough at that rate that a single HTTP 401 or 5xx during ref advertisement is a blip rather than an answer.
+
+If all three attempts fail, the step **records a status and exits 0** rather than dying. That distinction matters more than it looks: GitHub runs `run:` steps under `bash -e` whatever the script sets, so an unguarded `git` failure aborts the step — and a step that aborts records no status at all, which the summary can only render as `⏭️ skipped`. A project that was never touched would then read exactly like one that needed nothing doing, in a table where `skipped` is otherwise the normal, healthy state.
+
+The `ls-remote` is checked the same way for a related reason. `--exit-code` exits **2** when the remote answered and has no such branch — a real answer, and the common one — while any other non-zero is a transport failure. Treating the two alike would skip the merge for a project whose release branch was there all along, bump it anyway, and call the run a success.
 
 The merge commit and the version-bump commit go up in a **single push**: one CI run per project, and if anything fails in between, nothing is pushed and the branch is left untouched so the whole project can simply be re-run. The `release/<version>` branch is left in place, not deleted.
 
@@ -360,7 +369,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, and any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, and any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 

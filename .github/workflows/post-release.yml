@@ -798,13 +798,65 @@ jobs:
           # this is the same repository as REMOTE, so one code path covers both.
           COMMERCIAL_REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git"
 
-          git clone --quiet "$REMOTE" --branch "$BRANCH" project
+          # Sixteen legs clone a private repo apiece, at once, every run. github.com fails
+          # often enough at that rate to be worth retrying rather than reporting: an HTTP 401
+          # or a 5xx during ref advertisement is a blip, not an answer. Retried here, and every
+          # remote read below is routed through this.
+          #
+          # Note that the step runs under `bash -e` whatever this script sets, so an unguarded
+          # git failure aborts it - and a step that aborts records no status at all, which the
+          # summary can only report as "skipped". Anything that can fail on the network has to
+          # end in an explicit status, or it is invisible in the report.
+          ATTEMPTS=3
+          retry() {
+            local what="$1"; shift
+            local attempt
+            for attempt in $(seq 1 $ATTEMPTS); do
+              if "$@"; then
+                return 0
+              fi
+              if [[ $attempt -lt $ATTEMPTS ]]; then
+                echo "${what}: failed, attempt ${attempt}/${ATTEMPTS} - waiting $((attempt * 10))s..."
+                sleep $((attempt * 10))
+              fi
+            done
+            echo "::error::${what}: failed ${ATTEMPTS} times."
+            return 1
+          }
+
+          # A half-written clone would make the next attempt fail on the directory rather than
+          # on the network, so each attempt starts from nothing.
+          clone_repo() {
+            rm -rf project
+            git clone --quiet "$REMOTE" --branch "$BRANCH" project
+          }
+
+          if ! retry "Cloning ${REPO}@${BRANCH}" clone_repo; then
+            echo "status=clone-failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           cd project
           git config user.name "Spring Builds"
           git config user.email "svc.spring-builds@broadcom.com"
           git remote add commercial "$COMMERCIAL_REMOTE"
 
-          if ! git ls-remote --exit-code --heads commercial "refs/heads/${RELEASE_BRANCH}" >/dev/null 2>&1; then
+          # --exit-code exits 2 when the remote answered and has no such branch. That is a real
+          # answer and the common one; any other non-zero is a transport failure, and reading
+          # that as "no release branch" would skip the merge and call the run a success.
+          LS_RC=0
+          list_release_branch() {
+            git ls-remote --exit-code --heads commercial "refs/heads/${RELEASE_BRANCH}" >/dev/null 2>&1
+            LS_RC=$?
+            [[ $LS_RC -eq 0 || $LS_RC -eq 2 ]]
+          }
+
+          if ! retry "Looking for ${RELEASE_BRANCH} in ${COMMERCIAL_REPO}" list_release_branch; then
+            echo "status=branch-fetch-failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ $LS_RC -eq 2 ]]; then
             # Expected for a version carried over from an earlier train, for an OSS-fallback
             # entry, and for a release branch that was already merged and deleted.
             echo "No ${RELEASE_BRANCH} branch in ${COMMERCIAL_REPO} - nothing to merge."
@@ -812,7 +864,14 @@ jobs:
             exit 0
           fi
 
-          git fetch --quiet commercial "refs/heads/${RELEASE_BRANCH}:refs/remotes/commercial/${RELEASE_BRANCH}"
+          fetch_release_branch() {
+            git fetch --quiet commercial "refs/heads/${RELEASE_BRANCH}:refs/remotes/commercial/${RELEASE_BRANCH}"
+          }
+
+          if ! retry "Fetching ${RELEASE_BRANCH} from ${COMMERCIAL_REPO}" fetch_release_branch; then
+            echo "status=branch-fetch-failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           if git merge-base --is-ancestor "commercial/${RELEASE_BRANCH}" HEAD; then
             echo "${RELEASE_BRANCH} is already merged into ${BRANCH}."
@@ -2244,6 +2303,7 @@ jobs:
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
             skipped: '⏭️', 'skipped-by-request': '⏭️',
             'merge-conflict': '❌', 'branch-not-found': '❌',
+            'clone-failed': '❌', 'branch-fetch-failed': '❌',
             'version-mismatch': '❌', error: '❌', failure: '❌',
             // tag push (5e) and the tag check that gates publishing
             'no-tag': '❌', 'not-reachable': '❌', 'fetch-failed': '❌',
@@ -2378,6 +2438,11 @@ jobs:
           }
 
           const blocked = mb.filter(r => r.mergeStatus === 'merge-conflict');
+          // Git could not reach the repository at all, after retrying. Counted as a problem
+          // like any other half-done project: the alternative is a row of "skipped" that reads
+          // like nothing was needed.
+          const unreachable = mb.filter(r =>
+            r.mergeStatus === 'clone-failed' || r.mergeStatus === 'branch-fetch-failed');
           const branchFailed = mb.filter(r =>
             r.branchStatus === 'branch-not-found' || r.branchStatus === 'version-mismatch');
           const noMilestone = mr.filter(r => r.milestone === 'not-found');
@@ -2403,6 +2468,21 @@ jobs:
                 const paths = r.conflicts.trim().split(/\s+/);
                 L.push(`  - conflicting: ${paths.map(p => `\`${p}\``).join(', ')}`);
               }
+            }
+            L.push('');
+          }
+
+          if (unreachable.length) {
+            L.push('### ❌ Could not reach the repository');
+            L.push('');
+            L.push('Git could not clone the repository, or could not read the release branch');
+            L.push('from it, after three attempts — nothing else was done for these projects.');
+            L.push('An HTTP 401 or a 5xx here is usually github.com having a moment rather than');
+            L.push('anything about the repository or the token, so re-running this workflow with');
+            L.push('`projects` set to just these is the first thing to try.');
+            L.push('');
+            for (const r of unreachable) {
+              L.push(`- \`${r.repo}\` — ${r.mergeStatus} on \`${r.branch}\``);
             }
             L.push('');
           }
@@ -2462,7 +2542,8 @@ jobs:
           // Chat has its own lightweight formatting (*bold*, <url|text>, no tables), so this
           // is built separately rather than reusing the markdown above. Assembled here, where
           // the data already is, and handed to the posting step as one value.
-          const problems = blocked.length + branchFailed.length + noTag.length;
+          const problems =
+            blocked.length + unreachable.length + branchFailed.length + noTag.length;
           const C = [];
           C.push(`${problems ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
             `(${commercial ? 'commercial' : 'OSS'}${hotfix ? ', hotfix' : ''})` +
@@ -2483,6 +2564,7 @@ jobs:
             'no-tag-oss-fallback': 'skipped (OSS tag)', 'would-create': 'would publish (dry run)',
             merged: 'merged', 'already-merged': 'already merged',
             'no-release-branch': 'no release branch', 'merge-conflict': 'BLOCKED by a conflict',
+            'clone-failed': 'COULD NOT CLONE', 'branch-fetch-failed': 'COULD NOT READ the release branch',
             pushed: 'pushed', 'nothing-to-push': 'already up to date',
             'would-push': 'would push (dry run)', 'branch-not-found': 'no branch found',
             'version-mismatch': 'version mismatch', 'no-version': 'no version',
@@ -2534,6 +2616,9 @@ jobs:
             C.push(`*${problems} project(s) need attention:*`);
             for (const r of blocked) {
               C.push(`• ${r.repo} — blocked on a manual merge of release/${r.version} into ${r.branch}`);
+            }
+            for (const r of unreachable) {
+              C.push(`• ${r.repo} — ${phrase(r.mergeStatus)}, nothing was done for it`);
             }
             for (const r of branchFailed) C.push(`• ${r.repo} — ${phrase(r.branchStatus)}`);
             for (const r of noTag) {
