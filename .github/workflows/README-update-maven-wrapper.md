@@ -117,14 +117,39 @@ together or DCO fails.
 | Status | Meaning |
 |---|---|
 | `pr-opened` | A PR was created |
-| `would-open` | Dry run — a PR would be created |
-| `pr-open` | A PR for this target version is already open; nothing done |
+| `pr-updated` | An open PR was moved up to a newer target — see [Rerunning](#rerunning) |
+| `would-open` / `would-update-pr` | Dry run — what would happen |
+| `pr-open` | A PR is open and already at the target; nothing done |
 | `branch-exists` | The branch exists with no open PR — a previous PR was closed unmerged, so it is **left alone** rather than reopened |
 | `up-to-date` | Already on the target |
 | `ahead` | Newer than the target; never walked backwards |
 | `no-wrapper` | No `.mvn/wrapper/maven-wrapper.properties` on that branch |
 | `unparsed` | `distributionUrl` didn't match the expected shape — needs a look |
 | `error` | An API call failed; the detail is in the summary |
+
+## Rerunning
+
+The workflow is safe to run repeatedly — it derives everything from current state rather
+than from a queue, so rerunning never duplicates work:
+
+| On rerun | Result |
+|---|---|
+| PR still open at the target | `pr-open` — nothing done |
+| PR merged | The branch is now current → `up-to-date` |
+| PR open, but a **newer Maven** has since shipped | `pr-updated` — the commit lands on the **existing** PR's branch, moving it up in place |
+| PR closed unmerged, branch still present | `branch-exists` — left alone, so a deliberate rejection is not re-litigated |
+| PR closed unmerged, branch deleted | A fresh PR is opened. If a branch should never take the upgrade, keep the head branch or pin `maven_version` |
+
+**One PR per repo/branch, always at the current target.** Two details make that hold:
+
+- **The head branch name includes the base branch** — `maven-wrapper-update/<branch>-<maven>`.
+  Without the branch component every branch in a repo would share one head ref, so the first
+  matrix job would create it and the rest would collide on it; with several maintained
+  branches per repo, most would be silently skipped.
+- **Existing PRs are matched by prefix and base, not by exact head name.** A PR opened for an
+  earlier target is therefore still found, and gets moved up rather than having a second PR
+  stacked on top of it. Matching on the exact name would grow a new PR per Maven release,
+  all editing the same file and all conflicting with each other once one merged.
 
 ## Notes
 

@@ -320,21 +320,29 @@ jobs:
           // `mvn wrapper:wrapper`, because that is exactly the parent-POM resolution that
           // fails for a SNAPSHOT parent; a textual edit sidesteps it entirely and CI on the
           // resulting PR is what proves the new Maven actually works.
-          let updated = body.replace(DIST, `$1${MAVEN}$3${MAVEN}$5`);
+          // A function rather than a one-off, because it is applied twice: once to the base
+          // branch when opening a PR, and once to an existing PR's own head branch when
+          // refreshing it to a newer target.
+          const rewrite = text => {
+            let out = text.replace(DIST, `$1${MAVEN}$3${MAVEN}$5`);
+            // wrapperUrl also carries a version, and on the oldest branches it still points
+            // at the pre-Apache io.takari wrapper, which the current Dependabot cannot parse
+            // at all. Rewriting it to the Apache coordinates is what fixes those. Only keys
+            // the file already has are touched - none are invented.
+            if (/^wrapperUrl=/m.test(out)) {
+              out = out.replace(/^wrapperUrl=.*$/m,
+                'wrapperUrl=https://repo.maven.apache.org/maven2/org/apache/maven/wrapper/' +
+                `maven-wrapper/${WRAPPER}/maven-wrapper-${WRAPPER}.jar`);
+            }
+            if (/^wrapperVersion=/m.test(out)) {
+              out = out.replace(/^wrapperVersion=.*$/m, `wrapperVersion=${WRAPPER}`);
+            }
+            return out;
+          };
 
-          // wrapperUrl also carries a version, and on the oldest branches it still points at
-          // the pre-Apache io.takari wrapper, which the current Dependabot cannot parse at
-          // all. Rewriting it to the Apache coordinates is what fixes those.
-          const hadWrapperUrl = /^wrapperUrl=/m.test(updated);
-          if (hadWrapperUrl) {
-            updated = updated.replace(/^wrapperUrl=.*$/m,
-              'wrapperUrl=https://repo.maven.apache.org/maven2/org/apache/maven/wrapper/' +
-              `maven-wrapper/${WRAPPER}/maven-wrapper-${WRAPPER}.jar`);
-          }
-          const hadWrapperVersion = /^wrapperVersion=/m.test(updated);
-          if (hadWrapperVersion) {
-            updated = updated.replace(/^wrapperVersion=.*$/m, `wrapperVersion=${WRAPPER}`);
-          }
+          const hadWrapperUrl = /^wrapperUrl=/m.test(body);
+          const hadWrapperVersion = /^wrapperVersion=/m.test(body);
+          const updated = rewrite(body);
 
           if (updated === body) {
             finish('up-to-date', `Maven ${current}`, { current, target: MAVEN });
@@ -345,13 +353,56 @@ jobs:
               { current, target: MAVEN });
           }
 
-          // ── Is there already a PR for this? ─────────────────────────────────────────
-          const head = `maven-wrapper-update/${MAVEN}`;
-          const existing = ghRetry(['api',
-            `repos/${REPO}/pulls?state=open&head=${owner}:${head}&base=${enc}`]);
-          if (existing.ok && JSON.parse(existing.out || '[]').length) {
-            const pr = JSON.parse(existing.out)[0];
-            finish('pr-open', `#${pr.number} already open`,
+          // ── Is there already a PR for this branch? ──────────────────────────────────
+          // The head name includes the base branch. Without it every branch in a repo would
+          // share one head ref, so the first matrix job would create it and the rest would
+          // collide - and with several maintained branches per repo, most would silently be
+          // skipped. Slashes are flattened so a branch like release/1.2.x stays one segment.
+          const slug = BRANCH.replace(/\//g, '-');
+          const PREFIX = 'maven-wrapper-update/';
+          const head = `${PREFIX}${slug}-${MAVEN}`;
+
+          // Matched by prefix and base rather than by exact head, so a PR opened for an
+          // earlier target version is found too. Otherwise each new Maven release would
+          // stack another PR on top of the last one, all editing the same file.
+          const openPrs = ghRetry(['api',
+            `repos/${REPO}/pulls?state=open&base=${enc}&per_page=100`]);
+          if (!openPrs.ok) finish('error', `could not list pull requests: ${openPrs.err}`);
+          const mine = JSON.parse(openPrs.out || '[]')
+            .filter(pr => (pr.head?.ref || '').startsWith(`${PREFIX}${slug}-`));
+
+          if (mine.length) {
+            const pr = mine[0];
+            // Read the PR's own head branch: it may already be at the target (nothing to
+            // do), or behind it (a newer Maven has shipped since it was opened).
+            const onHead = ghRetry(['api',
+              `repos/${REPO}/contents/${PROPS}?ref=${encodeURIComponent(pr.head.ref)}`]);
+            if (!onHead.ok) finish('error', `could not read ${PROPS} on ${pr.head.ref}: ${onHead.err}`);
+            const headMeta = JSON.parse(onHead.out);
+            const headBody = Buffer.from(headMeta.content, 'base64').toString('utf8');
+            const headUpdated = rewrite(headBody);
+
+            if (headUpdated === headBody) {
+              finish('pr-open', `#${pr.number} already open for ${MAVEN}`,
+                { current, target: MAVEN, prUrl: pr.html_url });
+            }
+            if (DRY) {
+              finish('would-update-pr', `#${pr.number} would be moved up to ${MAVEN}`,
+                { current, target: MAVEN, prUrl: pr.html_url });
+            }
+            // Commit onto the existing PR's branch so it updates in place - one wrapper PR
+            // per branch, always at the current target, rather than a growing stack.
+            const bump = ghJson(`repos/${REPO}/contents/${PROPS}`, 'PUT', {
+              message: `Update Maven wrapper to ${MAVEN}\n\n` +
+                `Signed-off-by: spring-builds <spring-builds@users.noreply.github.com>`,
+              content: Buffer.from(headUpdated, 'utf8').toString('base64'),
+              sha: headMeta.sha,
+              branch: pr.head.ref,
+              committer: { name: 'spring-builds', email: 'spring-builds@users.noreply.github.com' },
+              author: { name: 'spring-builds', email: 'spring-builds@users.noreply.github.com' },
+            });
+            if (!bump.ok) finish('error', `could not update #${pr.number}: ${bump.err}`);
+            finish('pr-updated', `#${pr.number} moved up to ${MAVEN}`,
               { current, target: MAVEN, prUrl: pr.html_url });
           }
 
@@ -480,8 +531,9 @@ jobs:
 
           md.push(`${results.length} repo/branch combination(s) checked — ` +
             `**${of('pr-opened').length}** PR(s) opened, ` +
-            `**${of('would-open').length}** would be opened, ` +
-            `**${of('pr-open').length}** already have one, ` +
+            `**${of('pr-updated').length}** existing PR(s) moved up, ` +
+            `**${of('would-open').length + of('would-update-pr').length}** would change, ` +
+            `**${of('pr-open').length}** already current, ` +
             `**${of('up-to-date').length}** up to date, ` +
             `**${of('error').length}** error(s).`, '');
 
