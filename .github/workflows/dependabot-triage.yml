@@ -1,0 +1,542 @@
+name: Dependabot Triage
+
+run-name: "Dependabot Triage${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }} (${{ inputs.repo_type || 'both' }})${{ inputs.dry_run != false && ' - Dry Run' || '' }}"
+
+# Acts on the open Dependabot PRs that dependabot-report.yml only describes:
+#
+#   1. sets the milestone matching the PR's base branch
+#   2. adds OSS PRs to the release train's org-level GitHub Project
+#   3. comments "@dependabot rebase" on a PR that has fallen into conflict
+#
+# Implements features 2 and 3 of DESIGN-dependabot-automation.md. It shares the
+# read-only dependabot-scan action with the report rather than re-deriving any of
+# this, so the two can never disagree about what state a PR is in.
+#
+# Defaults to a dry run, in the same way post-release.yml and lock-unlock-branches.yml do.
+#
+# See README-dependabot-triage.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names. When empty, every project in projects.json is processed.'
+        required: false
+        type: string
+        default: ''
+      repo_type:
+        description: 'Triage commercial, oss, or both?'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      dry_run:
+        description: 'Dry run, if checked nothing is changed, but you can see what would happen'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with write access to issues/PRs and the `project` scope. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  # Every four hours. Dependabot opens its PRs once a day per repository, but not at a
+  # shared time (spring-cloud-commons runs ~03:22 UTC, spring-cloud-gateway ~16:32 UTC),
+  # so there is no single slot that catches everything promptly.
+  #
+  # Hourly was the original intent, but the cost is real: one job per repository means
+  # ~35 jobs per run, and runner startup dominates the ~15s of actual work. Every four
+  # hours keeps the worst-case wait for a milestone well under a working day at a sixth
+  # of the runner minutes. Nothing downstream depends on the latency - the daily report
+  # is what the team reads, and it re-derives state from scratch.
+  schedule:
+    - cron: '41 */4 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type || 'both' }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const filter = filterRaw
+            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
+            : new Set();
+
+          const repoType = (process.env.REPO_TYPE || 'both').trim();
+          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
+
+          // One entry per repository, matching dependabot-report.yml - Dependabot PRs are
+          // listed repo-wide and then attributed to a branch.
+          const entries = [];
+          for (const [projectKey, config] of Object.entries(projects)) {
+            if (projectKey === 'defaults') continue;
+            if (filter.size > 0 && !filter.has(projectKey)) continue;
+            for (const typeKey of typeKeys) {
+              if (!config[typeKey]) continue;
+              const branches = config[typeKey]?.branches?.scheduled || [];
+              const repo = typeKey === 'commercial'
+                ? `spring-cloud/${projectKey}-commercial`
+                : `spring-cloud/${projectKey}`;
+              entries.push({
+                project: projectKey,
+                repo,
+                type: typeKey,
+                branches: branches.join(','),
+              });
+            }
+          }
+
+          entries.sort((a, b) => a.repo.localeCompare(b.repo));
+
+          console.log(`Repositories to triage: ${entries.length}`);
+          for (const e of entries) console.log(`  ${e.repo} (${e.type}) [${e.branches}]`);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include: entries })}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${entries.length}\n`);
+          JSEOF
+
+  releaser-map:
+    name: Build Releaser Map
+    runs-on: ubuntu-latest
+    steps:
+      # Identical to dependabot-report.yml: the jenkins-releaser-config branch is the same
+      # for every repository, so it is read once and shared as an artifact.
+      - name: Read jenkins-releaser-config
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const gh = args => {
+            try {
+              return execFileSync('gh', args,
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 });
+            } catch (err) {
+              console.log(`  gh failed: ${(err.stderr || err.message || '').split('\n')[0]}`);
+              return null;
+            }
+          };
+
+          const SOURCES = {
+            oss: 'spring-cloud/spring-cloud-release',
+            commercial: 'spring-cloud/spring-cloud-release-commercial',
+          };
+
+          const out = {};
+          for (const [type, repo] of Object.entries(SOURCES)) {
+            out[type] = {};
+            const listing = gh(['api', `repos/${repo}/contents/?ref=jenkins-releaser-config`]);
+            if (!listing) {
+              console.log(`${type}: could not list jenkins-releaser-config on ${repo}`);
+              continue;
+            }
+            const files = JSON.parse(listing)
+              .map(f => f.name)
+              .filter(n => n.endsWith('-snapshot.properties'));
+
+            for (const name of files) {
+              const raw = gh(['api',
+                `repos/${repo}/contents/${name}?ref=jenkins-releaser-config`, '--jq', '.content']);
+              if (!raw) continue;
+              const body = Buffer.from(raw.trim(), 'base64').toString('utf8');
+
+              const versions = {};
+              for (const line of body.split('\n')) {
+                const m = line.match(/^releaser\.fixed-versions\[(.+?)\]=(.+)$/);
+                if (m) versions[m[1]] = m[2].trim();
+              }
+
+              const train = (versions['spring-cloud-release'] || '').replace(/-SNAPSHOT$/, '');
+              if (!train) continue;
+
+              for (const [project, version] of Object.entries(versions)) {
+                out[type][project] = out[type][project] || {};
+                out[type][project][version] = train;
+              }
+            }
+            console.log(`${type}: ${files.length} snapshot file(s), ` +
+              `${Object.keys(out[type]).length} project(s) mapped`);
+          }
+
+          fs.writeFileSync('releaser-maps.json', JSON.stringify(out, null, 2));
+          JSEOF
+
+      - name: Upload releaser map
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-releaser-maps
+          path: releaser-maps.json
+
+  triage:
+    name: "Triage — ${{ matrix.repo }}"
+    needs: [setup, releaser-map]
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download releaser map
+        uses: actions/download-artifact@v4
+        with:
+          name: triage-releaser-maps
+
+      # The same read-only scan the report uses. Triage never re-derives PR state itself,
+      # so a PR can never be classified one way in the report and another way here.
+      - name: Scan repository
+        id: scan
+        uses: ./.github/actions/dependabot-scan
+        with:
+          repo: ${{ matrix.repo }}
+          project: ${{ matrix.project }}
+          type: ${{ matrix.type }}
+          maintained-branches: ${{ matrix.branches }}
+          releaser-map-file: releaser-maps.json
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Apply triage
+        id: apply
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          RESULT_FILE: ${{ steps.scan.outputs.result-file }}
+          SAFE_NAME: ${{ steps.scan.outputs.safe-name }}
+          DRY_RUN: ${{ inputs.dry_run != false }}
+          ORG: spring-cloud
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const DRY = process.env.DRY_RUN !== 'false';
+          const ORG = process.env.ORG;
+          const scan = JSON.parse(fs.readFileSync(process.env.RESULT_FILE, 'utf8'));
+
+          const gh = args => {
+            try {
+              return { ok: true, out: execFileSync('gh', args,
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 }) };
+            } catch (err) {
+              return { ok: false, out: err.stdout || '',
+                err: (err.stderr || err.message || '').split('\n')[0].trim() };
+            }
+          };
+
+          // Same backoff as the scan action. Writes are retried too: a 502 on the way out
+          // would otherwise leave the PR untouched until the next scheduled run.
+          const ghRetry = (args, attempts = 3) => {
+            let last;
+            for (let attempt = 1; attempt <= attempts; attempt++) {
+              last = gh(args);
+              if (last.ok) return last;
+              if (attempt < attempts) execFileSync('sleep', [String(attempt * 3)]);
+            }
+            return last;
+          };
+
+          const graphql = (query, ...fields) => {
+            const args = ['api', 'graphql', '-f', `query=${query}`, ...fields];
+            const r = ghRetry(args);
+            let body = null;
+            try { body = JSON.parse(r.out); } catch (_) { /* non-JSON error output */ }
+            const errors = body?.errors || [];
+            return { ...r, body, errors, ok: r.ok && errors.length === 0 };
+          };
+
+          const actions = [];   // what happened, for the summary
+          const errors = [];
+          const record = (pr, action, status, detail) => {
+            actions.push({ number: pr.number, url: pr.url, base: pr.baseRefName,
+              action, status, detail });
+            const tag = DRY && status === 'would' ? '[dry run] would' : status;
+            console.log(`  #${pr.number} ${action}: ${tag}${detail ? ` - ${detail}` : ''}`);
+          };
+
+          // ── Milestone numbers, looked up once per repository ────────────────────────
+          let milestoneIndex = null;
+          const milestoneNumber = title => {
+            if (milestoneIndex === null) {
+              milestoneIndex = new Map();
+              const r = ghRetry(['api', `repos/${scan.repo}/milestones?state=open&per_page=100`]);
+              if (r.ok) {
+                for (const m of JSON.parse(r.out || '[]')) milestoneIndex.set(m.title, m.number);
+              } else {
+                errors.push(`could not list milestones: ${r.err}`);
+              }
+            }
+            return milestoneIndex.get(title);
+          };
+
+          // ── Project board ids, looked up lazily and cached ──────────────────────────
+          let boardIndex = null;
+          const boardId = title => {
+            if (boardIndex === null) {
+              boardIndex = new Map();
+              const q = `{ organization(login: "${ORG}") { projectsV2(first: 100) ` +
+                `{ nodes { id title } } } }`;
+              const r = graphql(q);
+              if (r.ok) {
+                for (const n of r.body?.data?.organization?.projectsV2?.nodes || []) {
+                  boardIndex.set(n.title, n.id);
+                }
+              } else {
+                errors.push('could not list Projects v2: ' +
+                  (r.errors[0]?.message || r.err || 'unknown error'));
+              }
+            }
+            return boardIndex.get(title);
+          };
+
+          const PR_QUERY = `query($owner:String!,$name:String!,$number:Int!){
+            repository(owner:$owner,name:$name){
+              pullRequest(number:$number){
+                id
+                projectItems(first:20){ nodes { project { id title } } }
+              }
+            }
+          }`;
+
+          const [owner, name] = scan.repo.split('/');
+
+          for (const pr of scan.prs) {
+            // Retired branches are locked and their PRs cannot merge - the report already
+            // calls those out for closing. Touching them would be noise at best.
+            if (pr.state === 'unmaintained') continue;
+
+            // ── 1. Milestone ─────────────────────────────────────────────────────────
+            if (pr.milestoneState === 'unset') {
+              const number = milestoneNumber(pr.expectedMilestone);
+              if (!number) {
+                record(pr, 'milestone', 'skipped',
+                  `milestone ${pr.expectedMilestone} not found`);
+              } else if (DRY) {
+                record(pr, 'milestone', 'would', `set ${pr.expectedMilestone}`);
+              } else {
+                const r = ghRetry(['api', `repos/${scan.repo}/issues/${pr.number}`,
+                  '--method', 'PATCH', '-F', `milestone=${number}`]);
+                if (r.ok) record(pr, 'milestone', 'set', pr.expectedMilestone);
+                else {
+                  record(pr, 'milestone', 'error', r.err);
+                  errors.push(`#${pr.number} milestone: ${r.err}`);
+                }
+              }
+            } else if (pr.milestoneState === 'missing') {
+              // Deliberately not created here - the report warns about it instead, so a
+              // missing milestone stays a human decision about the release train.
+              record(pr, 'milestone', 'skipped',
+                `milestone ${pr.expectedMilestone} does not exist`);
+            } else if (pr.milestoneState === 'mismatch') {
+              record(pr, 'milestone', 'skipped',
+                `already set to ${pr.currentMilestone}, expected ${pr.expectedMilestone}`);
+            }
+
+            // ── 2. Project board (OSS only) ──────────────────────────────────────────
+            if (pr.projectState === 'resolved') {
+              // -f sends a literal string, -F coerces to a JSON type. owner/name are
+              // String!, number is Int!, so they need different flags.
+              const pq = graphql(PR_QUERY, '-f', `owner=${owner}`, '-f', `name=${name}`,
+                '-F', `number=${pr.number}`);
+              if (!pq.ok) {
+                record(pr, 'project', 'error',
+                  pq.errors[0]?.message || pq.err || 'lookup failed');
+                errors.push(`#${pr.number} project lookup: ${pq.err || 'GraphQL error'}`);
+              } else {
+                const node = pq.body?.data?.repository?.pullRequest;
+                const already = (node?.projectItems?.nodes || [])
+                  .some(i => i.project?.title === pr.expectedProject);
+                if (already) {
+                  record(pr, 'project', 'already', pr.expectedProject);
+                } else {
+                  const id = boardId(pr.expectedProject);
+                  if (!id) {
+                    record(pr, 'project', 'skipped',
+                      `no board titled ${pr.expectedProject}`);
+                  } else if (DRY) {
+                    record(pr, 'project', 'would', `add to ${pr.expectedProject}`);
+                  } else {
+                    const m = graphql(
+                      `mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,` +
+                      `contentId:$c}){ item { id } } }`,
+                      '-f', `p=${id}`, '-f', `c=${node.id}`);
+                    if (m.ok) record(pr, 'project', 'added', pr.expectedProject);
+                    else {
+                      const msg = m.errors[0]?.message || m.err || 'mutation failed';
+                      record(pr, 'project', 'error', msg);
+                      errors.push(`#${pr.number} project add: ${msg}`);
+                    }
+                  }
+                }
+              }
+            } else if (pr.projectState === 'unresolved') {
+              record(pr, 'project', 'skipped', `no train resolved for ${pr.baseRefName}`);
+            }
+
+            // ── 3. Rebase on conflict ────────────────────────────────────────────────
+            if (pr.state === 'conflicting') {
+              // Idempotency without state: only ask again if no "@dependabot rebase"
+              // comment is newer than the PR's current head commit. A rebase that produced
+              // a new head makes the PR eligible again; one that changed nothing does not,
+              // so a permanently conflicting PR is asked once, not once every run.
+              const head = ghRetry(['api',
+                `repos/${scan.repo}/commits/${pr.headRefOid}`, '--jq', '.commit.committer.date']);
+              if (!head.ok) {
+                record(pr, 'rebase', 'error', `could not read head commit: ${head.err}`);
+                errors.push(`#${pr.number} rebase: ${head.err}`);
+                continue;
+              }
+              const headDate = new Date(head.out.trim()).getTime();
+
+              const comments = ghRetry(['api',
+                `repos/${scan.repo}/issues/${pr.number}/comments?per_page=100`]);
+              if (!comments.ok) {
+                record(pr, 'rebase', 'error', `could not read comments: ${comments.err}`);
+                errors.push(`#${pr.number} rebase: ${comments.err}`);
+                continue;
+              }
+
+              const asked = JSON.parse(comments.out || '[]').some(c =>
+                /@dependabot\s+rebase/i.test(c.body || '') &&
+                new Date(c.created_at).getTime() > headDate);
+
+              if (asked) {
+                record(pr, 'rebase', 'already', 'already asked since the current head');
+              } else if (DRY) {
+                record(pr, 'rebase', 'would', 'comment @dependabot rebase');
+              } else {
+                const r = ghRetry(['api', `repos/${scan.repo}/issues/${pr.number}/comments`,
+                  '--method', 'POST', '-f', 'body=@dependabot rebase']);
+                if (r.ok) record(pr, 'rebase', 'requested', '');
+                else {
+                  record(pr, 'rebase', 'error', r.err);
+                  errors.push(`#${pr.number} rebase: ${r.err}`);
+                }
+              }
+            }
+          }
+
+          const tally = key => actions.filter(a => a.status === key).length;
+          const result = {
+            repo: scan.repo, type: scan.type, project: scan.project,
+            dryRun: DRY,
+            prsConsidered: scan.prs.filter(p => p.state !== 'unmaintained').length,
+            counts: {
+              would: tally('would'), set: tally('set'), added: tally('added'),
+              requested: tally('requested'), already: tally('already'),
+              skipped: tally('skipped'), error: tally('error'),
+            },
+            actions,
+            errors: errors.concat(scan.warnings || []),
+          };
+
+          fs.writeFileSync(`triage-${process.env.SAFE_NAME}.json`, JSON.stringify(result, null, 2));
+
+          const c = result.counts;
+          console.log(`${scan.repo}: ${result.prsConsidered} PR(s) considered - ` +
+            `${c.would} would-change, ${c.set + c.added + c.requested} changed, ` +
+            `${c.already} already done, ${c.skipped} skipped, ${c.error} error(s)`);
+          JSEOF
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-${{ steps.scan.outputs.safe-name }}
+          path: triage-${{ steps.scan.outputs.safe-name }}.json
+
+  summary:
+    name: Summary
+    needs: [setup, triage]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: triage-spring-cloud-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) => a.repo.localeCompare(b.repo));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const dry = results.some(r => r.dryRun);
+          const sum = k => results.reduce((n, r) => n + (r.counts?.[k] || 0), 0);
+
+          const md = ['## Dependabot Triage', ''];
+          if (dry) {
+            md.push('> **Dry run** — nothing was changed. Re-run with `dry_run` unchecked to apply.', '');
+          }
+          md.push(`${sum('would')} pending change(s), ` +
+            `${sum('set') + sum('added') + sum('requested')} applied, ` +
+            `${sum('already')} already done, ${sum('skipped')} skipped, ` +
+            `${sum('error')} error(s) across ${results.length} repositories.`);
+          md.push('');
+
+          const changed = results.filter(r =>
+            (r.actions || []).some(a => a.status !== 'already'));
+
+          if (!changed.length) {
+            md.push('Nothing to do — every open Dependabot PR is already triaged.');
+          } else {
+            md.push('| Repo | PR | Action | Status | Detail |');
+            md.push('|---|---|---|---|---|');
+            for (const r of changed) {
+              for (const a of r.actions) {
+                if (a.status === 'already') continue;
+                md.push(`| \`${r.repo}\` | [#${a.number}](${a.url}) | ${a.action} | ` +
+                  `${a.status === 'would' ? '_would_' : a.status} | ${a.detail || ''} |`);
+              }
+            }
+          }
+
+          const errs = results.flatMap(r => (r.errors || []).map(e => `\`${r.repo}\` — ${e}`));
+          if (errs.length) {
+            md.push('', '### Errors', '');
+            for (const e of errs) md.push(`- ${e}`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+          console.log(md.join('\n'));
+          JSEOF
