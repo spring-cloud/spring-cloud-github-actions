@@ -356,7 +356,13 @@ It is **spliced in at line level**, next to the newest entry on its line, on whi
 
 **If the branch already exists in the website repo, the job does nothing** beyond reporting it and linking the PR. Almost certainly it is there from an earlier run of this workflow, and on an OSS run the notable-changes sections written into that PR since are the one part of it nobody can regenerate — force-pushing over them is not a trade worth making. Delete the branch to have it rebuilt.
 
-On a dry run everything is computed and nothing is pushed: the full diff is uploaded as the `website-changes` artifact, and the PR body is printed to the log.
+### Seeing the changes
+
+**The diff is written to the Website PR job's own summary**, one collapsed `<details>` block per file with its `+`/`−` counts, so a dry run can be read on the run page without downloading anything. It is written on every run, not just dry ones — on a real run the PR shows the same thing, but the summary is there before you go looking for it.
+
+Blocks are fenced with more backticks than they contain, because the blog post is itself full of ``` fences. GitHub rejects a step summary over 1 MiB outright — losing the whole report rather than the tail of it — so files are added until 900 KB and anything left out is named as a count, pointing at the artifact. A sixteen-project OSS run comes to about 18 KB, so that only matters if something has gone very strange.
+
+The complete diff is also uploaded as the `website-changes` artifact, and on a dry run the PR body is printed to the log.
 
 ## Output
 
@@ -369,7 +375,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, and any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 

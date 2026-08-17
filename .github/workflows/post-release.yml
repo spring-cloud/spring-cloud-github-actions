@@ -47,6 +47,11 @@ run-name: "Post Release - ${{ inputs.release_version }}${{ inputs.projects != ''
 on:
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: 'Dry run, if checked nothing is created, committed or pushed, but you can see what would happen'
+        required: false
+        type: boolean
+        default: true
       release_version:
         description: 'Spring Cloud release train version that was just released (e.g. 2025.1.2, or 2025.1.2.1 for a commercial hotfix)'
         required: true
@@ -67,15 +72,10 @@ on:
         type: boolean
         default: false
       skip_website_pr:
-        description: 'Skip the spring-website-content PR (blog post + documentation.json versions). Only ever run for a full OSS train anyway.'
+        description: 'Skip creating a website (for OSS or commercial) PR.'
         required: false
         type: boolean
         default: false
-      dry_run:
-        description: 'Dry run, if checked nothing is created, committed or pushed, but you can see what would happen'
-        required: false
-        type: boolean
-        default: true
       token:
         description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
@@ -2096,6 +2096,72 @@ jobs:
           console.log(staged);
           fs.writeFileSync('website-changes.diff', git(['diff', '--cached'], 'website'));
 
+          // ── e1. the diff, in this job's summary ─────────────────────────────────────
+          // The whole point of a dry run is seeing what would change, and the artifact makes
+          // that a download-and-unzip. One collapsed block per file, so a sixteen-project run
+          // is still a list you can scan.
+          const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+          if (summaryFile) {
+            // Anything fenced has to be fenced with more backticks than it contains - the blog
+            // post is full of ``` blocks of its own.
+            const fenceFor = text => {
+              let longest = 0;
+              for (const m of text.match(/`+/g) || []) longest = Math.max(longest, m.length);
+              return '`'.repeat(Math.max(3, longest + 1));
+            };
+
+            // added/deleted counts per file, so each block says how big it is before you open
+            // it. A binary file reports '-', which is why these are not parsed as numbers.
+            const stats = {};
+            for (const line of git(['diff', '--cached', '--numstat'], 'website').split('\n')) {
+              const m = line.match(/^(\S+)\t(\S+)\t(.+)$/);
+              if (m) stats[m[3]] = { added: m[1], deleted: m[2] };
+            }
+
+            const S = [];
+            S.push(`## Website changes${dryRun ? ' — dry run, nothing was pushed' : ''}`);
+            S.push('');
+            S.push(`\`${WEBSITE}\` · \`${branch}\` · ${Object.keys(stats).length} file(s)`);
+            S.push('');
+
+            // GitHub rejects a step summary over 1 MiB outright, which would lose the whole
+            // report rather than the tail of it, so this stops short and says what it dropped.
+            const BUDGET = 900000;
+            let used = S.join('\n').length;
+            let omitted = 0;
+
+            for (const file of staged.split('\n').filter(Boolean)) {
+              const body = git(['diff', '--cached', '--', file], 'website');
+              const st = stats[file] || { added: '?', deleted: '?' };
+              const f = fenceFor(body);
+              const block = [
+                `<details><summary><code>${file}</code> — +${st.added} −${st.deleted}</summary>`,
+                '',
+                `${f}diff`,
+                body.replace(/\n+$/, ''),
+                f,
+                '',
+                '</details>',
+                '',
+              ].join('\n');
+              if (used + block.length > BUDGET) {
+                omitted++;
+                continue;
+              }
+              used += block.length;
+              S.push(block);
+            }
+
+            if (omitted) {
+              S.push(`_${omitted} file(s) left out to stay inside GitHub's summary size ` +
+                'limit — the complete diff is in the `website-changes` artifact._');
+              S.push('');
+            }
+
+            fs.appendFileSync(summaryFile, S.join('\n') + '\n');
+            console.log(`Wrote the diff to this job's summary${omitted ? ` (${omitted} file(s) omitted)` : ''}.`);
+          }
+
           const title = commercial
             ? `Update documentation for Spring Cloud ${releaseVersion} commercial release`
             : `Spring Cloud ${releaseVersion} release updates`;
@@ -2178,8 +2244,8 @@ jobs:
             console.log('---');
             console.log(body);
             console.log('---');
-            console.log('[dry run] not pushing. The full diff is in the website-changes ' +
-              'artifact on this run.');
+            console.log('[dry run] not pushing. The diff is in this job\'s summary, and in ' +
+              'the website-changes artifact.');
             finish('would-create');
           }
 
@@ -2429,6 +2495,10 @@ jobs:
               d.status === 'unrecognised-format' || d.status === 'no-template' ||
               d.status === 'error');
             for (const d of odd) L.push(`- ⚠️ \`${d.file}\` — ${d.status}`);
+            if (web.status === 'would-create' || web.status === 'created') {
+              L.push('- the full diff is under the **Website PR** job above, one collapsed ' +
+                'block per file, and in the `website-changes` artifact');
+            }
             L.push('');
             if (web.blogStatus === 'created') {
               L.push('The post is a template: the author and every project section still say ' +
