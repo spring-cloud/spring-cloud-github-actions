@@ -124,6 +124,29 @@ attempt fails: it never gets this settings file.
 
 When resolution still fails, the branch reports `regenerate-failed` with the Maven error
 quoted verbatim, so it is not mistaken for a workflow bug, and every other branch carries on.
+Maven's full output is streamed to the job log, with the `[ERROR]`/`[WARNING]` lines
+repeated under a **Maven failure detail** group — the extracted one-liner is a summary, never
+the only record.
+
+### `-N` and import BOMs
+
+`-N` keeps the run to the root project, but it also means sibling modules are not built. That
+matters for `spring-cloud-build`, whose root POM imports one of its own modules as a BOM:
+
+```xml
+<artifactId>spring-cloud-build-dependencies</artifactId>
+<version>${spring-cloud-build.version}</version>
+<scope>import</scope>
+```
+
+Import-scope BOMs are resolved during model building, so with `-N` that artifact must come
+from a repository rather than the reactor. On OSS it does — `spring-cloud-build-dependencies`
+snapshots are on `repo.spring.io` and readable anonymously. On commercial it has to come from
+the Broadcom repository with credentials, and a branch whose snapshot has not been published
+there will report `Non-resolvable import POM` however good the settings file is.
+
+If commercial branches fail this way and OSS ones do not, that asymmetry — not the settings
+file — is the thing to look at.
 
 ### Extra inputs
 

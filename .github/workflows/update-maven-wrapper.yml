@@ -636,17 +636,34 @@ jobs:
           # inside a `spring` profile, so without activating it the snapshot repositories
           # are not in play at all and the parent POM cannot resolve. -N keeps this to the
           # root project, where the wrapper lives.
+          # Piped through tee, not redirected to a file: Maven's output has to reach the job
+          # log, otherwise a failure here is undiagnosable and only the one-line summary
+          # below survives. pipefail (set above) is what keeps mvn's exit status visible
+          # through the pipe.
           echo "Running maven-wrapper-plugin ${WRAPPER_VERSION} for Maven ${MAVEN_VERSION}..."
           if ! mvn -B -N -s .settings.xml -Pspring \
                 "org.apache.maven.plugins:maven-wrapper-plugin:${WRAPPER_VERSION}:wrapper" \
-                "-Dmaven=${MAVEN_VERSION}" "-Dtype=${WRAPPER_TYPE}" > ../mvn.log 2>&1; then
+                "-Dmaven=${MAVEN_VERSION}" "-Dtype=${WRAPPER_TYPE}" 2>&1 | tee ../mvn.log; then
             cd ..
-            # The most likely cause by far is an unresolvable SNAPSHOT parent - the same
-            # thing that breaks Dependabot's own wrapper updater. Surfaced verbatim so it
-            # is not mistaken for a workflow bug.
-            REASON=$(grep -m1 -oE "Non-resolvable parent POM[^@]*" mvn.log \
-              || grep -m1 -oE "\[ERROR\].*" mvn.log || echo "see the job log")
-            record "regenerate-failed" "mvn wrapper:wrapper failed - ${REASON}"
+
+            echo "::group::Maven failure detail"
+            grep -E "^\[(ERROR|WARNING)\]" mvn.log | tail -40 || tail -40 mvn.log
+            echo "::endgroup::"
+
+            # Pick the first line that actually says something. Maven leads with
+            # "Some problems were encountered while processing the POMs:" and trails with
+            # Help links, none of which identify the problem - matching those first is how
+            # the previous run ended up reporting a header and nothing else.
+            REASON=$(grep -oE "(Non-resolvable (parent|import) POM|Could not find artifact|Could not resolve dependencies|Could not transfer artifact|Failed to execute goal|Unauthorized|status code: 40[0-9])[^\"]*" mvn.log | head -1)
+            if [ -z "$REASON" ]; then
+              REASON=$(grep -E "^\[ERROR\]" mvn.log \
+                | grep -vE "Some problems were encountered|To see the full stack|Re-run Maven|For more information|\[Help|^\[ERROR\][[:space:]]*$" \
+                | head -1)
+            fi
+            [ -z "$REASON" ] && REASON="see the Maven failure detail in the job log"
+            REASON=$(echo "$REASON" | cut -c1-300)
+
+            record "regenerate-failed" "${REASON}"
             exit 0
           fi
           cd ..
