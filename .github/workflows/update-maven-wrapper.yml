@@ -1,6 +1,6 @@
 name: Update Maven Wrapper
 
-run-name: "Update Maven Wrapper${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }} (${{ inputs.repo_type || 'both' }})${{ inputs.dry_run != false && ' - Dry Run' || '' }}"
+run-name: "Update Maven Wrapper${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }} (${{ inputs.repo_type || 'both' }})${{ (github.event_name != 'schedule' && inputs.regenerate == false) && ' - Properties Only' || '' }}${{ github.event_name != 'schedule' && inputs.dry_run != false && ' - Dry Run' || '' }}"
 
 # Opens a pull request against every maintained repository/branch whose Maven wrapper is
 # behind, so CI decides whether the upgrade is safe rather than a bulk push doing it blind.
@@ -52,10 +52,10 @@ on:
         type: string
         default: ''
       regenerate:
-        description: 'Regenerate the whole wrapper by running maven-wrapper-plugin (updates mvnw, mvnw.cmd and the JAR too) instead of only editing maven-wrapper.properties.'
+        description: 'Regenerate the whole wrapper by running maven-wrapper-plugin (updates mvnw, mvnw.cmd and the JAR too). Uncheck to only edit maven-wrapper.properties.'
         required: false
         type: boolean
-        default: false
+        default: true
       wrapper_type:
         description: 'Wrapper flavour to generate, when regenerate is checked. bin keeps the committed JAR (the shape almost every branch already has); only-script drops it.'
         required: false
@@ -274,7 +274,7 @@ jobs:
           # weekly job would never actually do anything. Schedule therefore acts, while a
           # manual dispatch still defaults to a dry run so a human can look first.
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
-          REGENERATE: ${{ inputs.regenerate == true }}
+          REGENERATE: ${{ (github.event_name == 'schedule' || inputs.regenerate == true) }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -564,13 +564,13 @@ jobs:
       # Checked out into a subdirectory on purpose: a checkout at the workspace root
       # would clean the wrapper-*.json the previous step just wrote there.
       - name: Checkout shared actions
-        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        if: (github.event_name == 'schedule' || inputs.regenerate == true) && steps.update.outputs.regenerate-head != ''
         uses: actions/checkout@v4
         with:
           path: ci-actions
 
       - name: Checkout target branch
-        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        if: (github.event_name == 'schedule' || inputs.regenerate == true) && steps.update.outputs.regenerate-head != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo }}
@@ -580,7 +580,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up JDK
-        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        if: (github.event_name == 'schedule' || inputs.regenerate == true) && steps.update.outputs.regenerate-head != ''
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -592,7 +592,7 @@ jobs:
       # pair is unavailable - the case that silently produced empty credentials before.
       # It writes to $GITHUB_ENV, so it must run in a step of its own, before Maven.
       - name: Set commercial credentials
-        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        if: (github.event_name == 'schedule' || inputs.regenerate == true) && steps.update.outputs.regenerate-head != ''
         env:
           USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
           PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
@@ -601,7 +601,7 @@ jobs:
         uses: ./ci-actions/.github/actions/set-commercial-creds-env-vars
 
       - name: Regenerate wrapper and open PR
-        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        if: (github.event_name == 'schedule' || inputs.regenerate == true) && steps.update.outputs.regenerate-head != ''
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           REPO: ${{ matrix.repo }}

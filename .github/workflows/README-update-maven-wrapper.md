@@ -51,8 +51,12 @@ spring-cloud-commons@main    Maven 3.9.11   wrapperVersion 3.3.4 + distributionT
 
 ## What it changes
 
-**Only `.mvn/wrapper/maven-wrapper.properties`.** The wrapper JAR and the `mvnw` /
-`mvnw.cmd` scripts are left untouched.
+By default it **regenerates the whole wrapper** with `maven-wrapper-plugin` — see
+[Regenerate mode](#regenerate-mode) — rewriting `mvnw`, `mvnw.cmd` and the JAR along with
+the properties.
+
+Unchecking `regenerate` falls back to editing **only
+`.mvn/wrapper/maven-wrapper.properties`**, leaving the JAR and scripts untouched.
 
 - `distributionUrl` → the target Maven version
 - `wrapperUrl` → the Apache `maven-wrapper` coordinates at the target version, **only if the
@@ -63,19 +67,22 @@ spring-cloud-commons@main    Maven 3.9.11   wrapperVersion 3.3.4 + distributionT
 Existing comments, licence headers and file shape are preserved — it is a targeted edit, not
 a regeneration.
 
-### Why the default does not run `mvn wrapper:wrapper`
+### When to turn `regenerate` off
 
-Regenerating the wrapper properly means invoking the wrapper plugin — which is *precisely*
-the parent-POM resolution that fails for a SNAPSHOT parent, the very bug being worked
-around. The textual edit sidesteps it entirely, needs no JDK, no credentials and no
-checkout, and produces a one-line diff that is trivial to review. CI on the resulting PR is
-what proves the new Maven actually works.
+The properties-only mode is the safety valve. It needs no JDK, no credentials and no
+checkout, produces a one-line diff, and — importantly — **cannot fail on parent-POM
+resolution**, since it never invokes Maven at all. That matters because resolution is the
+very thing that breaks Dependabot's own wrapper updater.
 
-Set [`regenerate`](#regenerate-mode) when you do want the full treatment.
+The trade-off runs the other way too: a branch whose regeneration fails reports
+`regenerate-failed` and gets **no PR at all**, where properties-only would still have bumped
+its version. If a branch keeps failing to regenerate, re-run it with `regenerate` unchecked
+to at least move its Maven version forward.
 
 ## Regenerate mode
 
-With `regenerate` checked, the workflow checks the branch out, runs
+**On by default**, including for the weekly scheduled run. The workflow checks the branch
+out and runs
 
 ```
 mvn -B -N -s .settings.xml -Pspring \
@@ -193,7 +200,7 @@ file — is the thing to look at.
 
 | Input | Description | Default |
 |---|---|---|
-| `regenerate` | Run the wrapper plugin instead of editing the properties file | `false` |
+| `regenerate` | Run the wrapper plugin instead of editing the properties file | `true` |
 | `wrapper_type` | `bin` (keeps the JAR), `only-script` (no JAR), or `script` — see [Wrapper flavours](#wrapper-flavours) | `bin` |
 | `java_version` | JDK used to run the plugin | `17` |
 
@@ -270,12 +277,34 @@ together or DCO fails.
 | `dry_run` | Report what would happen without creating, updating or merging anything | No | `true` |
 | `token` | Needs `contents:write` and `pull-requests:write` on all targets. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | `''` |
 
-### Dry run and the schedule
+### What the weekly scheduled run actually does
 
-A **manual dispatch defaults to a dry run**, so you can look before anything happens. A
-**scheduled run always acts** — a scheduled event carries no inputs, so `dry_run` would
-otherwise be its default of `true` and the weekly job would report forever without ever
-opening a PR.
+A scheduled event carries **no inputs at all**, so every input falls back to what the
+expressions decide rather than to the `default:` shown above. In full:
+
+| | Scheduled run | Manual dispatch |
+|---|---|---|
+| Dry run? | **No — it opens PRs** | Yes by default; uncheck `dry_run` to act |
+| Mode | **Regenerates** the full wrapper | `regenerate` as chosen (on by default) |
+| Merges green PRs? | **No** | Yes, if `auto_merge` is left checked |
+| Scope | Every project, `oss` and `commercial` | As chosen |
+| Target versions | Newest stable 3.9.x and newest `maven-wrapper` | As chosen |
+| `-internal` branches | Skipped | Skipped |
+
+So the weekly run regenerates wrappers across the estate and leaves the PRs for a human.
+Merging stays manual-only — it is the one irreversible step, and these PRs carry a real diff
+(`mvnw`, `mvnw.cmd` and the JAR), so they are worth reading before they land.
+
+Because a scheduled event carries no inputs, `regenerate` has to opt in explicitly for the
+schedule in the same way `dry_run` does — `github.event_name == 'schedule' || inputs.regenerate == true`.
+Relying on the input's `default: true` would not work: on a scheduled run the input is null,
+not its default.
+
+`dry_run` has to be forced off for the schedule — otherwise `inputs.dry_run != false` would
+be true for a scheduled event and the weekly job would report forever without ever opening a
+PR. The same asymmetry is why the run name checks `github.event_name != 'schedule'` before
+adding its `- Dry Run` suffix; without that, a scheduled run would be labelled a dry run in
+the Actions list while actually opening PRs.
 
 ## Auto-merge
 
