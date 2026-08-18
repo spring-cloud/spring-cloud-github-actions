@@ -57,13 +57,13 @@ on:
         type: boolean
         default: false
       wrapper_type:
-        description: 'Wrapper flavour to generate, when regenerate is checked. only-script drops the committed JAR entirely.'
+        description: 'Wrapper flavour to generate, when regenerate is checked. bin keeps the committed JAR (the shape almost every branch already has); only-script drops it.'
         required: false
         type: choice
-        default: 'only-script'
+        default: 'bin'
         options:
-          - only-script
           - bin
+          - only-script
           - script
       java_version:
         description: 'JDK used to run the wrapper plugin, when regenerate is checked.'
@@ -612,7 +612,7 @@ jobs:
           SAFE_NAME: ${{ steps.update.outputs.safe-name }}
           MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
-          WRAPPER_TYPE: ${{ inputs.wrapper_type || 'only-script' }}
+          WRAPPER_TYPE: ${{ inputs.wrapper_type || 'bin' }}
           # COMMERCIAL_ARTIFACTORY_USERNAME/PASSWORD deliberately absent: they arrive from
           # $GITHUB_ENV via the step above, and a step-level env: here would override it
           # with the raw secret, losing the read-only fallback. CI_DEPLOY_* is what the

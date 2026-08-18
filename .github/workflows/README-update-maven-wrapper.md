@@ -93,8 +93,35 @@ and commits whatever the plugin produces — `mvnw`, `mvnw.cmd` and the JAR as w
 properties. `-N` keeps it to the root project, where the wrapper lives.
 
 This is how you get off the old formats entirely rather than only correcting their version
-numbers. With the default `wrapper_type: only-script` the committed `maven-wrapper.jar` is
-dropped, which is the shape `spring-cloud-commons@main` already has.
+numbers.
+
+### Wrapper flavours
+
+`-Dtype` selects what the plugin writes. The three differ less than their names suggest —
+`bin` and `script` ship a **byte-identical `mvnw`** and differ only in whether the JAR is
+committed:
+
+| Flavour | Ships | `mvnw` reads | Bootstrap |
+|---|---|---|---|
+| **`bin`** (default) | `mvnw`, `mvnw.cmd`, **+ `maven-wrapper.jar`** | `wrapperUrl` | Runs the committed JAR, which downloads Maven |
+| `script` | scripts only | `wrapperUrl` | Same script as `bin`, but fetches the JAR first |
+| `only-script` | scripts only | `distributionUrl` | Pure shell — no JAR; the script downloads and unpacks Maven itself |
+
+Under `bin`/`script` the script never reads `distributionUrl` at all — the JAR does. Only
+`only-script` reads it directly.
+
+**`bin` is the default because it is what the estate already uses**: of the 79 maintained
+branches, 75 are `bin` and only 4 are `only-script`. Regenerating as `bin` therefore keeps
+each branch's existing shape and produces the smallest diff. Choosing `only-script` would
+delete the committed JAR and swap in a different `mvnw` across nearly every branch at once —
+a defensible modernisation, but a much larger change to land in one pass.
+
+Either way the plugin drops `.mvn/wrapper/MavenWrapperDownloader.java`, a Takari-era file
+present on 45 branches that no current distribution ships. That is safe: the modern script
+only uses it as a fallback for downloading the JAR when neither `curl` nor `wget` exists, and
+guards it with an existence check — and under `bin` the JAR is committed, so that path never
+runs. It is safe **because `mvnw` is replaced in the same commit**; removing the file while
+leaving an old Takari script in place would not be.
 
 ### Resolving the parent POM
 
@@ -167,7 +194,7 @@ file — is the thing to look at.
 | Input | Description | Default |
 |---|---|---|
 | `regenerate` | Run the wrapper plugin instead of editing the properties file | `false` |
-| `wrapper_type` | `only-script` (no JAR), `bin`, or `script` | `only-script` |
+| `wrapper_type` | `bin` (keeps the JAR), `only-script` (no JAR), or `script` — see [Wrapper flavours](#wrapper-flavours) | `bin` |
 | `java_version` | JDK used to run the plugin | `17` |
 
 ### Branch handling
