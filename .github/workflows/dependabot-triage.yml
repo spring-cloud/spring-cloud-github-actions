@@ -34,7 +34,7 @@ on:
           - oss
           - commercial
       merge_green:
-        description: 'Merge green OSS npm / github_actions PRs once triage has filed them (docs-build needs no milestone or project). Maven PRs are never merged.'
+        description: 'Merge green npm / github_actions PRs, OSS and commercial, once triage has filed them (docs-build needs no milestone; the project board is OSS-only). Maven PRs are never merged.'
         required: false
         type: boolean
         default: true
@@ -523,19 +523,27 @@ jobs:
             // Gated on state === 'ready', which the scan defines as every check passing,
             // mergeable, and a CLEAN merge state - so branch protection and conflicts are
             // already excluded and there is nothing to re-derive here.
-            if (!MERGE_GREEN || scan.type !== 'oss') continue;
+            if (!MERGE_GREEN) continue;
             if (!MERGEABLE_ECOSYSTEMS.has(pr.ecosystem)) continue;
             if (pr.state !== 'ready') continue;
 
-            // A release branch PR must be filed first - milestone and board - so merging
-            // never loses the record of which train shipped it. docs-build belongs to no
-            // train and gets neither by design, so requiring them there would mean never
-            // merging a docs update at all.
-            if (pr.isReleaseBranch && !(milestoneOk && projectOk)) {
-              const missing = [!milestoneOk && 'milestone', !projectOk && 'project']
-                .filter(Boolean).join(' and ');
-              record(pr, 'merge', 'skipped', `not filed yet - waiting on ${missing}`);
-              continue;
+            // A release branch PR must be filed before it is merged, so merging never
+            // loses the record of which train shipped it. docs-build belongs to no train
+            // and gets neither a milestone nor a board by design, so requiring them there
+            // would mean never merging a docs update at all.
+            //
+            // The board applies to OSS only - commercial PRs are never added to one - so
+            // that half of the requirement is taken from the scan's own verdict rather
+            // than re-deciding it here: projectState is 'n/a' exactly when no board was
+            // ever expected, which covers both commercial and docs-build.
+            if (pr.isReleaseBranch) {
+              const needsProject = pr.projectState !== 'n/a';
+              if (!milestoneOk || (needsProject && !projectOk)) {
+                const missing = [!milestoneOk && 'milestone',
+                  needsProject && !projectOk && 'project'].filter(Boolean).join(' and ');
+                record(pr, 'merge', 'skipped', `not filed yet - waiting on ${missing}`);
+                continue;
+              }
             }
 
             if (DRY) {

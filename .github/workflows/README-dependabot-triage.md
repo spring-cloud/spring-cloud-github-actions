@@ -35,7 +35,7 @@ For each open Dependabot PR, in order:
 | **Project** | `projectState == resolved` and the PR is not already on the board | Adds it via GraphQL `addProjectV2ItemById` |
 | **Rebase** | `state == conflicting` | Comments `@dependabot rebase` — see [Rebase idempotency](#rebase-idempotency) |
 | **Close** | `state == unmaintained` | Comments why, then closes — see [Closing PRs on unmaintained branches](#closing-prs-on-unmaintained-branches) |
-| **Merge** | a green OSS `npm` / `github_actions` PR — see [Merging green dependency PRs](#merging-green-dependency-prs) | Merges with `merge_method` |
+| **Merge** | a green `npm` / `github_actions` PR — see [Merging green dependency PRs](#merging-green-dependency-prs) | Merges with `merge_method` |
 
 ### What it deliberately does not do
 
@@ -52,22 +52,26 @@ For each open Dependabot PR, in order:
 ## Merging green dependency PRs
 
 With `merge_green` (on by default, including on the schedule), a PR is merged when **all**
-of these hold:
+of these hold — in **OSS and commercial** repositories alike:
 
 | Condition | Why |
 |---|---|
-| Repository is **OSS** | Commercial merges stay manual |
 | Ecosystem is **`npm_and_yarn`** or **`github_actions`** | Build and docs tooling. **Maven is never merged** — those change what the projects ship |
 | `state == ready` | Every check passing, mergeable, and a `CLEAN` merge state |
-| Milestone **and** project are set — *release branches only* | Merging must not lose the record of which train shipped it |
+| Milestone is set — *release branches only* | Merging must not lose the record of which train shipped it |
+| Project board is set — *OSS release branches only* | Commercial PRs are never added to a board, so requiring one would block them permanently |
+
+**Only the board requirement is OSS-specific**, and it is taken from the scan's own verdict
+rather than re-decided here: `projectState` is `n/a` exactly when no board was ever expected,
+which covers commercial repositories and `docs-build` together.
 
 The ecosystem comes from Dependabot's own branch name
 (`dependabot/npm_and_yarn/docs/main/antora-3.2.0`), which is the only reliable source: a PR
 title names the dependency, not what manages it.
 
-**`docs-build` is exempt from the milestone and project requirement.** That branch belongs
-to no release train and gets neither by design, so requiring them would mean never merging a
-docs update at all.
+**`docs-build` is exempt from both requirements.** That branch belongs to no release train
+and gets neither a milestone nor a board by design, so requiring them would mean never
+merging a docs update at all.
 
 **Eligibility is evaluated after this run's own work**, not from the scan — so a PR this run
 has just milestoned and added to the board is merged immediately, rather than waiting four
@@ -181,7 +185,7 @@ actually be merged until the freeze lifts.)
 |-------|-------------|----------|---------|
 | `projects` | Comma-separated project names. Empty processes all of them. | No | `''` |
 | `repo_type` | `both`, `oss`, or `commercial` | No | `both` |
-| `merge_green` | Merge green OSS npm / github_actions PRs | No | `true` |
+| `merge_green` | Merge green npm / github_actions PRs (OSS and commercial) | No | `true` |
 | `merge_method` | `squash`, `merge`, or `rebase` | No | `squash` |
 | `close_unmaintained` | Close PRs against branches no longer in `projects.json` | No | `true` |
 | `dry_run` | Report what would change without changing it | No | `true` |
