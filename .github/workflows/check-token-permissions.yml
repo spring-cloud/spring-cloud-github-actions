@@ -82,8 +82,8 @@ jobs:
 
           // A GraphQL call can exit zero and still carry an "errors" array, so the
           // body is inspected regardless of exit status.
-          const graphql = query => {
-            const r = gh(['api', 'graphql', '-f', `query=${query}`]);
+          const graphql = (query, ...fields) => {
+            const r = gh(['api', 'graphql', '-f', `query=${query}`, ...fields]);
             let body = null;
             try { body = JSON.parse(r.out); } catch (_) { /* non-JSON error output */ }
             const errors = body?.errors || [];
@@ -152,15 +152,33 @@ jobs:
             miles.ok ? 'ok' : `cannot list milestones: ${miles.err}`);
 
           // ── The releaser config branch that resolves a PR's project (feature 2) ─────
+          // The file names are also where the board titles come from: a snapshot properties
+          // file 2025_1_3-snapshot.properties corresponds to the board "2025.1.3". Deriving
+          // them here means the write probe below can target the board actually in use
+          // without anyone having to name it.
           const releaser = gh(['api',
             `repos/${ORG}/spring-cloud-release/contents/?ref=jenkins-releaser-config`,
-            '--jq', '[.[] | select(.name | endswith("-snapshot.properties"))] | length']);
+            '--jq', '[.[] | select(.name | endswith("-snapshot.properties")) | .name] | join(",")']);
+          let trains = [];
+          if (releaser.ok) {
+            trains = releaser.out.trim().split(',').filter(Boolean)
+              .map(n => n.replace('-snapshot.properties', '').replace(/_/g, '.'));
+          }
+          const cmpVer = (a, b) => {
+            const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+            for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+              if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+            }
+            return 0;
+          };
+          trains.sort(cmpVer);
+          const newestTrain = trains[trains.length - 1] || '';
           add('`jenkins-releaser-config` readable', releaser.ok ? 'ok' : 'fail',
-            releaser.ok ? `${releaser.out.trim()} snapshot properties file(s) found`
+            releaser.ok ? `${trains.length} snapshot properties file(s): ${trains.join(', ') || 'none'}`
                         : `cannot read the branch: ${releaser.err}`);
 
           // ── Projects v2 read ───────────────────────────────────────────────────────
-          const projQuery = `{ organization(login: "${ORG}") { projectsV2(first: 100) { nodes { number title closed } } } }`;
+          const projQuery = `{ organization(login: "${ORG}") { projectsV2(first: 100) { nodes { id number title closed } } } }`;
           const projRead = graphql(projQuery);
           const insufficient = r => r.errors.some(e => e.type === 'INSUFFICIENT_SCOPES');
 
@@ -179,32 +197,69 @@ jobs:
               projRead.errors[0]?.message || projRead.err || 'unknown GraphQL error');
           }
 
-          // ── Projects v2 write ──────────────────────────────────────────────────────
-          // Probed with deliberately invalid node IDs. A token lacking the scope is
-          // rejected before the IDs are ever resolved (INSUFFICIENT_SCOPES); a token
-          // that has it gets as far as failing to find them. Either way nothing is
-          // added to any board - there is no object for these IDs to point at.
-          const writeProbe = graphql(
-            'mutation { addProjectV2ItemById(input: {projectId: "PVT_probe_invalid", ' +
-            'contentId: "PVTI_probe_invalid"}) { item { id } } }');
-          if (insufficient(writeProbe)) {
-            add('Projects v2 writable', 'fail',
-              'INSUFFICIENT_SCOPES - token needs the `project` scope to add PRs to a board');
-          } else {
-            add('Projects v2 writable', 'ok',
-              'scope check passed (probe rejected on the invalid IDs, as intended)');
-          }
-
-          // ── Optional: is the specific board present? ────────────────────────────────
-          if (WANT_PROJECT) {
+          // ── Which board should the write probe target? ──────────────────────────────
+          // Defaults to the newest release train, which is the board triage actually writes
+          // to, so a plain run checks the thing that matters.
+          const targetTitle = WANT_PROJECT || newestTrain;
+          let targetBoard = null;
+          if (targetTitle) {
             if (projectsVisible === null) {
-              add(`Board \`${WANT_PROJECT}\` present`, 'warn',
+              add(`Board \`${targetTitle}\` present`, 'warn',
                 'could not check - Projects v2 is not readable with this token');
             } else {
-              const hit = projectsVisible.find(n => n.title === WANT_PROJECT);
-              add(`Board \`${WANT_PROJECT}\` present`, hit ? 'ok' : 'fail',
-                hit ? `found (#${hit.number}${hit.closed ? ', closed' : ''})`
-                    : `no board titled \`${WANT_PROJECT}\` in \`${ORG}\``);
+              targetBoard = projectsVisible.find(n => n.title === targetTitle) || null;
+              add(`Board \`${targetTitle}\` present`, targetBoard ? 'ok' : 'fail',
+                targetBoard ? `found (#${targetBoard.number}${targetBoard.closed ? ', closed' : ''})`
+                            : `no board titled \`${targetTitle}\` in \`${ORG}\``);
+            }
+          }
+
+          // ── Projects v2 write ──────────────────────────────────────────────────────
+          // Two distinct things can stop a write, and they need separate probes:
+          //
+          //   1. the token lacks the `project` scope        -> INSUFFICIENT_SCOPES
+          //   2. the account lacks write access to *that board* -> "does not have the
+          //      correct permissions to execute `AddProjectV2ItemById`"
+          //
+          // The scope probe below uses invalid node IDs, so GitHub never resolves a board
+          // and case 2 cannot surface - which is exactly how an earlier version of this
+          // workflow reported a green write check while triage failed on every PR. The
+          // board probe therefore uses the *real* project ID with an invalid content ID,
+          // so the per-board authorization check actually runs. Nothing can be added
+          // either way: no PR has the content ID being passed.
+          const scopeProbe = graphql(
+            'mutation { addProjectV2ItemById(input: {projectId: "PVT_probe_invalid", ' +
+            'contentId: "PVTI_probe_invalid"}) { item { id } } }');
+          const hasScope = !insufficient(scopeProbe);
+          add('Projects v2 `project` scope', hasScope ? 'ok' : 'fail',
+            hasScope ? 'granted (scope only - board access is checked separately below)'
+                     : 'INSUFFICIENT_SCOPES - token needs the `project` scope');
+
+          const forbidden = r => r.errors.some(e =>
+            /does not have the correct permissions|FORBIDDEN|Resource not accessible/i
+              .test(e.message || '') || e.type === 'FORBIDDEN');
+
+          let canWriteBoard = null;
+          if (!hasScope) {
+            add('Projects v2 writable on the board', 'fail',
+              'cannot check without the `project` scope');
+            canWriteBoard = false;
+          } else if (!targetBoard) {
+            add('Projects v2 writable on the board', 'warn',
+              'no board resolved to probe - pass project_title to check a specific board');
+          } else {
+            const boardProbe = graphql(
+              'mutation($p:ID!){ addProjectV2ItemById(input: {projectId: $p, ' +
+              'contentId: "PVTI_probe_invalid"}) { item { id } } }', '-f', `p=${targetBoard.id}`);
+            if (forbidden(boardProbe)) {
+              canWriteBoard = false;
+              add(`Projects v2 writable on \`${targetTitle}\``, 'fail',
+                `${who.ok ? who.out.trim() : 'this account'} has the scope but no write access ` +
+                `to board #${targetBoard.number} - grant it under the project's Manage access`);
+            } else {
+              canWriteBoard = true;
+              add(`Projects v2 writable on \`${targetTitle}\``, 'ok',
+                `authorized (probe rejected on the invalid content ID, as intended)`);
             }
           }
 
@@ -229,7 +284,8 @@ jobs:
             ['2a — Set milestones on Dependabot PRs',
               passing('Milestones readable') && canWriteOss],
             ['2b — Add OSS PRs to the correct project',
-              passing('Projects v2 readable') && passing('Projects v2 writable')
+              passing('Projects v2 readable') && passing('Projects v2 `project` scope')
+                && canWriteBoard === true
                 && passing('`jenkins-releaser-config` readable')],
             ['3 — Comment `@dependabot rebase` on conflicts', canWriteOss],
             ['4 — Daily Dependabot PR report',
