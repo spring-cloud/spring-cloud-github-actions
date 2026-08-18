@@ -33,6 +33,11 @@ on:
           - both
           - oss
           - commercial
+      close_unmaintained:
+        description: 'Close Dependabot PRs opened against branches that are no longer maintained. They target locked branches and can never merge.'
+        required: false
+        type: boolean
+        default: true
       dry_run:
         description: 'Dry run, if checked nothing is changed, but you can see what would happen'
         required: false
@@ -232,6 +237,7 @@ jobs:
           RESULT_FILE: ${{ steps.scan.outputs.result-file }}
           SAFE_NAME: ${{ steps.scan.outputs.safe-name }}
           DRY_RUN: ${{ inputs.dry_run != false }}
+          CLOSE_UNMAINTAINED: ${{ github.event_name == 'schedule' || inputs.close_unmaintained != false }}
           ORG: spring-cloud
         run: |
           node - << 'JSEOF'
@@ -239,6 +245,7 @@ jobs:
           const { execFileSync } = require('child_process');
 
           const DRY = process.env.DRY_RUN !== 'false';
+          const CLOSE_UNMAINTAINED = process.env.CLOSE_UNMAINTAINED === 'true';
           const ORG = process.env.ORG;
           const scan = JSON.parse(fs.readFileSync(process.env.RESULT_FILE, 'utf8'));
 
@@ -329,9 +336,47 @@ jobs:
           const [owner, name] = scan.repo.split('/');
 
           for (const pr of scan.prs) {
-            // Retired branches are locked and their PRs cannot merge - the report already
-            // calls those out for closing. Touching them would be noise at best.
-            if (pr.state === 'unmaintained') continue;
+            // A PR against a branch that is no longer maintained targets a locked branch
+            // and can never merge, so the only useful action is to close it. Milestone and
+            // project are skipped entirely for these - there is no train to file them under.
+            if (pr.state === 'unmaintained') {
+              if (!CLOSE_UNMAINTAINED) {
+                record(pr, 'close', 'skipped', `${pr.baseRefName} is not maintained`);
+                continue;
+              }
+              if (DRY) {
+                record(pr, 'close', 'would', `close - ${pr.baseRefName} is not maintained`);
+                continue;
+              }
+              // The comment goes first and is the whole audit trail: closing in silence
+              // leaves no way to tell an intentional close from a mistaken one, and the
+              // judgement rests on projects.json, which can be wrong if a live branch was
+              // dropped from it. Closing is reversible; an unexplained close is not.
+              const body =
+                `Closing automatically: \`${pr.baseRefName}\` is no longer a maintained ` +
+                `branch of this repository (it is not listed in ` +
+                `[config/projects.json](https://github.com/spring-cloud/spring-cloud-github-actions/blob/main/config/projects.json)), ` +
+                `so this update cannot be merged here.\n\n` +
+                `If that is wrong - the branch is still maintained and was dropped from ` +
+                `projects.json by mistake - reopen this PR and restore the branch there.\n\n` +
+                `Opened by [dependabot-triage.yml](https://github.com/spring-cloud/spring-cloud-github-actions/blob/main/.github/workflows/dependabot-triage.yml).`;
+              const c = ghRetry(['api', `repos/${scan.repo}/issues/${pr.number}/comments`,
+                '--method', 'POST', '-f', `body=${body}`]);
+              if (!c.ok) {
+                record(pr, 'close', 'error', `could not comment: ${c.err}`);
+                errors.push(`#${pr.number} close: ${c.err}`);
+                continue;
+              }
+              const cl = ghRetry(['api', `repos/${scan.repo}/pulls/${pr.number}`,
+                '--method', 'PATCH', '-f', 'state=closed']);
+              if (cl.ok) {
+                record(pr, 'close', 'closed', `${pr.baseRefName} is not maintained`);
+              } else {
+                record(pr, 'close', 'error', cl.err);
+                errors.push(`#${pr.number} close: ${cl.err}`);
+              }
+              continue;
+            }
 
             // ── 1. Milestone ─────────────────────────────────────────────────────────
             if (pr.milestoneState === 'unset') {
@@ -448,9 +493,10 @@ jobs:
           const result = {
             repo: scan.repo, type: scan.type, project: scan.project,
             dryRun: DRY,
-            prsConsidered: scan.prs.filter(p => p.state !== 'unmaintained').length,
+            prsConsidered: scan.prs.length,
             counts: {
               would: tally('would'), set: tally('set'), added: tally('added'),
+              closed: tally('closed'),
               requested: tally('requested'), already: tally('already'),
               skipped: tally('skipped'), error: tally('error'),
             },
@@ -487,6 +533,7 @@ jobs:
           path: results
 
       - name: Write summary
+        id: write-summary
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -539,4 +586,75 @@ jobs:
 
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
           console.log(md.join('\n'));
+
+          // ── Google Chat: only when a PR actually changed hands ──────────────────────
+          // Restricted to the two irreversible-looking outcomes. Setting a milestone or
+          // adding a board item happens constantly and is not worth a message; a PR being
+          // closed or merged is something the team should hear about without going and
+          // looking. `merged` is included now although triage does not merge yet, so the
+          // notification needs no change when it starts to.
+          //
+          // A dry run cannot trigger this: it only ever records `would`, never `closed`
+          // or `merged`, so the gate is the status itself rather than a separate check.
+          const notable = results.flatMap(r =>
+            (r.actions || [])
+              .filter(a => a.status === 'closed' || a.status === 'merged')
+              .map(a => ({ ...a, repo: r.repo })));
+
+          if (notable.length) {
+            const chat = [];
+            const closed = notable.filter(a => a.status === 'closed');
+            const merged = notable.filter(a => a.status === 'merged');
+
+            const headline = [
+              merged.length ? `${merged.length} merged` : '',
+              closed.length ? `${closed.length} closed` : '',
+            ].filter(Boolean).join(', ');
+            chat.push(`🤖 *Dependabot Triage* — ${headline}`);
+
+            // Chat formatting is its own thing (*bold*, <url|text>), as in the report.
+            const section = (title, items, render, limit = 15) => {
+              if (!items.length) return;
+              chat.push('', `*${title}* (${items.length})`);
+              for (const a of items.slice(0, limit)) chat.push(`• ${render(a)}`);
+              if (items.length > limit) chat.push(`• …and ${items.length - limit} more`);
+            };
+
+            section('Merged', merged, a =>
+              `${a.repo} <${a.url}|#${a.number}>${a.detail ? ` — ${a.detail}` : ''}`);
+            section('Closed — branch no longer maintained', closed, a =>
+              `${a.repo} <${a.url}|#${a.number}> — ${a.base}`);
+
+            const delimiter = `ghadelim_${results.length}_${notable.length}`;
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,
+              `chat-text<<${delimiter}\n${chat.join('\n')}\n${delimiter}\n`);
+            console.log(`\nGoogle Chat notification queued (${notable.length} PR(s)).`);
+          } else {
+            console.log('\nNothing was closed or merged - no Google Chat notification.');
+          }
           JSEOF
+
+      # Skipped entirely when nothing was closed or merged: chat-text is only written in
+      # that case, so a routine run that just set milestones stays silent.
+      - name: Send Google Chat notification
+        if: steps.write-summary.outputs.chat-text != ''
+        env:
+          WEBHOOK_URL: ${{ secrets.SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL }}
+          CHAT_TEXT: ${{ steps.write-summary.outputs.chat-text }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${WEBHOOK_URL}" ]]; then
+            echo "SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL is not set - skipping Google Chat notification."
+            exit 0
+          fi
+
+          TEXT=$(printf '%s\n\n<%s|View run>' "$CHAT_TEXT" "$RUN_URL")
+          jq -n --arg text "$TEXT" '{text: $text}' > chat-message.json
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'Content-Type: application/json; charset=UTF-8' \
+            -d @chat-message.json \
+            "${WEBHOOK_URL}"

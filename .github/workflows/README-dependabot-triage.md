@@ -34,12 +34,10 @@ For each open Dependabot PR, in order:
 | **Milestone** | `milestoneState == unset` | Sets the milestone matching the base branch's version |
 | **Project** | `projectState == resolved` and the PR is not already on the board | Adds it via GraphQL `addProjectV2ItemById` |
 | **Rebase** | `state == conflicting` | Comments `@dependabot rebase` — see [Rebase idempotency](#rebase-idempotency) |
+| **Close** | `state == unmaintained` | Comments why, then closes — see [Closing PRs on unmaintained branches](#closing-prs-on-unmaintained-branches) |
 
 ### What it deliberately does not do
 
-- **PRs on retired branches are skipped entirely.** Those branches are locked, so their PRs
-  cannot merge; the report lists them for closing instead. See
-  [Agreement with branch locking](#agreement-with-branch-locking).
 - **A missing milestone is never created.** It is reported and left alone, so which
   milestones exist stays a human decision about the release train.
 - **An existing, different milestone is never overwritten.** A mismatch is recorded and
@@ -47,7 +45,65 @@ For each open Dependabot PR, in order:
 - **`docs-build` PRs get neither a milestone nor a board.** They belong to no release train —
   see the [report's note](README-dependabot-report.md#the-docs-build-exception) on why this
   matters (that branch carries a placeholder `0.0.1-SNAPSHOT` version).
-- **Nothing is merged or closed.** Merging is out of scope pending the team's decision.
+- **Nothing is merged.** Merging is out of scope pending the team's decision. Closing
+  unmaintained PRs is in scope — see above.
+
+## Closing PRs on unmaintained branches
+
+A Dependabot PR whose base branch is not in `projects.json` targets a **locked** branch: it
+can never merge, and it will sit open forever. With `close_unmaintained` (on by default,
+including on the schedule) triage comments the reason and then closes it.
+
+**The comment is posted first, and it is the point.** Closing in silence leaves no way to
+tell a deliberate close from a mistaken one, and the judgement rests entirely on
+`projects.json` — which is wrong if a still-live branch was dropped from it. So the comment
+names the branch, links `projects.json`, and says what to do if the call was wrong:
+
+> Closing automatically: `4.3.x` is no longer a maintained branch of this repository (it is
+> not listed in config/projects.json), so this update cannot be merged here.
+>
+> If that is wrong — the branch is still maintained and was dropped from projects.json by
+> mistake — reopen this PR and restore the branch there.
+
+If the comment cannot be posted the PR is **not** closed, and the failure is reported. An
+unexplained close is worse than none: closing is reversible, but only if someone can tell
+why it happened.
+
+Milestone and project are skipped for these PRs — there is no train to file them under.
+
+Set `close_unmaintained` to false to go back to reporting them and leaving them open.
+
+## Notifications
+
+A Google Chat message is posted **only when a PR was actually closed or merged**. Setting a
+milestone or adding a board item happens on most runs and is not worth a message; a PR
+changing hands is something the team should hear about without going to look for it.
+
+```
+🤖 *Dependabot Triage* — 1 merged, 2 closed
+
+*Merged* (1)
+• spring-cloud/spring-cloud-openfeign <#1500> — squash
+
+*Closed — branch no longer maintained* (2)
+• spring-cloud/spring-cloud-openfeign <#1332> — 4.2.x
+• spring-cloud/spring-cloud-openfeign <#1400> — 4.3.x
+```
+
+Two details:
+
+- **A dry run can never send one.** It records `would`, never `closed` or `merged`, so the
+  status itself is the gate — there is no separate dry-run check to get wrong.
+- **`merged` is already handled** even though triage does not merge yet, so adding merging
+  later needs no change here.
+
+Sent to `SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL`, the same webhook
+[`dependabot-report.yml`](README-dependabot-report.md) and
+[`ci-status-report.yml`](README-ci-status-report.md) use. If it is unset the step logs that
+it is skipping and the run still succeeds.
+
+Everything else stays in the job summary. The daily report re-derives state from scratch, so
+a quiet failure here still surfaces there as unset milestones or unresolved projects.
 
 ## Rebase idempotency
 
@@ -94,6 +150,7 @@ actually be merged until the freeze lifts.)
 |-------|-------------|----------|---------|
 | `projects` | Comma-separated project names. Empty processes all of them. | No | `''` |
 | `repo_type` | `both`, `oss`, or `commercial` | No | `both` |
+| `close_unmaintained` | Close PRs against branches no longer in `projects.json` | No | `true` |
 | `dry_run` | Report what would change without changing it | No | `true` |
 | `token` | Token with write access to issues/PRs and the `project` scope. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | `''` |
 
@@ -102,6 +159,7 @@ actually be merged until the freeze lifts.)
 | Secret | Description | Required |
 |--------|-------------|----------|
 | `GH_ACTIONS_REPO_TOKEN` | Needs repo write (milestones, comments) **and the `project` scope** for the board step. | Yes (unless `token` is given) |
+| `SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL` | Google Chat webhook for the close/merge notification. Unset means the step skips and the run still succeeds. | No |
 
 Run [`check-token-permissions.yml`](README-check-token-permissions.md) to confirm a token
 can do all of this — the `project` scope is not implied by `repo` or `admin:org`, and is the
@@ -129,10 +187,8 @@ everything was already in order are left out of the table entirely.
 
 ## Notes
 
-- **No Google Chat notification.** The daily report is what the team reads, and it re-derives
-  everything from scratch — so if triage fails or is misconfigured, the gaps simply show up
-  in the next report as unset milestones or unresolved projects. Triage failing quietly
-  cannot hide anything.
+- **Google Chat only when a PR changes hands.** See
+  [Notifications](#notifications) — routine triage stays silent.
 - **A failure on one PR never stops the rest.** Errors are collected per PR and listed under
   **Errors** in the summary; the job still ends green, and the next run retries whatever
   did not take, since every action is derived from current state rather than a queue.
