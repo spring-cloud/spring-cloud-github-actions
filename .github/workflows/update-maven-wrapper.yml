@@ -561,6 +561,14 @@ jobs:
       # branch needs work. Regenerating means running maven-wrapper-plugin against a real
       # checkout, which rewrites mvnw, mvnw.cmd and the JAR as well as the properties -
       # more than the contents API can express, hence the checkout, JDK and git push.
+      # Checked out into a subdirectory on purpose: a checkout at the workspace root
+      # would clean the wrapper-*.json the previous step just wrote there.
+      - name: Checkout shared actions
+        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        uses: actions/checkout@v4
+        with:
+          path: ci-actions
+
       - name: Checkout target branch
         if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
         uses: actions/checkout@v4
@@ -578,6 +586,20 @@ jobs:
           distribution: temurin
           java-version: ${{ inputs.java_version || '17' }}
 
+      # .settings.xml resolves ${env.COMMERCIAL_ARTIFACTORY_USERNAME} and friends, so the
+      # secrets have to reach Maven as environment variables. This is the repo's own action
+      # for that, which also falls back to the read-only credentials when the read/write
+      # pair is unavailable - the case that silently produced empty credentials before.
+      # It writes to $GITHUB_ENV, so it must run in a step of its own, before Maven.
+      - name: Set commercial credentials
+        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        env:
+          USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+          PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+          RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        uses: ./ci-actions/.github/actions/set-commercial-creds-env-vars
+
       - name: Regenerate wrapper and open PR
         if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
         env:
@@ -591,13 +613,12 @@ jobs:
           MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
           WRAPPER_TYPE: ${{ inputs.wrapper_type || 'only-script' }}
-          # Whatever the branch's own .settings.xml refers to. Commercial branches use the
-          # COMMERCIAL_* pair; the OSS snapshot repository is read anonymously, so its
-          # deploy credentials are not needed here and are left unset.
-          COMMERCIAL_ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
-          COMMERCIAL_ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
-          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          # COMMERCIAL_ARTIFACTORY_USERNAME/PASSWORD deliberately absent: they arrive from
+          # $GITHUB_ENV via the step above, and a step-level env: here would override it
+          # with the raw secret, losing the read-only fallback. CI_DEPLOY_* is what the
+          # repo.spring.io server entry in .settings.xml resolves.
+          CI_DEPLOY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          CI_DEPLOY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
         run: |
           set -uo pipefail
 
@@ -624,6 +645,23 @@ jobs:
           if [ ! -f .settings.xml ]; then
             cd ..; record "regenerate-failed" "no .settings.xml on this branch"; exit 0
           fi
+
+          # Report which ${env.*} placeholders this branch's .settings.xml depends on and
+          # whether each one actually arrived. An empty credential otherwise surfaces only
+          # as a 401 from Artifactory, or as a resolution failure that reads like a missing
+          # artifact - neither of which points at the real cause. Names only; never values.
+          echo "Credentials referenced by .settings.xml:"
+          MISSING=""
+          for VAR in $(grep -oE '\$\{env\.[A-Za-z0-9_]+\}' .settings.xml \
+                        | sed -E 's/^\$\{env\.([A-Za-z0-9_]+)\}$/\1/' | sort -u); do
+            if [ -n "${!VAR:-}" ]; then
+              echo "  ${VAR}: set"
+            else
+              echo "  ${VAR}: EMPTY"
+              MISSING="${MISSING} ${VAR}"
+            fi
+          done
+          [ -n "${MISSING}" ] && echo "Warning: empty credentials:${MISSING}"
 
           # The runner's own mvn, deliberately not ./mvnw: using the wrapper to regenerate
           # the wrapper is circular - the old wrapper would have to boot the old Maven

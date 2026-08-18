@@ -114,9 +114,23 @@ avoids Maven. Two things make it work, and both are easy to get wrong:
   the snapshot repositories are not in play at all and the parent cannot resolve, however
   correct the settings file is.
 
-Credentials come from the environment the settings file expects: commercial branches use
-`COMMERCIAL_ARTIFACTORY_USERNAME` / `_PASSWORD`; the OSS snapshot repository is read
-anonymously, so its deploy credentials are not needed.
+### Credentials
+
+`.settings.xml` resolves its servers from `${env.*}` placeholders, so the secrets only work
+if they reach Maven **as environment variables**:
+
+- `COMMERCIAL_ARTIFACTORY_USERNAME` / `_PASSWORD` are set by this repo's own
+  [`set-commercial-creds-env-vars`](../actions/set-commercial-creds-env-vars/action.yml)
+  action, which also falls back to the read-only `ARTIFACTORY_*` pair when the read/write
+  one is unavailable. It writes to `$GITHUB_ENV`, so it runs as its own step before Maven —
+  and the regenerate step deliberately does **not** re-declare those two in its `env:`,
+  since a step-level value would override `$GITHUB_ENV` and lose the fallback.
+- `CI_DEPLOY_USERNAME` / `_PASSWORD` back the `repo.spring.io` server entry.
+
+Before running Maven, the step prints every `${env.*}` name the branch's `.settings.xml`
+refers to and whether it arrived, as `set` or `EMPTY` (names only, never values). An empty
+credential otherwise shows up only as a 401, or as a resolution failure that reads like a
+missing artifact — neither of which points at the real cause.
 
 The snapshot parents genuinely are published — `spring-cloud-build:5.0.3-SNAPSHOT` resolves
 from `repo.spring.io` while Maven Central 404s on it, which is exactly why Dependabot's own
