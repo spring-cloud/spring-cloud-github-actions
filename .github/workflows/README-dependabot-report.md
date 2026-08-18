@@ -25,14 +25,18 @@ gate. Watch the job summary or the Chat message, not the run's pass/fail status.
 ## Triggers
 
 - **`workflow_dispatch`** — on demand, with the inputs below.
-- **`schedule`** — weekdays at ~6:17am US Eastern. As in
-  [`ci-status-report.yml`](ci-status-report.yml), this is two month-selected cron entries
-  (EDT `UTC-4`, EST `UTC-5`) because GitHub Actions cron is always UTC with no notion of
-  DST; for a few days either side of the real DST boundary it fires an hour early or late,
-  which is an accepted tradeoff for a status report. The minute is `:17` rather than `:00`
-  because GitHub flags the top of the hour as the most congested slot, and it is offset
-  from `ci-status-report.yml`'s `:07` so the two reports do not contend for runners or land
-  as one wall of text.
+- **`schedule`** — weekdays at ~7:17am US Eastern, **an hour after**
+  [`dependabot-triage.yml`](README-dependabot-triage.md), so this report describes the state
+  once triage has filed, merged and closed — not a backlog already dealt with by the time
+  anyone reads it.
+
+  As in [`ci-status-report.yml`](ci-status-report.yml), this is two month-selected cron
+  entries (EDT `UTC-4`, EST `UTC-5`) because GitHub Actions cron is always UTC with no
+  notion of DST. Triage uses the same split and the same weekdays, so the one-hour gap holds
+  all year — at a DST boundary both shift together, preserving their order. The minute is
+  `:17` rather than `:00` because GitHub flags the top of the hour as the most congested
+  slot, and it is offset from `ci-status-report.yml`'s `:07` so the two reports do not
+  contend for runners or land as one wall of text.
 
 ## Inputs
 

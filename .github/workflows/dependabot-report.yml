@@ -38,18 +38,22 @@ on:
         type: string
         default: ''
 
-  # Weekdays at ~6:17am US Eastern. As in ci-status-report.yml, GitHub Actions cron is
-  # always UTC with no notion of DST, so this is split into two month-selected entries -
-  # one at the EDT offset (UTC-4), one at EST (UTC-5). For a few days either side of the
-  # real DST boundary this fires an hour early or late, which is an accepted tradeoff for
-  # a status report.
+  # Weekdays at ~7:17am US Eastern, an hour AFTER dependabot-triage.yml, so this report
+  # describes the state once triage has filed, merged and closed - not a backlog that has
+  # already been dealt with by the time anyone reads it.
+  #
+  # As in ci-status-report.yml, GitHub Actions cron is always UTC with no notion of DST, so
+  # this is split into two month-selected entries - one at the EDT offset (UTC-4), one at
+  # EST (UTC-5). Triage uses the same split and the same weekdays, so the one-hour gap holds
+  # all year. For a few days either side of the real DST boundary both fire an hour early or
+  # late together, which keeps their order intact.
   #
   # Minute is :17 rather than :00 - GitHub flags the top of the hour as the most congested
   # slot for scheduled workflows. It is deliberately offset from ci-status-report.yml's
   # :07 so the two reports do not contend for runners or arrive as one wall of text.
   schedule:
-    - cron: '17 10 * 3-10 1-5'      # ~6:17am EDT, March-October
-    - cron: '17 11 * 11,12,1,2 1-5' # ~6:17am EST, November-February
+    - cron: '17 11 * 3-10 1-5'      # ~7:17am EDT, March-October
+    - cron: '17 12 * 11,12,1,2 1-5' # ~7:17am EST, November-February
 
 permissions:
   contents: read

@@ -190,13 +190,21 @@ actually be merged until the freeze lifts.)
 ## Triggers
 
 - **`workflow_dispatch`** — on demand, with the inputs below.
-- **`schedule`** — every four hours (`41 */4 * * *`). Dependabot opens PRs once a day per
-  repository but not at a shared time (`spring-cloud-commons` runs ~03:22 UTC,
-  `spring-cloud-gateway` ~16:32 UTC), so no single slot catches everything promptly. Hourly
-  was the original intent, but one job per repository means ~35 jobs per run and runner
-  startup dominates the ~15s of real work; every four hours keeps the worst-case wait for a
-  milestone well under a working day at a sixth of the runner minutes. Nothing downstream
-  depends on the latency — the daily report re-derives state from scratch.
+- **`schedule`** — once a day on weekdays at ~6:17am US Eastern, **an hour before**
+  [`dependabot-report.yml`](README-dependabot-report.md). Triage files, merges and closes
+  first, so the report the team reads describes the state *after* that work rather than a
+  backlog already dealt with.
+
+  Both workflows use the same two month-selected cron entries for DST (EDT `UTC-4`, EST
+  `UTC-5`) and the same weekdays, so the one-hour gap holds all year instead of drifting to
+  two hours or zero at a DST boundary. **Keep the two in step** — an hour is comfortably
+  longer than a triage run, but GitHub starts scheduled runs 8–23 minutes late in practice,
+  so a smaller gap would not reliably preserve the order.
+
+  A consequence worth knowing: a PR opened after triage runs waits until the next weekday
+  morning. Dependabot opens PRs at staggered times (`spring-cloud-commons` ~03:22 UTC,
+  `spring-cloud-gateway` ~16:32 UTC), so one opened in the afternoon is filed and merged the
+  following morning, not the same day.
 
 ## Inputs
 
