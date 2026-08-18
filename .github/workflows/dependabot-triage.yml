@@ -359,7 +359,7 @@ jobs:
                 `so this update cannot be merged here.\n\n` +
                 `If that is wrong - the branch is still maintained and was dropped from ` +
                 `projects.json by mistake - reopen this PR and restore the branch there.\n\n` +
-                `Opened by [dependabot-triage.yml](https://github.com/spring-cloud/spring-cloud-github-actions/blob/main/.github/workflows/dependabot-triage.yml).`;
+                `Closed by [dependabot-triage.yml](https://github.com/spring-cloud/spring-cloud-github-actions/blob/main/.github/workflows/dependabot-triage.yml).`;
               const c = ghRetry(['api', `repos/${scan.repo}/issues/${pr.number}/comments`,
                 '--method', 'POST', '-f', `body=${body}`]);
               if (!c.ok) {
@@ -496,7 +496,7 @@ jobs:
             prsConsidered: scan.prs.length,
             counts: {
               would: tally('would'), set: tally('set'), added: tally('added'),
-              closed: tally('closed'),
+              closed: tally('closed'), merged: tally('merged'),
               requested: tally('requested'), already: tally('already'),
               skipped: tally('skipped'), error: tally('error'),
             },
@@ -555,10 +555,15 @@ jobs:
           if (dry) {
             md.push('> **Dry run** — nothing was changed. Re-run with `dry_run` unchecked to apply.', '');
           }
-          md.push(`${sum('would')} pending change(s), ` +
-            `${sum('set') + sum('added') + sum('requested')} applied, ` +
-            `${sum('already')} already done, ${sum('skipped')} skipped, ` +
-            `${sum('error')} error(s) across ${results.length} repositories.`);
+          const parts = [`${sum('would')} pending change(s)`,
+            `${sum('set') + sum('added') + sum('requested')} applied`];
+          // Only mentioned when they happened: these are the outcomes worth noticing, and
+          // padding every run with "0 merged, 0 closed" would bury them.
+          if (sum('merged')) parts.push(`**${sum('merged')} merged**`);
+          if (sum('closed')) parts.push(`**${sum('closed')} closed**`);
+          parts.push(`${sum('already')} already done`, `${sum('skipped')} skipped`,
+            `${sum('error')} error(s)`);
+          md.push(`${parts.join(', ')} across ${results.length} repositories.`);
           md.push('');
 
           const changed = results.filter(r =>
