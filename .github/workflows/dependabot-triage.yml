@@ -33,6 +33,20 @@ on:
           - both
           - oss
           - commercial
+      merge_green:
+        description: 'Merge green OSS npm / github_actions PRs once triage has filed them (docs-build needs no milestone or project). Maven PRs are never merged.'
+        required: false
+        type: boolean
+        default: true
+      merge_method:
+        description: 'How to merge a green dependency PR.'
+        required: false
+        type: choice
+        default: 'squash'
+        options:
+          - squash
+          - merge
+          - rebase
       close_unmaintained:
         description: 'Close Dependabot PRs opened against branches that are no longer maintained. They target locked branches and can never merge.'
         required: false
@@ -238,6 +252,8 @@ jobs:
           SAFE_NAME: ${{ steps.scan.outputs.safe-name }}
           DRY_RUN: ${{ inputs.dry_run != false }}
           CLOSE_UNMAINTAINED: ${{ github.event_name == 'schedule' || inputs.close_unmaintained != false }}
+          MERGE_GREEN: ${{ github.event_name == 'schedule' || inputs.merge_green != false }}
+          MERGE_METHOD: ${{ inputs.merge_method || 'squash' }}
           ORG: spring-cloud
         run: |
           node - << 'JSEOF'
@@ -246,6 +262,12 @@ jobs:
 
           const DRY = process.env.DRY_RUN !== 'false';
           const CLOSE_UNMAINTAINED = process.env.CLOSE_UNMAINTAINED === 'true';
+          const MERGE_GREEN = process.env.MERGE_GREEN === 'true';
+          const MERGE_METHOD = process.env.MERGE_METHOD || 'squash';
+          // Maven is deliberately absent: those updates change what the projects ship,
+          // and are left for a human. npm and github_actions updates are build and docs
+          // tooling, where a green CI run is the whole story.
+          const MERGEABLE_ECOSYSTEMS = new Set(['npm_and_yarn', 'github_actions']);
           const ORG = process.env.ORG;
           const scan = JSON.parse(fs.readFileSync(process.env.RESULT_FILE, 'utf8'));
 
@@ -379,17 +401,24 @@ jobs:
             }
 
             // ── 1. Milestone ─────────────────────────────────────────────────────────
+            // Whether the PR ends this run with a milestone and a board item. Evaluated as
+            // the actions happen, not from the scan, so a PR filed moments ago by this same
+            // run is eligible to merge rather than having to wait four hours for the next.
+            let milestoneOk = pr.milestoneState === 'set';
+            let projectOk = false;
+
             if (pr.milestoneState === 'unset') {
               const number = milestoneNumber(pr.expectedMilestone);
               if (!number) {
                 record(pr, 'milestone', 'skipped',
                   `milestone ${pr.expectedMilestone} not found`);
               } else if (DRY) {
+                milestoneOk = true;
                 record(pr, 'milestone', 'would', `set ${pr.expectedMilestone}`);
               } else {
                 const r = ghRetry(['api', `repos/${scan.repo}/issues/${pr.number}`,
                   '--method', 'PATCH', '-F', `milestone=${number}`]);
-                if (r.ok) record(pr, 'milestone', 'set', pr.expectedMilestone);
+                if (r.ok) { milestoneOk = true; record(pr, 'milestone', 'set', pr.expectedMilestone); }
                 else {
                   record(pr, 'milestone', 'error', r.err);
                   errors.push(`#${pr.number} milestone: ${r.err}`);
@@ -420,6 +449,7 @@ jobs:
                 const already = (node?.projectItems?.nodes || [])
                   .some(i => i.project?.title === pr.expectedProject);
                 if (already) {
+                  projectOk = true;
                   record(pr, 'project', 'already', pr.expectedProject);
                 } else {
                   const id = boardId(pr.expectedProject);
@@ -427,13 +457,14 @@ jobs:
                     record(pr, 'project', 'skipped',
                       `no board titled ${pr.expectedProject}`);
                   } else if (DRY) {
+                    projectOk = true;
                     record(pr, 'project', 'would', `add to ${pr.expectedProject}`);
                   } else {
                     const m = graphql(
                       `mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,` +
                       `contentId:$c}){ item { id } } }`,
                       '-f', `p=${id}`, '-f', `c=${node.id}`);
-                    if (m.ok) record(pr, 'project', 'added', pr.expectedProject);
+                    if (m.ok) { projectOk = true; record(pr, 'project', 'added', pr.expectedProject); }
                     else {
                       const msg = m.errors[0]?.message || m.err || 'mutation failed';
                       record(pr, 'project', 'error', msg);
@@ -486,6 +517,39 @@ jobs:
                   errors.push(`#${pr.number} rebase: ${r.err}`);
                 }
               }
+            }
+
+            // ── 4. Merge green dependency PRs ────────────────────────────────────────
+            // Gated on state === 'ready', which the scan defines as every check passing,
+            // mergeable, and a CLEAN merge state - so branch protection and conflicts are
+            // already excluded and there is nothing to re-derive here.
+            if (!MERGE_GREEN || scan.type !== 'oss') continue;
+            if (!MERGEABLE_ECOSYSTEMS.has(pr.ecosystem)) continue;
+            if (pr.state !== 'ready') continue;
+
+            // A release branch PR must be filed first - milestone and board - so merging
+            // never loses the record of which train shipped it. docs-build belongs to no
+            // train and gets neither by design, so requiring them there would mean never
+            // merging a docs update at all.
+            if (pr.isReleaseBranch && !(milestoneOk && projectOk)) {
+              const missing = [!milestoneOk && 'milestone', !projectOk && 'project']
+                .filter(Boolean).join(' and ');
+              record(pr, 'merge', 'skipped', `not filed yet - waiting on ${missing}`);
+              continue;
+            }
+
+            if (DRY) {
+              record(pr, 'merge', 'would', `merge ${pr.ecosystem} (${MERGE_METHOD})`);
+              continue;
+            }
+
+            const mg = ghRetry(['pr', 'merge', String(pr.number), '--repo', scan.repo,
+              `--${MERGE_METHOD}`]);
+            if (mg.ok) {
+              record(pr, 'merge', 'merged', `${pr.ecosystem}, ${MERGE_METHOD}`);
+            } else {
+              record(pr, 'merge', 'error', mg.err);
+              errors.push(`#${pr.number} merge: ${mg.err}`);
             }
           }
 

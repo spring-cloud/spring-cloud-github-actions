@@ -35,6 +35,7 @@ For each open Dependabot PR, in order:
 | **Project** | `projectState == resolved` and the PR is not already on the board | Adds it via GraphQL `addProjectV2ItemById` |
 | **Rebase** | `state == conflicting` | Comments `@dependabot rebase` — see [Rebase idempotency](#rebase-idempotency) |
 | **Close** | `state == unmaintained` | Comments why, then closes — see [Closing PRs on unmaintained branches](#closing-prs-on-unmaintained-branches) |
+| **Merge** | a green OSS `npm` / `github_actions` PR — see [Merging green dependency PRs](#merging-green-dependency-prs) | Merges with `merge_method` |
 
 ### What it deliberately does not do
 
@@ -45,8 +46,38 @@ For each open Dependabot PR, in order:
 - **`docs-build` PRs get neither a milestone nor a board.** They belong to no release train —
   see the [report's note](README-dependabot-report.md#the-docs-build-exception) on why this
   matters (that branch carries a placeholder `0.0.1-SNAPSHOT` version).
-- **Nothing is merged.** Merging is out of scope pending the team's decision. Closing
-  unmaintained PRs is in scope — see above.
+- **Maven PRs are never merged.** Those change what the projects ship. Only `npm` and
+  `github_actions` updates — build and docs tooling — are merged automatically.
+
+## Merging green dependency PRs
+
+With `merge_green` (on by default, including on the schedule), a PR is merged when **all**
+of these hold:
+
+| Condition | Why |
+|---|---|
+| Repository is **OSS** | Commercial merges stay manual |
+| Ecosystem is **`npm_and_yarn`** or **`github_actions`** | Build and docs tooling. **Maven is never merged** — those change what the projects ship |
+| `state == ready` | Every check passing, mergeable, and a `CLEAN` merge state |
+| Milestone **and** project are set — *release branches only* | Merging must not lose the record of which train shipped it |
+
+The ecosystem comes from Dependabot's own branch name
+(`dependabot/npm_and_yarn/docs/main/antora-3.2.0`), which is the only reliable source: a PR
+title names the dependency, not what manages it.
+
+**`docs-build` is exempt from the milestone and project requirement.** That branch belongs
+to no release train and gets neither by design, so requiring them would mean never merging a
+docs update at all.
+
+**Eligibility is evaluated after this run's own work**, not from the scan — so a PR this run
+has just milestoned and added to the board is merged immediately, rather than waiting four
+hours for the next run. A PR still missing either is reported as
+`not filed yet - waiting on milestone and project` and reconsidered next time.
+
+Nothing here re-derives mergeability: `ready` already means CI passed and GitHub reports a
+clean merge state, so branch protection, conflicts and pending checks are excluded upstream.
+
+Set `merge_green` to false to leave every PR for a human.
 
 ## Closing PRs on unmaintained branches
 
@@ -150,6 +181,8 @@ actually be merged until the freeze lifts.)
 |-------|-------------|----------|---------|
 | `projects` | Comma-separated project names. Empty processes all of them. | No | `''` |
 | `repo_type` | `both`, `oss`, or `commercial` | No | `both` |
+| `merge_green` | Merge green OSS npm / github_actions PRs | No | `true` |
+| `merge_method` | `squash`, `merge`, or `rebase` | No | `squash` |
 | `close_unmaintained` | Close PRs against branches no longer in `projects.json` | No | `true` |
 | `dry_run` | Report what would change without changing it | No | `true` |
 | `token` | Token with write access to issues/PRs and the `project` scope. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | `''` |

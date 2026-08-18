@@ -205,8 +205,8 @@ runs:
           .map(j => ({ ...j, ageDays: Math.floor((Date.now() - new Date(j.createdAt).getTime()) / 86400000) }));
 
         // ── Open Dependabot pull requests ───────────────────────────────────────────
-        const PR_FIELDS = 'number,title,url,baseRefName,createdAt,updatedAt,headRefOid,' +
-          'mergeable,mergeStateStatus,statusCheckRollup,milestone';
+        const PR_FIELDS = 'number,title,url,baseRefName,headRefName,createdAt,updatedAt,' +
+          'headRefOid,mergeable,mergeStateStatus,statusCheckRollup,milestone';
 
         const listPrs = () => {
           const r = ghRetry(['pr', 'list', '--repo', REPO, '--author', 'app/dependabot',
@@ -332,11 +332,20 @@ runs:
             }
           }
 
+          // Dependabot encodes the ecosystem in its branch name -
+          // dependabot/<ecosystem>/<path>/<dependency>-<version> - which is the only
+          // reliable place to read it from: the PR title names the dependency, not what
+          // manages it.
+          const ecoMatch = (pr.headRefName || '').match(/^dependabot\/([^/]+)\//);
+
           return {
             number: pr.number,
             title: pr.title,
             url: pr.url,
             baseRefName: pr.baseRefName,
+            headRefName: pr.headRefName,
+            ecosystem: ecoMatch ? ecoMatch[1] : null,
+            isReleaseBranch: releaseBranches.has(pr.baseRefName),
             createdAt: pr.createdAt,
             headRefOid: pr.headRefOid,
             mergeable: pr.mergeable,
