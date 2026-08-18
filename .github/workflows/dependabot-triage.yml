@@ -524,8 +524,33 @@ jobs:
             // mergeable, and a CLEAN merge state - so branch protection and conflicts are
             // already excluded and there is nothing to re-derive here.
             if (!MERGE_GREEN) continue;
-            if (!MERGEABLE_ECOSYSTEMS.has(pr.ecosystem)) continue;
-            if (pr.state !== 'ready') continue;
+
+            // Everything below records *why* a PR is not being merged rather than dropping
+            // out silently. Without this a dry run showed only the PRs it would merge, so
+            // "why is this one not in the list?" had no answer anywhere in the summary.
+            if (!MERGEABLE_ECOSYSTEMS.has(pr.ecosystem)) {
+              // Policy rather than a passing state - it will never change for this PR, so
+              // it is spelled out when explaining a plan and left out of a run that is
+              // reporting what it changed.
+              if (DRY) {
+                record(pr, 'merge', 'skipped',
+                  `${pr.ecosystem || 'unknown ecosystem'} is never auto-merged`);
+              }
+              continue;
+            }
+
+            if (pr.state !== 'ready') {
+              // These do change run to run, so they are always worth reporting.
+              const why =
+                pr.state === 'failing' ? `checks failing: ${(pr.failingChecks || []).join(', ')}`
+                : pr.state === 'pending' ? `checks still running: ${(pr.pendingChecks || []).join(', ')}`
+                : pr.state === 'conflicting' ? 'conflicts with the base branch'
+                : pr.state === 'blocked' ? `all checks pass but GitHub reports ${pr.mergeStateStatus}`
+                : pr.state === 'unknown' ? 'GitHub has not resolved mergeability yet'
+                : `not ready (${pr.state})`;
+              record(pr, 'merge', 'skipped', why);
+              continue;
+            }
 
             // A release branch PR must be filed before it is merged, so merging never
             // loses the record of which train shipped it. docs-build belongs to no train

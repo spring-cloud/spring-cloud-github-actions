@@ -81,6 +81,25 @@ hours for the next run. A PR still missing either is reported as
 Nothing here re-derives mergeability: `ready` already means CI passed and GitHub reports a
 clean merge state, so branch protection, conflicts and pending checks are excluded upstream.
 
+### Why a PR was not merged
+
+Every eligible PR that is **not** merged records the reason, so the summary answers "why is
+this one not in the list?" rather than leaving it out:
+
+| Reported as | Meaning |
+|---|---|
+| `checks failing: build (17), DCO` | Named, so it is clear what to look at |
+| `checks still running: build (21)` | Will be reconsidered next run |
+| `conflicts with the base branch` | Needs a rebase — see [Rebase idempotency](#rebase-idempotency) |
+| `all checks pass but GitHub reports BLOCKED` | Branch protection, usually a required review |
+| `GitHub has not resolved mergeability yet` | Transient; resolves on a later run |
+| `not filed yet - waiting on milestone and project` | Triage has not finished filing it |
+| `maven is never auto-merged` | Policy — **dry runs only** |
+
+The last one is deliberately dry-run-only. It can never change for that PR, so it belongs in
+an explanation of the plan, not in a run reporting what it changed — otherwise every real run
+would carry a row per open Maven PR saying nothing new.
+
 Set `merge_green` to false to leave every PR for a human.
 
 ## Closing PRs on unmaintained branches
