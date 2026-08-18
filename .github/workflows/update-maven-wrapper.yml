@@ -51,6 +51,25 @@ on:
         required: false
         type: string
         default: ''
+      regenerate:
+        description: 'Regenerate the whole wrapper by running maven-wrapper-plugin (updates mvnw, mvnw.cmd and the JAR too) instead of only editing maven-wrapper.properties.'
+        required: false
+        type: boolean
+        default: false
+      wrapper_type:
+        description: 'Wrapper flavour to generate, when regenerate is checked. only-script drops the committed JAR entirely.'
+        required: false
+        type: choice
+        default: 'only-script'
+        options:
+          - only-script
+          - bin
+          - script
+      java_version:
+        description: 'JDK used to run the wrapper plugin, when regenerate is checked.'
+        required: false
+        type: string
+        default: '17'
       auto_merge:
         description: 'Merge existing wrapper PRs whose checks have all passed. Applies to this manual run only - the weekly scheduled run never merges.'
         required: false
@@ -255,6 +274,7 @@ jobs:
           # weekly job would never actually do anything. Schedule therefore acts, while a
           # manual dispatch still defaults to a dry run so a human can look first.
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
+          REGENERATE: ${{ inputs.regenerate == true }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -263,6 +283,10 @@ jobs:
           const REPO = process.env.REPO;
           const BRANCH = process.env.BRANCH;
           const MAVEN = process.env.MAVEN_VERSION;
+          // In regenerate mode this step only decides *whether* work is needed and hands the
+          // branch name to the steps below - the files are produced by the wrapper plugin
+          // against a real checkout, which the contents API cannot do.
+          const REGENERATE = process.env.REGENERATE === 'true';
           const WRAPPER = process.env.WRAPPER_VERSION;
           const DRY = process.env.DRY_RUN !== 'false';
           const PROPS = '.mvn/wrapper/maven-wrapper.properties';
@@ -425,7 +449,15 @@ jobs:
                 { current, target: MAVEN, prUrl: pr.html_url, prNumber: pr.number });
             }
             if (DRY) {
-              finish('would-update-pr', `#${pr.number} would be moved up to ${MAVEN}`,
+              finish('would-update-pr',
+                `#${pr.number} would be moved up to ${MAVEN}` + (REGENERATE ? ' (regenerated)' : ''),
+                { current, target: MAVEN, prUrl: pr.html_url });
+            }
+            if (REGENERATE) {
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-head=${pr.head.ref}\n`);
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-pr=${pr.number}\n`);
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-current=${current}\n`);
+              finish('regenerating', `#${pr.number} on ${pr.head.ref}`,
                 { current, target: MAVEN, prUrl: pr.html_url });
             }
             // Commit onto the existing PR's branch so it updates in place - one wrapper PR
@@ -446,7 +478,17 @@ jobs:
 
           if (DRY) {
             finish('would-open', `Maven ${current} -> ${MAVEN}` +
-              (hadWrapperUrl || hadWrapperVersion ? `, wrapper -> ${WRAPPER}` : ''),
+              (hadWrapperUrl || hadWrapperVersion ? `, wrapper -> ${WRAPPER}` : '') +
+              (REGENERATE ? ' (regenerated)' : ''),
+              { current, target: MAVEN });
+          }
+
+          // Regenerate mode stops here: the branch is created by `git push` from the real
+          // checkout below, not through the git refs API.
+          if (REGENERATE) {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-head=${head}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-current=${current}\n`);
+            finish('regenerating', `${current} -> ${MAVEN} on ${head}`,
               { current, target: MAVEN });
           }
 
@@ -513,6 +555,151 @@ jobs:
           finish('pr-opened', `#${created.number}: ${current} -> ${MAVEN}`,
             { current, target: MAVEN, prUrl: created.html_url });
           JSEOF
+
+      # ── Regenerate mode ─────────────────────────────────────────────────────────────
+      # Everything below runs only when `regenerate` is set and the step above decided this
+      # branch needs work. Regenerating means running maven-wrapper-plugin against a real
+      # checkout, which rewrites mvnw, mvnw.cmd and the JAR as well as the properties -
+      # more than the contents API can express, hence the checkout, JDK and git push.
+      - name: Checkout target branch
+        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.branch }}
+          path: target
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up JDK
+        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version || '17' }}
+
+      - name: Regenerate wrapper and open PR
+        if: inputs.regenerate == true && steps.update.outputs.regenerate-head != ''
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          HEAD_REF: ${{ steps.update.outputs.regenerate-head }}
+          EXISTING_PR: ${{ steps.update.outputs.regenerate-pr }}
+          CURRENT: ${{ steps.update.outputs.regenerate-current }}
+          SAFE_NAME: ${{ steps.update.outputs.safe-name }}
+          MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
+          WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
+          WRAPPER_TYPE: ${{ inputs.wrapper_type || 'only-script' }}
+          # Whatever the branch's own .settings.xml refers to. Commercial branches use the
+          # COMMERCIAL_* pair; the OSS snapshot repository is read anonymously, so its
+          # deploy credentials are not needed here and are left unset.
+          COMMERCIAL_ARTIFACTORY_USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
+          COMMERCIAL_ARTIFACTORY_PASSWORD: ${{ secrets.COMMERCIAL_ARTIFACTORY_PASSWORD }}
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        run: |
+          set -uo pipefail
+
+          RESULT="wrapper-${SAFE_NAME}.json"
+          record() {
+            node -e '
+              const fs = require("fs");
+              const [file, status, detail, prUrl] = process.argv.slice(1);
+              let r = {};
+              try { r = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) {}
+              fs.writeFileSync(file, JSON.stringify(
+                { ...r, status, detail, ...(prUrl ? { prUrl } : {}) }, null, 2));
+            ' "$RESULT" "$1" "$2" "${3:-}"
+            echo "${REPO}@${BRANCH}: $1 - $2"
+          }
+
+          cd target
+
+          # The branch's own .settings.xml is the only file used - it is what that branch's
+          # CI actually builds with, it is maintained per branch, and it is the one that
+          # names the OSS snapshot repository. There is no fallback: a branch without it
+          # would resolve against Maven Central alone and fail on its own SNAPSHOT parent,
+          # so saying so plainly beats guessing with someone else's settings.
+          if [ ! -f .settings.xml ]; then
+            cd ..; record "regenerate-failed" "no .settings.xml on this branch"; exit 0
+          fi
+
+          # The runner's own mvn, deliberately not ./mvnw: using the wrapper to regenerate
+          # the wrapper is circular - the old wrapper would have to boot the old Maven
+          # before it could be replaced, which on the oldest branches means Maven 3.6.3,
+          # exactly the floor maven-wrapper-plugin 3.x requires. The runner's Maven is
+          # current and has no such constraint. Only the settings file and profile need to
+          # match what CI does; the Maven that writes the files does not.
+          #
+          # -Pspring matters as much as the settings file: the repositories are declared
+          # inside a `spring` profile, so without activating it the snapshot repositories
+          # are not in play at all and the parent POM cannot resolve. -N keeps this to the
+          # root project, where the wrapper lives.
+          echo "Running maven-wrapper-plugin ${WRAPPER_VERSION} for Maven ${MAVEN_VERSION}..."
+          if ! mvn -B -N -s .settings.xml -Pspring \
+                "org.apache.maven.plugins:maven-wrapper-plugin:${WRAPPER_VERSION}:wrapper" \
+                "-Dmaven=${MAVEN_VERSION}" "-Dtype=${WRAPPER_TYPE}" > ../mvn.log 2>&1; then
+            cd ..
+            # The most likely cause by far is an unresolvable SNAPSHOT parent - the same
+            # thing that breaks Dependabot's own wrapper updater. Surfaced verbatim so it
+            # is not mistaken for a workflow bug.
+            REASON=$(grep -m1 -oE "Non-resolvable parent POM[^@]*" mvn.log \
+              || grep -m1 -oE "\[ERROR\].*" mvn.log || echo "see the job log")
+            record "regenerate-failed" "mvn wrapper:wrapper failed - ${REASON}"
+            exit 0
+          fi
+          cd ..
+
+          cd target
+          if [ -z "$(git status --porcelain)" ]; then
+            cd ..
+            record "up-to-date" "wrapper plugin produced no changes"
+            exit 0
+          fi
+          echo "Changed files:"; git status --porcelain
+
+          # Spring Cloud repositories run a required DCO check, so the commit is signed off
+          # and the author matches that trailer.
+          git config user.name  "spring-builds"
+          git config user.email "spring-builds@users.noreply.github.com"
+
+          # The branch is always cut fresh from the base branch and force-pushed, rather
+          # than the existing PR branch being fetched and added to. The generated files were
+          # produced against the base checkout, so committing them onto a divergent branch
+          # would mix two states; and the PR branch only ever holds our own generated
+          # commit, so replacing it wholesale is exactly the intent. --force rather than
+          # --force-with-lease because the remote branch was never fetched, which would make
+          # a lease check fail on stale info rather than protect anything.
+          git checkout -b "$HEAD_REF"
+          git add -A
+          if ! git commit -s -m "Update Maven wrapper to ${MAVEN_VERSION}"; then
+            cd ..; record "error" "nothing to commit after regeneration"; exit 0
+          fi
+
+          if ! git push --force origin "$HEAD_REF"; then
+            cd ..; record "error" "could not push ${HEAD_REF}"; exit 0
+          fi
+          cd ..
+
+          if [ -n "${EXISTING_PR}" ]; then
+            URL=$(gh pr view "${EXISTING_PR}" --repo "${REPO}" --json url --jq .url 2>/dev/null)
+            record "pr-updated" "#${EXISTING_PR} regenerated at ${MAVEN_VERSION}" "$URL"
+            exit 0
+          fi
+
+          BODY=$(printf '%s\n' \
+            "Regenerates the Maven wrapper on \`${BRANCH}\` from **${CURRENT}** to **${MAVEN_VERSION}** using maven-wrapper-plugin ${WRAPPER_VERSION} (\`${WRAPPER_TYPE}\`)." \
+            "" \
+            "Unlike the properties-only update, this also rewrites \`mvnw\`, \`mvnw.cmd\` and the wrapper JAR, so the diff is larger. **Merge only once CI is green.**" \
+            "" \
+            "Opened automatically by [update-maven-wrapper.yml](https://github.com/spring-cloud/spring-cloud-github-actions/blob/main/.github/workflows/update-maven-wrapper.yml).")
+
+          URL=$(gh pr create --repo "${REPO}" --base "${BRANCH}" --head "${HEAD_REF}" \
+            --title "Update Maven wrapper to ${MAVEN_VERSION}" --body "${BODY}" 2>&1) \
+            || { record "error" "could not open PR: ${URL}"; exit 0; }
+
+          record "pr-opened" "${CURRENT} -> ${MAVEN_VERSION} (regenerated)" "$URL"
 
       # Only runs when the previous step found a PR that is open and already at the target
       # version - i.e. one whose CI has had a chance to finish. A PR opened or moved up in

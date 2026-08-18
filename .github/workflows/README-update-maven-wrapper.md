@@ -63,12 +63,97 @@ spring-cloud-commons@main    Maven 3.9.11   wrapperVersion 3.3.4 + distributionT
 Existing comments, licence headers and file shape are preserved — it is a targeted edit, not
 a regeneration.
 
-### Why it does not run `mvn wrapper:wrapper`
+### Why the default does not run `mvn wrapper:wrapper`
 
-Regenerating the wrapper properly would mean invoking the wrapper plugin — which is
-*precisely* the parent-POM resolution that fails for a SNAPSHOT parent, the very bug being
-worked around. A textual edit sidesteps it entirely and is deterministic and reviewable. CI
-on the resulting PR is what proves the new Maven actually works.
+Regenerating the wrapper properly means invoking the wrapper plugin — which is *precisely*
+the parent-POM resolution that fails for a SNAPSHOT parent, the very bug being worked
+around. The textual edit sidesteps it entirely, needs no JDK, no credentials and no
+checkout, and produces a one-line diff that is trivial to review. CI on the resulting PR is
+what proves the new Maven actually works.
+
+Set [`regenerate`](#regenerate-mode) when you do want the full treatment.
+
+## Regenerate mode
+
+With `regenerate` checked, the workflow checks the branch out, runs
+
+```
+mvn -B -N -s .settings.xml -Pspring \
+    org.apache.maven.plugins:maven-wrapper-plugin:<wrapper>:wrapper \
+    -Dmaven=<maven> -Dtype=<wrapper_type>
+```
+
+**The runner's `mvn`, deliberately not `./mvnw`.** Using the wrapper to regenerate the
+wrapper is circular: the old wrapper has to boot the old Maven before it can be replaced,
+which on the oldest branches means Maven 3.6.3 — exactly the floor `maven-wrapper-plugin`
+3.x requires. The runner's Maven is current and carries no such constraint. What has to
+match CI is the **settings file and the profile**, not the Maven that writes the files.
+
+and commits whatever the plugin produces — `mvnw`, `mvnw.cmd` and the JAR as well as the
+properties. `-N` keeps it to the root project, where the wrapper lives.
+
+This is how you get off the old formats entirely rather than only correcting their version
+numbers. With the default `wrapper_type: only-script` the committed `maven-wrapper.jar` is
+dropped, which is the shape `spring-cloud-commons@main` already has.
+
+### Resolving the parent POM
+
+`regenerate` needs the parent POM to resolve — which is the whole reason the default mode
+avoids Maven. Two things make it work, and both are easy to get wrong:
+
+- **The branch's own `.settings.xml`**, exactly as that branch's CI builds with it (see
+  [`pr.yml`](pr.yml)'s `./mvnw -s .settings.xml ... -Pspring`). It is maintained per branch,
+  and it is the only file that names the **OSS** snapshot repository
+  (`repo.spring.io/libs-snapshot-local`) — the shared
+  [`config/release-ci-settings.xml`](../../config/release-ci-settings.xml) in this repo is
+  **commercial-only**, so using it would leave every OSS branch unable to resolve its own
+  parent. There is deliberately **no fallback**: a branch without `.settings.xml` would
+  resolve against Maven Central alone and fail on its own SNAPSHOT parent, so it reports
+  `regenerate-failed` saying exactly that rather than guessing with someone else's settings.
+- **`-Pspring`.** The repositories live inside a `spring` profile, so without activating it
+  the snapshot repositories are not in play at all and the parent cannot resolve, however
+  correct the settings file is.
+
+Credentials come from the environment the settings file expects: commercial branches use
+`COMMERCIAL_ARTIFACTORY_USERNAME` / `_PASSWORD`; the OSS snapshot repository is read
+anonymously, so its deploy credentials are not needed.
+
+The snapshot parents genuinely are published — `spring-cloud-build:5.0.3-SNAPSHOT` resolves
+from `repo.spring.io` while Maven Central 404s on it, which is exactly why Dependabot's own
+attempt fails: it never gets this settings file.
+
+When resolution still fails, the branch reports `regenerate-failed` with the Maven error
+quoted verbatim, so it is not mistaken for a workflow bug, and every other branch carries on.
+
+### Extra inputs
+
+| Input | Description | Default |
+|---|---|---|
+| `regenerate` | Run the wrapper plugin instead of editing the properties file | `false` |
+| `wrapper_type` | `only-script` (no JAR), `bin`, or `script` | `only-script` |
+| `java_version` | JDK used to run the plugin | `17` |
+
+### Branch handling
+
+The PR branch is always cut fresh from the base branch and **force-pushed**. The generated
+files come from a checkout of the base, so committing them onto a divergent branch would mix
+two states — and since the branch only ever holds this workflow's own generated commit,
+replacing it wholesale is the intent. `--force` rather than `--force-with-lease` because the
+remote branch was never fetched, which would make a lease check fail on stale info rather
+than protect anything.
+
+### Trade-off
+
+| | Default (properties only) | `regenerate: true` |
+|---|---|---|
+| Diff | 1–2 lines | `mvnw`, `mvnw.cmd`, JAR, properties |
+| Needs a JDK, credentials, checkout | No | Yes |
+| Can fail on parent resolution | No | Yes — the bug being worked around |
+| Modernises the scripts | No | Yes |
+
+Run the default for routine version bumps; run `regenerate` as a deliberate pass when you
+want the scripts brought up to date — ideally scoped with `projects` to a few repos at a
+time, since the diff is much larger.
 
 ### The `distributionUrl` has two version numbers
 
@@ -170,6 +255,7 @@ Set `auto_merge` to false to only open and update PRs and leave merging to a hum
 |---|---|
 | `pr-opened` | A PR was created |
 | `pr-updated` | An open PR was moved up to a newer target — see [Rerunning](#rerunning) |
+| `regenerate-failed` | `regenerate` mode only — the wrapper plugin failed, with the Maven error quoted |
 | `would-open` / `would-update-pr` | Dry run — what would happen |
 | `pr-open` | A PR is open and already at the target; nothing done |
 | `branch-exists` | The branch exists with no open PR — a previous PR was closed unmerged, so it is **left alone** rather than reopened |
