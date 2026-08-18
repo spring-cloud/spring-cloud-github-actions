@@ -162,6 +162,7 @@ jobs:
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
       count: ${{ steps.build-matrix.outputs.count }}
+      excluded: ${{ steps.build-matrix.outputs.excluded }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -190,6 +191,7 @@ jobs:
           // deliberately absent: it is not in projects.json, and its Dependabot config runs
           // the npm ecosystem rather than maven, so its wrapper is not part of this problem.
           const entries = [];
+          const excluded = [];
           for (const [projectKey, config] of Object.entries(projects)) {
             if (projectKey === 'defaults') continue;
             if (filter.size > 0 && !filter.has(projectKey)) continue;
@@ -199,6 +201,15 @@ jobs:
                 ? `spring-cloud/${projectKey}-commercial`
                 : `spring-cloud/${projectKey}`;
               for (const branch of config[typeKey]?.branches?.scheduled || []) {
+                // `-internal` branches are left alone: they are the in-flight development
+                // line for the next train, so an unsolicited toolchain change there lands
+                // in the middle of active work rather than on a settled branch. They are
+                // filtered here rather than skipped inside the job so no runner is spent
+                // on them, and they are reported below so the omission stays visible.
+                if (branch.endsWith('-internal')) {
+                  excluded.push(`${repo}@${branch}`);
+                  continue;
+                }
                 entries.push({ project: projectKey, repo, type: typeKey, branch });
               }
             }
@@ -206,13 +217,18 @@ jobs:
 
           entries.sort((a, b) =>
             a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
+          excluded.sort();
 
           console.log(`Repo/branch combinations to check: ${entries.length}`);
           for (const e of entries) console.log(`  ${e.repo}@${e.branch}`);
+          console.log(`Excluded (-internal): ${excluded.length}`);
+          for (const e of excluded) console.log(`  ${e}`);
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT,
             `matrix=${JSON.stringify({ include: entries })}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${entries.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `excluded=${JSON.stringify(excluded)}\n`);
           JSEOF
 
   update:
@@ -627,6 +643,7 @@ jobs:
           MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
           EVENT_NAME: ${{ github.event_name }}
+          EXCLUDED: ${{ needs.setup.outputs.excluded }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -690,6 +707,17 @@ jobs:
                 : '';
               md.push(`| \`${r.repo}\` | \`${r.branch}\` | ${r.status} | ${merge} | ${detail} |`);
             }
+          }
+
+          // Named rather than merely counted: an omission nobody can see is one nobody can
+          // question, and these are branches a reader would otherwise assume were covered.
+          let excluded = [];
+          try { excluded = JSON.parse(process.env.EXCLUDED || '[]'); } catch (_) { /* absent */ }
+          if (excluded.length) {
+            md.push('', `### Skipped — \`-internal\` branches (${excluded.length})`, '');
+            md.push('Left alone deliberately: these are the in-flight development line for ' +
+              'the next train, so the wrapper is not changed under active work.', '');
+            for (const e of excluded) md.push(`- \`${e}\``);
           }
 
           const quiet = of('up-to-date').length + of('no-wrapper').length;

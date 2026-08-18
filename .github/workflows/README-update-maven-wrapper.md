@@ -38,9 +38,16 @@ spring-cloud-commons@main    Maven 3.9.11   wrapperVersion 3.3.4 + distributionT
    and opens a PR.
 4. **`summary`** reports every combination in one table.
 
-`docs-build` is deliberately out of scope: it is not in `projects.json`, and its Dependabot
-config runs the `npm` ecosystem rather than `maven`, so its wrapper is not part of this
-problem.
+### What is out of scope
+
+- **`-internal` branches are skipped.** They are the in-flight development line for the next
+  train, so an unsolicited toolchain change there lands in the middle of active work rather
+  than on a settled branch. They are filtered out of the matrix, so no runner is spent on
+  them, but every one is **named** in the summary under *Skipped* — 12 of the 79
+  combinations at the time of writing, which is too many to drop silently. To include them,
+  remove the `endsWith('-internal')` check in the `setup` job.
+- **`docs-build`** is not in `projects.json`, and its Dependabot config runs the `npm`
+  ecosystem rather than `maven`, so its wrapper is not part of this problem.
 
 ## What it changes
 
