@@ -12,8 +12,8 @@ It:
 2. **Verifies a `v<version>` tag exists** for every project, in the commercial repo — see [Where the release branch and the tag live](#where-the-release-branch-and-the-tag-live) — a hard gate, in a single job so an incomplete release produces one consolidated failure naming every missing tag
 3. **Writes the next `<train>-snapshot.properties` file** to `jenkins-releaser-config`, with every version's last segment bumped and `-SNAPSHOT` appended — creating it, or **overwriting an existing one whose versions do not match**
 4. **Opens a milestone** for each new snapshot version, via the [create-milestone](../actions/create-milestone/README.md) action
-5. **Merges `release/<version>` back into the `.x` branch** from the commercial repo, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, **pushes the release tag into the OSS repo**, and comments `@dependabot recreate` on superseded Dependabot PRs
-6. **Closes the release milestone** and **publishes the GitHub release** for each tag — `skip_close_milestones` leaves the milestones open and still publishes the releases
+5. **Merges `release/<version>` back into the `.x` branch** from the commercial repo, applies the new snapshot versions with [update-project-versions](../actions/update-project-versions/README.md), pushes both commits together, and comments `@dependabot recreate` on superseded Dependabot PRs
+6. **Closes the release milestone** and **publishes the GitHub release** for each tag — nothing is published for a project whose merge back did not land, see [Releases wait for the merge back](#releases-wait-for-the-merge-back); `skip_close_milestones` leaves the milestones open and still publishes the releases
 7. **Opens a PR against the website content repository** — the blog post and the `documentation.json` version bumps on the OSS site, a new `documentation.json` entry per released project on the commercial one, see [The website PR](#the-website-pr)
 8. **Opens a PR against [start.spring.io](https://github.com/spring-io/start.spring.io)** bumping the Spring Cloud version the Initializr offers — OSS only, see [The start.spring.io PR](#the-startspringio-pr)
 9. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
@@ -22,14 +22,38 @@ Step 5's version bump also exists on its own, as [update-versions](README-update
 
 ### Where the release branch and the tag live
 
-**Always in the commercial repo, for OSS releases too.** An OSS release is built in `<project>-commercial`: [create-oss-release-branch](create-oss-release-branch.yml) pushes the OSS branch there as `<major>.<minor>.x-internal` (full history, deliberately not an orphan) and cuts `release/<version>` from it. The build, the staging and the tag all happen on that branch, in that repository. Nothing tags the OSS repo directly.
+**The release branch is always in the commercial repo, for OSS releases too.** An OSS release is built in `<project>-commercial`: [create-oss-release-branch](create-oss-release-branch.yml) pushes the OSS branch there as `<major>.<minor>.x-internal` (full history, deliberately not an orphan) and cuts `release/<version>` from it. The build and the staging happen on that branch, in that repository.
 
-Two things follow, and they are why the job order looks the way it does:
+**The tag is not.** The release pushes it to whichever repo the release belongs to: a commercial release tags `<project>-commercial`, and an OSS release tags the OSS repo directly. **Nothing in this workflow copies a tag between repositories**, and step 2 looks in a different place for each flavour:
 
-- **Step 2 checks the commercial repo.** For an OSS run it looks there first only in the sense that a hit in the OSS repo means the tag is *already* where this run needs it — from a re-run, or from a version carried over from an earlier train. Otherwise the tag is found in the commercial repo and marked `commercial-pending`: real, but not here yet.
-- **Step 5 runs before step 6.** The merge is what brings the tagged commit into the OSS repo; once it is reachable there, the tag ref is pushed too. Only then can a release be published against it.
+| Run | Step 2 looks in | `resolvedIn` |
+|-----|-----------------|--------------|
+| OSS | the OSS repo, and only there | `oss` |
+| commercial | `<project>-commercial`, falling back to the OSS repo | `commercial`, or `oss-fallback` |
 
-**Publishing is gated on the tag actually existing in the target repo.** `POST /releases` with a `tag_name` that does not exist does not fail — it *creates* the tag, at the default branch head. On an OSS run that would silently stamp `v<version>` onto whatever `main` happened to be. So step 6 re-checks and reports `no-tag` rather than publishing, and a merge that could not complete therefore also holds up the release.
+The commercial fallback means that project has had no commercial release since the last OSS one, so its properties entry carries the plain OSS version and there is nothing in the commercial repo to attach a release to.
+
+### The tagged commit arrives before the branch it belongs on
+
+For an OSS release the tag is in the OSS repo but **the commit it points at was built on the release branch in the commercial repo**, so it lands as unreachable history — real, fetchable by SHA, on no branch. `spring-cloud-build` `v5.0.3` is the worked example: the tag resolves to `7d5f99b` in `spring-cloud/spring-cloud-build`, that commit is the tip of `release/5.0.3` in `spring-cloud/spring-cloud-build-commercial`, and comparing it against `5.0.x` in the OSS repo returns a 404.
+
+**Step 5's merge is what fixes that**, bringing the release branch onto the maintenance branch and making the tagged commit reachable. **That is why step 6 still waits on step 5**: release notes are generated from the tag, and generating them against a commit on no branch is not something to find out about afterwards.
+
+#### Releases wait for the merge back
+
+**A project whose merge back did not land gets no release**, reported as `merge-incomplete` and listed under **Releases held back**. Publishing anyway would attach notes generated from history that is on no branch, and announce a version the maintenance branch has not received.
+
+"Landed" means the merge reached the remote, which takes both halves of step 5 — the merge *and* the push, since they go up together in one push. So these count as landed:
+
+| `mergeStatus` | `pushStatus` |
+|---|---|
+| `merged`, `already-merged`, `no-release-branch` | `pushed`, `nothing-to-push`, `would-push` |
+
+and anything else does not, including a clean merge whose version bump failed — that leaves the merge in the runner's clone and nowhere else.
+
+A matrix leg cannot read another matrix leg's outputs, so step 6 gets step 5's verdict by downloading the `result-mergeback-*` artifacts it already uploads and finding the record for its own project. **No merge-back record at all means it goes ahead** — that is a hotfix run, where the merge back is skipped by design and the release is the whole point.
+
+**Publishing is still gated on the tag existing in the target repo.** `POST /releases` with a `tag_name` that does not exist does not fail — it *creates* the tag, at the default branch head, silently stamping `v<version>` onto whatever `main` happened to be. Step 2 has already proved the tag is there, so the re-check in step 6 should never fire; it stays because the cost of being wrong is a bogus tag on a public repo and the cost of the check is one API call.
 
 ### Gate on existence, never classify
 
@@ -37,7 +61,7 @@ A project listed in the properties file may not have been released *in this trai
 
 | Case | Tag | Release | Milestone |
 |------|-----|---------|-----------|
-| Released in this train | on `release/<version>` in the commercial repo, pushed to the OSS repo by step 5 | created | open → closed |
+| Released in this train | pushed to its own repo by the release; the commit it names becomes reachable when step 5 merges | created | open → closed |
 | Carried over from an earlier train | already in the primary repo | already exists → skipped | already closed → skipped |
 | No commercial release since the last OSS one | OSS repo only | no tag here → skipped | absent → reported |
 
@@ -60,7 +84,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 **Defaults to a dry run.** Set `dry_run` to `false` to actually close, create, commit and push.
 
-**The workflow exits non-zero** if any project hit a merge conflict, could not be reached by git at all, had no usable branch to update, or could not be published because its tag never reached the repo, since those leave a project half-done. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
+**The workflow exits non-zero** if any project hit a merge conflict, could not be reached by git at all, had no usable branch to update, had its release held back because the merge back did not land, or could not be published because its tag never reached the repo, since those leave a project half-done. The count is of distinct repositories, not of findings — one merge conflict blocks the merge *and* holds back the release, and that is one thing to go and fix. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
 
 ## Inputs
 
@@ -215,7 +239,7 @@ The commit each tag points at lives on a `release/<version>` branch, which has t
 
 - **No `release/<version>` branch** → nothing to merge; the run continues to the version bump. Expected for carried-over versions, OSS-fallback entries, and branches already merged and deleted.
 - **Already merged** → reported as such, no commit. The merge check is `git merge-base --is-ancestor`, so this is naturally idempotent.
-- **Conflict** → the merge is aborted, and **the version bump, the push and the Dependabot pass are all skipped for that project**. Other projects continue. The summary flags it under **Blocked on a manual merge** and the run exits non-zero. Resolve it by hand, then re-run with `projects` set to just the affected projects.
+- **Conflict** → the merge is aborted, and **the version bump, the push and the Dependabot pass are all skipped for that project**. Other projects continue. The summary flags it under **Blocked on a manual merge** and the run exits non-zero. Resolve it by hand, then re-run with `projects` set to just the affected projects. **The GitHub release is held back too**, since the tagged commit stays unreachable until the merge lands — see [Releases wait for the merge back](#releases-wait-for-the-merge-back).
 - **Git could not reach the repository** → `clone-failed` or `branch-fetch-failed`, reported under **Could not reach the repository**, counted as a problem, and nothing else is done for that project. See below.
 
 ### Remote reads are retried, and always end in a status
@@ -420,7 +444,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — a **start.spring.io PR** section, and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — a **start.spring.io PR** section, and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **Releases held back**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 
@@ -461,7 +485,7 @@ Notes on this:
 - `update-project-versions` is called with `release-train-version` rather than an explicit versions map, because only that path applies `project-version-substitutions` (which maps `spring-cloud-dependencies-parent` → `spring-cloud-build`, `verifierVersion` → `spring-cloud-contract`, and so on). That path resolves over `raw.githubusercontent.com`, which is CDN-cached, so after committing the snapshot file the workflow waits for the raw URL to serve it before any project is updated. If the CDN never catches up, version updates are skipped rather than applied from a stale file, and the run can simply be repeated.
 - Tag existence is checked with `git/matching-refs` and an exact comparison, not a plain `git/refs/tags/<tag>` lookup, which would also prefix-match `v5.0.20` when asked for `v5.0.2`.
 - `max-parallel: 8` keeps the fan-out from saturating the runner pool; `fail-fast: false` so one bad project does not abandon the rest.
-- Step 4 (new milestones) and step 5 (merge back, bump and tag) run in parallel — neither depends on the other. Step 6 waits on step 5, because that is where the tag arrives, and steps 7 and 8 wait on step 6 — the blog post links to the releases it publishes, and neither PR should be opened for a release that did not complete.
+- Step 4 (new milestones) and step 5 (merge back and bump) run in parallel — neither depends on the other. Step 6 waits on step 5, because that is what makes the tagged commit reachable, and steps 7 and 8 wait on step 6 — the blog post links to the releases it publishes, and neither PR should be opened for a release that did not complete.
 
 ## Related workflows
 
