@@ -264,6 +264,8 @@ If all three attempts fail, the step **records a status and exits 0** rather tha
 
 The `ls-remote` is checked the same way for a related reason. `--exit-code` exits **2** when the remote answered and has no such branch — a real answer, and the common one — while any other non-zero is a transport failure. Treating the two alike would skip the merge for a project whose release branch was there all along, bump it anyway, and call the run a success.
 
+**`already-merged` alongside `would-push` is not a contradiction.** The Merge column answers "did `release/<version>` need merging into `.x`", and the Push column answers "is there anything to push at all" — and the version bump is a commit in its own right. Most runs show exactly that pair, because the merge has usually happened already while the snapshot bump has not. `nothing-to-push` means the branch was already at the new versions too. The summary says so under the table.
+
 The merge commit and the version-bump commit go up in a **single push**: one CI run per project, and if anything fails in between, nothing is pushed and the branch is left untouched so the whole project can simply be re-run. The `release/<version>` branch is left in place, not deleted.
 
 ### CI and PR workflow files are preserved across the merge

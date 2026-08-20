@@ -10,11 +10,33 @@ The action walks the `directory` input (default: repo root) recursively and upda
 |---|---|
 | `pom.xml` (root) | `<version>` of the project itself |
 | `pom.xml` (all) | `<parent><version>` when the parent belongs to this project or is tracked in `versions` |
-| `pom.xml` (root **and** child modules) | `<properties>` entries whose key ends in `.version` when the project name is in `versions` |
+| `pom.xml` (root **and** child modules) | `<properties>` entries whose key ends in `.version` when the project name is in `versions`, unless [pinned](#pinning-a-property-with-releaserversion-check-off) |
 | `gradle.properties` | Bare `version=` key → `project-version`; `{prefix}Version=` keys → looked up in `versions` via camelCase→kebab-case conversion |
 | `build.gradle` / `build.gradle.kts` | `version = '...'` / `version = "..."` declaration → `project-version` |
 
 The following directories are always skipped: `.git`, `node_modules`, `target`, `build`, `.gradle`.
+
+### Pinning a property with `@releaser:version-check-off`
+
+A `<properties>` entry is left alone when it carries the marker the Jenkins releaser has always used, as a trailing comment on the same line:
+
+```xml
+<spring-cloud-function.version>4.3.6-SNAPSHOT</spring-cloud-function.version>
+<spring-cloud-stream.version>4.3.4</spring-cloud-stream.version><!-- @releaser:version-check-off -->
+```
+
+Here `spring-cloud-function.version` is bumped as usual and `spring-cloud-stream.version` is not.
+
+**This exists for dependency cycles inside a release train.** `spring-cloud-stream` builds against `spring-cloud-function`, and `spring-cloud-function`'s samples build against `spring-cloud-stream`. Pointing both at the other's snapshot is a cycle, so one side pins to a released version and says so in the pom.
+
+The marker is matched against the property it trails, not the file, so a pinned entry does not pin its neighbours. A pinned property is **reported in the log even though nothing changed** — a property deliberately left alone otherwise looks exactly like the bump quietly missing one:
+
+```
+Left alone in spring-cloud-function-samples/function-sample-cloudevent-stream/pom.xml
+(@releaser:version-check-off): spring-cloud-stream.version (pinned at 4.3.4)
+```
+
+It applies to `<properties>` entries only. A project's own `<version>` is not covered — an unreleasable project is expressed by leaving it out of the release train, not by a marker.
 
 ## Inputs
 

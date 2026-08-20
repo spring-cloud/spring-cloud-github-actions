@@ -3144,6 +3144,16 @@ jobs:
                 `${icon(r.pushStatus)} ${r.pushStatus} | ${dep} |`);
             }
             L.push('');
+            // The Merge and Push columns look like they disagree when a no-op merge sits next
+            // to a push - which is most runs, since the merge is usually already done and the
+            // bump usually is not. Saying what the push carries is cheaper than everyone
+            // working it out from the job log each time.
+            L.push('**Merge and Push answer different questions.** The merge commit and ' +
+              'the version bump go up together in a single push, so the Push column covers the ' +
+              'whole leg: `already-merged` next to `would-push` means the merge was a no-op and ' +
+              'the snapshot bump is what would be pushed, while `nothing-to-push` means the ' +
+              'branch already had both.');
+            L.push('');
 
             const restoredAny = mb.filter(r => r.restored);
             const autoAny = mb.filter(r => r.autoResolved);

@@ -11,6 +11,7 @@ const {
   replaceProjectVersion,
   replaceParentVersion,
   replacePropertyValue,
+  hasVersionCheckOff,
   updateGradlePropertiesContent,
   updateBuildGradleContent,
   camelToKebab,
@@ -110,6 +111,41 @@ describe('replaceParentVersion', () => {
     expect(updated).toMatch(/<parent>[\s\S]*?<version>2\.0\.0<\/version>[\s\S]*?<\/parent>/);
     // Project version untouched
     expect(updated).toMatch(/<\/parent>\s*<version>1\.0\.0<\/version>/);
+  });
+});
+
+// ── hasVersionCheckOff ────────────────────────────────────────────────────────
+
+describe('hasVersionCheckOff', () => {
+  // the exact shape spring-cloud-function's sample poms use, where pinning matters because
+  // stream depends on function and function's samples depend on stream
+  const pinned = `<properties>
+		<spring-cloud-function.version>4.3.6-SNAPSHOT</spring-cloud-function.version>
+		<spring-cloud-stream.version>4.3.4</spring-cloud-stream.version><!-- @releaser:version-check-off -->
+</properties>`;
+
+  test('finds the marker on the property it trails', () => {
+    expect(hasVersionCheckOff(pinned, 'spring-cloud-stream.version')).toBe(true);
+  });
+
+  test('does not leak to a neighbouring property', () => {
+    expect(hasVersionCheckOff(pinned, 'spring-cloud-function.version')).toBe(false);
+  });
+
+  test('is false when the property carries no marker', () => {
+    const xml = '<spring-boot.version>3.2.2</spring-boot.version>';
+    expect(hasVersionCheckOff(xml, 'spring-boot.version')).toBe(false);
+  });
+
+  test('tolerates extra comment text around the marker', () => {
+    const xml = '<a.version>1</a.version> <!-- pinned, @releaser:version-check-off, see #123 -->';
+    expect(hasVersionCheckOff(xml, 'a.version')).toBe(true);
+  });
+
+  test('a marker elsewhere in the file does not pin an unrelated property', () => {
+    const xml = `<version>0.0.1-SNAPSHOT</version><!-- @releaser:version-check-off -->
+<b.version>2</b.version>`;
+    expect(hasVersionCheckOff(xml, 'b.version')).toBe(false);
   });
 });
 

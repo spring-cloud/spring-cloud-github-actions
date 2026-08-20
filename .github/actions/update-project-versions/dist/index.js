@@ -28335,7 +28335,7 @@ async function run() {
 
       for (const file of pomFiles) {
         const isRoot = path.resolve(file) === path.resolve(rootPom);
-        const { changed, updatedProperties } = updatePomFile(
+        const { changed, updatedProperties, skippedProperties } = updatePomFile(
           file,
           isRoot,
           projectVersion,
@@ -28346,6 +28346,12 @@ async function run() {
         );
         if (changed) {
           core.info(`Updated ${path.relative(directory, file)}: ${updatedProperties.join(', ')}`);
+        }
+        // Reported even when nothing changed: a property left alone on purpose is the kind
+        // of thing that otherwise looks like the bump silently missing one.
+        if (skippedProperties.length) {
+          core.info(`Left alone in ${path.relative(directory, file)} ` +
+            `(@releaser:version-check-off): ${skippedProperties.join(', ')}`);
         }
       }
     }
@@ -28537,13 +28543,14 @@ function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVe
   const content = fs.readFileSync(filePath, 'utf-8');
   let updated = content;
   const updatedProperties = [];
+  const skippedProperties = [];
 
   const parser = new XMLParser({ ignoreAttributes: false });
   const parsed = parser.parse(content);
   const project = parsed?.project;
 
   if (!project) {
-    return { changed: false, updatedProperties: [] };
+    return { changed: false, updatedProperties: [], skippedProperties: [] };
   }
 
   // 1. Update the project's own <version>, skipping the <parent> block.
@@ -28595,13 +28602,18 @@ function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVe
   }
 
   // 3. Update <properties> entries ending in .version that match the versions map.
-  //    This applies to ALL pom files — root and child modules alike.
+  //    This applies to ALL pom files — root and child modules alike, except any the pom
+  //    has opted out of with @releaser:version-check-off.
   const properties = project?.properties ?? {};
   for (const [key, currentValue] of Object.entries(properties)) {
     if (!key.endsWith('.version')) continue;
     const projectName = key.slice(0, -'.version'.length);
     const targetVersion = versions[projectName];
     if (targetVersion && String(currentValue) !== targetVersion) {
+      if (hasVersionCheckOff(updated, key)) {
+        skippedProperties.push(`${key} (pinned at ${currentValue})`);
+        continue;
+      }
       const prev = updated;
       updated = replacePropertyValue(updated, key, targetVersion);
       if (updated !== prev) {
@@ -28614,7 +28626,7 @@ function updatePomFile(filePath, isRoot, projectVersion, versions, currentRootVe
   if (changed) {
     fs.writeFileSync(filePath, updated, 'utf-8');
   }
-  return { changed, updatedProperties };
+  return { changed, updatedProperties, skippedProperties };
 }
 
 /**
@@ -28663,6 +28675,25 @@ function replaceParentVersion(xml, oldVersion, newVersion) {
  *
  * Exported for unit testing.
  */
+/**
+ * True when the pom has opted this property out of version management with the marker the
+ * Jenkins releaser has always used:
+ *
+ *   <spring-cloud-stream.version>4.3.4</spring-cloud-stream.version><!-- @releaser:version-check-off -->
+ *
+ * Needed where two projects in the same train depend on each other - spring-cloud-stream
+ * builds against spring-cloud-function and function's samples build against stream - because
+ * pointing both at the other's snapshot is a cycle. One side pins to a release and says so.
+ *
+ * Exported for unit testing.
+ */
+function hasVersionCheckOff(xml, propertyName) {
+  const escapedName = escapeRegex(propertyName);
+  return new RegExp(
+    `<${escapedName}>[^<]*<\\/${escapedName}>[ \\t]*<!--[^>]*@releaser:version-check-off[^>]*-->`
+  ).test(xml);
+}
+
 function replacePropertyValue(xml, propertyName, newVersion) {
   const escapedName = escapeRegex(propertyName);
   const regex = new RegExp(`(<${escapedName}>\\s*)([^<]*)(\\s*<\\/${escapedName}>)`);
@@ -28895,6 +28926,7 @@ module.exports = {
   replaceProjectVersion,
   replaceParentVersion,
   replacePropertyValue,
+  hasVersionCheckOff,
   updateGradlePropertiesContent,
   updateBuildGradleContent,
   findFiles,
