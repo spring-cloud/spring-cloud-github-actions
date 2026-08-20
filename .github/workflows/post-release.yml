@@ -1412,27 +1412,16 @@ jobs:
               const titleCase = k =>
                 k.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
-              // On a commercial train some entries carry the plain OSS version because that
-              // project had no commercial release, and the commercial repo has no such tag. The
-              // link has to follow the tag that actually exists or the release body ships 404s.
-              const linkRepo = e => {
-                if (!commercial) return `spring-cloud/${e.key}`;
-                const commercialRepo = `spring-cloud/${e.key}-commercial`;
-                try {
-                  const refs = gh(['api',
-                    `repos/${commercialRepo}/git/matching-refs/tags/v${e.version}`,
-                    '--jq', '.[].ref']);
-                  if (refs.split('\n').map(r => r.trim()).includes(`refs/tags/v${e.version}`)) {
-                    return commercialRepo;
-                  }
-                } catch (err) { /* fall through to the OSS repo */ }
-                return `spring-cloud/${e.key}`;
-              };
-
+              // No issue links on a commercial train. They would point into the private
+              // <project>-commercial repositories, and the people who read these notes are the
+              // ones without access - a row of links that 404 for the audience is worse than
+              // no links at all. The module and its version are the useful part either way.
               const included = entries
                 .filter(e => e.key !== 'spring-boot' && e.key !== 'spring-cloud-release')
-                .map(e => ` - ${titleCase(e.key)} \`${e.version}\` ` +
-                  `([issues](https://github.com/${linkRepo(e)}/releases/tag/v${e.version}))`);
+                .map(e => commercial
+                  ? ` - ${titleCase(e.key)} \`${e.version}\``
+                  : ` - ${titleCase(e.key)} \`${e.version}\` ` +
+                    `([issues](https://github.com/spring-cloud/${e.key}/releases/tag/v${e.version}))`);
               // Trailing trim matters here: when the generated notes are empty (see below) this
               // would otherwise leave the list followed by blank lines.
               body = `## What's Included\n${included.join('\n')}\n\n${body}`.trim() + '\n';

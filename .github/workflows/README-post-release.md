@@ -201,7 +201,7 @@ Release bodies come from GitHub's own generator (`POST /repos/{repo}/releases/ge
 
 - **OSS projects: used verbatim**, reproducing what the existing releases look like — `## :heart: Contributors`, `## What's Changed` with one line per merged PR, `## New Contributors`, and a `**Full Changelog**` compare link.
 - **Commercial projects: sanitized.** The contributor sections, the `**Full Changelog**` line, and the ` by @<user> in <url>` suffix on each bullet are stripped, because those PR links point into a private repository and are useless to most readers. This reproduces the existing commercial release bodies.
-- **`spring-cloud-release`: gains a `## What's Included` section** listing every project version in the BOM with a link to that project's release, built from the same properties file.
+- **`spring-cloud-release`: gains a `## What's Included` section** listing every project version in the BOM, built from the same properties file. On an OSS train each line links to that project's release; on a commercial one it does not — see [Links in `What's Included`](#links-in-whats-included).
 
 Release **titles** are deliberately not normalized: OSS projects use the bare version (`5.0.4`) while `spring-cloud-release` and every commercial repo use a `v` prefix (`v2025.1.2`, `v4.2.8`), matching what already exists in each.
 
@@ -224,12 +224,19 @@ The check runs *after* `What's Included` is prepended, so the release train's ow
 
 Neither situation is something a later run fixes, and a line having many tags is no guarantee against it — `spring-cloud-gateway-commercial` v3.1.14 got a placeholder despite v3.1.11 through v3.1.13 existing. Where a project does merge its work through PRs, notes generate normally: `v4.2.9`, 42 commits after `v4.2.8` on the same line, produced a full `What's Changed` list of 8 entries.
 
-### Dead links in `What's Included`
+### Links in `What's Included`
 
-Two details, both there to avoid shipping dead links in a release body:
+Two details, both there to avoid shipping links that do not work for whoever is reading:
 
 - **It omits `spring-cloud-release` itself.** The hand-written body for v2025.1.2 has a `Spring Cloud Starter Build` line pointing at `spring-cloud/spring-cloud-starter-build`, but that repository does not exist — the link 404s. The other 16 lines match the hand-written body exactly.
-- **On a commercial train, each link follows the tag that actually exists.** Some entries in a commercial properties file carry the plain OSS version because that project had no commercial release (`spring-cloud-bus=5.0.2` in `2025_1_2_1.properties`), and `spring-cloud-bus-commercial` has no `v5.0.2` tag. Those entries link to the OSS repository; entries with a real commercial version link to the `-commercial` one.
+- **A commercial train gets no issue links at all**, just the module and its version:
+
+  ```
+   - Spring Cloud Config `4.3.5`
+   - Spring Cloud Bus `4.3.3`
+  ```
+
+  An issue link on a commercial release would point into the private `<project>-commercial` repositories, and the people reading commercial release notes are exactly the ones without access to those. A row of links that 404 for its audience is worse than no links, and the module and version — the part anyone actually needs — are still there. This also removes one tag-existence API call per module from every commercial run, since nothing has to work out which repository a link should point at any more.
 
 ## Branch resolution
 
