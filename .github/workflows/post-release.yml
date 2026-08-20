@@ -1978,8 +1978,40 @@ jobs:
             // ref path do not stop it matching.
             const bounded = new RegExp(
               `(?<![\\d.])${template.version.replace(/\./g, '\\.')}(?![\\d.])`, 'g');
-            const block = lines.slice(blocks[anchor].start, blocks[anchor].end + 1)
+            let block = lines.slice(blocks[anchor].start, blocks[anchor].end + 1)
               .map(l => l.replace(bounded, e.version));
+
+            // githubTag is derived, never inherited. Substitution only rewrites fields that
+            // contain the template's own version, so a template whose tag disagrees with its
+            // version hands that straight to the new entry - spring-cloud-gateway carries
+            // version 4.3.4.1 with githubTag v5.0.1.1, which is how a 4.3.6 entry ended up
+            // tagged v5.0.1.1. Whether the prefix is a v is a per-file convention, so it is
+            // read from the entries in this file that are self-consistent.
+            let withV = 0, without = 0;
+            for (const x of list) {
+              if (!x.version || !x.githubTag) continue;
+              if (x.githubTag === `v${x.version}`) withV++;
+              else if (x.githubTag === x.version) without++;
+            }
+            const prefix = (withV || without)
+              ? (withV >= without ? 'v' : '')
+              : ((template.githubTag || '').startsWith('v') ? 'v' : '');
+            block = block.map(l =>
+              l.replace(/^(\s*"githubTag"\s*:\s*")[^"]*(")/, `$1${prefix}${e.version}$2`));
+
+            // Any full version left in the block that is not the new one came from a template
+            // that was already inconsistent - gateway's 4.0.9 entry has a ref pointing at
+            // 4.0.10 - and substitution cannot have fixed it, because it never contained the
+            // template's version to begin with. The entry is still added, since the version
+            // and tag are right and a missing entry is worse, but it is reported so the PR
+            // says which field to look at.
+            const strays = [...new Set((block.join('\n').match(/\d+\.\d+\.\d+(?:\.\d+)?/g) || [])
+              .filter(v => v !== e.version))];
+            if (strays.length) {
+              rec.strays = strays;
+              problem(`${rel}: the ${template.version} entry it was cloned from carries ` +
+                `${strays.map(v => `'${v}'`).join(', ')} - check the new entry's ref`);
+            }
 
             // Where it goes: alongside the newest entry on its line, on whichever side keeps
             // that group's own ordering. The groups are contiguous but not consistently
