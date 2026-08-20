@@ -43,13 +43,18 @@ For an OSS release the tag is in the OSS repo but **the commit it points at was 
 
 **A project whose merge back did not land gets no release**, reported as `merge-incomplete` and listed under **Releases held back**. Publishing anyway would attach notes generated from history that is on no branch, and announce a version the maintenance branch has not received.
 
-"Landed" means the merge reached the remote, which takes both halves of step 5 — the merge *and* the push, since they go up together in one push. So these count as landed:
+"Landed" means the merge reached the remote, which takes both halves of step 5 — the merge *and* the push, since they go up together in one push:
 
-| `mergeStatus` | `pushStatus` |
-|---|---|
-| `merged`, `already-merged`, `no-release-branch` | `pushed`, `nothing-to-push`, `would-push` |
+| | `mergeStatus` | `pushStatus` |
+|---|---|---|
+| real run | `merged`, `already-merged`, `no-release-branch` | `pushed`, `nothing-to-push`, `would-push` |
+| dry run | `merged`, `already-merged`, `no-release-branch` | *not checked* |
 
-and anything else does not, including a clean merge whose version bump failed — that leaves the merge in the runner's clone and nowhere else.
+Anything else does not count, including a clean merge whose version bump failed — that leaves the merge in the runner's clone and nowhere else.
+
+**A dry run is judged on the merge alone.** It merges in the runner's clone and pushes nothing, and the version bump is skipped too, because no snapshot file was committed for it to resolve versions from — so `pushStatus` is `skipped` for every project on every dry run and carries no information about what a real run would do. The merge status still does: a conflict, a failed clone or an unreadable release branch are real answers on a dry run, and still hold the release back.
+
+Each held-back entry in the summary names **why**, not just the project. The merge back table can read as healthy while a release is held back — a clean merge whose push never happened, say — and two sections of the same report appearing to disagree is worse than either being terse.
 
 A matrix leg cannot read another matrix leg's outputs, so step 6 gets step 5's verdict by downloading the `result-mergeback-*` artifacts it already uploads and finding the record for its own project. **No merge-back record at all means it goes ahead** — that is a hotfix run, where the merge back is skipped by design and the release is the whole point.
 

@@ -1283,6 +1283,7 @@ jobs:
           // Read from the artifact rather than passed in: matrix legs cannot see each other's
           // outputs. Absent altogether means the merge back never ran - a hotfix - and that is
           // a run whose whole point is the release, so it goes ahead.
+          let heldBackReason = '';
           const mergeBackLanded = () => {
             let record = null;
             try {
@@ -1300,19 +1301,28 @@ jobs:
               return { ok: true };
             }
 
-            // The merge only reaches the remote as part of the single push that also carries
-            // the version bump, so "the merge back landed" means both of these, not just the
-            // merge. A failed bump stops the push, which leaves the merge in the runner's
-            // clone and nowhere else.
             const MERGED = ['merged', 'already-merged', 'no-release-branch'];
             const PUSHED = ['pushed', 'nothing-to-push', 'would-push'];
-            if (MERGED.includes(record.mergeStatus) && PUSHED.includes(record.pushStatus)) {
-              return { ok: true };
+
+            if (!MERGED.includes(record.mergeStatus)) {
+              return { ok: false, why: `the merge back reported ${record.mergeStatus || 'nothing'}` };
             }
+
+            // A dry run merges in the runner's clone and pushes nothing, so the merge status is
+            // a real answer there and the push status is not: the bump is skipped too, because
+            // no snapshot file was committed for it to resolve versions from. Testing the push
+            // on a dry run would hold back every project on every dry run, which says nothing
+            // about what a real one would do.
+            if (dryRun) return { ok: true };
+
+            // On a real run the merge only reaches the remote as part of the single push that
+            // also carries the version bump, so both halves have to have happened. A failed
+            // bump stops the push, leaving the merge in the runner's clone and nowhere else.
+            if (PUSHED.includes(record.pushStatus)) return { ok: true };
             return {
               ok: false,
-              why: `merge ${record.mergeStatus || 'not reached'}, ` +
-                `push ${record.pushStatus || 'not reached'}`,
+              why: `the merge back merged but the push reported ` +
+                `${record.pushStatus || 'nothing'}`,
             };
           };
 
@@ -1344,8 +1354,8 @@ jobs:
             // Resolve whatever stopped the merge and re-run with `projects` set to this one.
             const landed = mergeBackLanded();
             if (!landed.ok) {
-              console.log(`The merge back did not land for ${project} (${landed.why}) - ` +
-                'release skipped.');
+              console.log(`Release skipped for ${project}: ${landed.why}.`);
+              heldBackReason = landed.why;
               return { release: 'merge-incomplete', releaseUrl: '' };
             }
 
@@ -1469,6 +1479,7 @@ jobs:
           fs.writeFileSync(`result-milestones-${safe}.json`, JSON.stringify({
             phase: 'milestones-and-releases',
             project, repo, version, tag, resolvedIn, milestone, release, releaseUrl,
+            heldBackReason,
           }));
 
           if (failure) process.exit(1);
@@ -2796,8 +2807,8 @@ jobs:
             L.push('aborted and nothing else was done for them — resolve each one by hand, then');
             L.push('re-run this workflow with `projects` set to just those projects.');
             L.push('');
-            L.push('For an OSS release this also holds up the GitHub release: the tag reaches this');
-            L.push('repository through the merge, so nothing can be published until it lands.');
+            L.push('This also holds up the GitHub release: the merge is what makes the tagged');
+            L.push('commit reachable, so those projects appear under **Releases held back** too.');
             L.push('');
             for (const r of blocked) {
               L.push(`- \`${r.repo}\` — merge \`release/${r.version}\` into \`${r.branch}\``);
@@ -2840,7 +2851,13 @@ jobs:
             L.push('workflow with `projects` set to just these. Everything else is a no-op the');
             L.push('second time.');
             L.push('');
-            for (const r of heldBack) L.push(`- \`${r.repo}\` — \`${r.tag}\``);
+            // The reason, not just the name: the merge back table can read as healthy while a
+            // release is held back - a clean merge whose push never happened, say - and two
+            // sections of the same report disagreeing is worse than either one being terse.
+            for (const r of heldBack) {
+              L.push(`- \`${r.repo}\` — \`${r.tag}\`` +
+                (r.heldBackReason ? `, ${r.heldBackReason}` : ''));
+            }
             L.push('');
           }
 
