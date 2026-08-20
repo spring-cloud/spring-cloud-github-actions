@@ -495,6 +495,10 @@ Each carried-over item is re-milestoned to its repository's new milestone — th
 
 A repo with no such milestone — it was not part of the last release, so step 4 opened nothing — is reported and the item keeps what it had.
 
+**Everything left alone is listed in the summary, not just counted**, under **Milestones left alone — worth a look**. Declining to touch a milestone is the right call and also the one outcome here nobody discovers on their own: the item moves to the new board and quietly keeps a milestone from an old train, with nothing failing and nothing to notice. Each entry names the milestone it kept, what this train would have wanted, and the item's title.
+
+**A closed milestone is flagged with a ⚠️.** The board query already carries each milestone's state back, so the list can distinguish the two cases the rule cannot: an item pinned to a *closed* milestone from an earlier train is drift, while one pointing at a *future* release is somebody's decision. The `2025.1.3` run had exactly one of the former — an issue still on a `5.0.2` milestone closed months earlier — and it went unnoticed precisely because it was counted rather than listed. The Google Chat message carries the count for the same reason.
+
 ### 4. Closing the old board
 
 Only **when everything got across**. If any item failed to move, or a draft was left behind, the old board stays open and the summary says so: closing a board that still holds unfinished work hides it, and hiding it is worse than leaving something to look at.
@@ -546,6 +550,7 @@ Notes on this:
 
 ## Notes
 
+- **Milestone lookups are paginated, and that is not optional.** There is no "get a milestone by title" endpoint, so every milestone check here lists them — and several of these repositories are well past a hundred milestones (`spring-cloud-release` has 167, `spring-cloud-config` 154, `spring-cloud-commons` 151). The list API returns them **sorted by due date ascending**, so an unpaginated `per_page=100` read drops exactly the newest ones: the release just made and the one after it. A run against `2025.1.3` reported `not-found` for five repositories whose milestones were plainly there. Every lookup now uses `--paginate` — `--slurp` in the Node steps, since gh refuses `--slurp` together with `--jq`, and `jq -s add` in the shell ones.
 - **`spring-boot` is in every properties file but is not a Spring Cloud repository**, so it is excluded from tag checks, milestones, releases and branch updates. It *is* bumped in the snapshot properties file, matching the existing files.
 - Pre-release qualifiers (`-M1`, `-RC1`) are rejected rather than half-handled — bumping the patch of `2025.1.0-RC1` produces a version nobody wants, and post-release chores are not run for milestones or release candidates.
 - `update-project-versions` is called with `release-train-version` rather than an explicit versions map, because only that path applies `project-version-substitutions` (which maps `spring-cloud-dependencies-parent` → `spring-cloud-build`, `verifierVersion` → `spring-cloud-contract`, and so on). That path resolves over `raw.githubusercontent.com`, which is CDN-cached, so after committing the snapshot file the workflow waits for the raw URL to serve it before any project is updated. If the CDN never catches up, version updates are skipped rather than applied from a stale file, and the run can simply be repeated.

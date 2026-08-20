@@ -318,9 +318,12 @@ jobs:
           const milestoneNumber = title => {
             if (milestoneIndex === null) {
               milestoneIndex = new Map();
-              const r = ghRetry(['api', `repos/${scan.repo}/milestones?state=open&per_page=100`]);
+              // --paginate: a repository past a hundred open milestones would otherwise
+              // lose the newest ones, which are the only ones this ever looks for.
+              const r = ghRetry(['api', '--paginate', '--slurp',
+                `repos/${scan.repo}/milestones?state=open&per_page=100`]);
               if (r.ok) {
-                for (const m of JSON.parse(r.out || '[]')) milestoneIndex.set(m.title, m.number);
+                for (const m of JSON.parse(r.out || '[]').flat()) milestoneIndex.set(m.title, m.number);
               } else {
                 errors.push(`could not list milestones: ${r.err}`);
               }

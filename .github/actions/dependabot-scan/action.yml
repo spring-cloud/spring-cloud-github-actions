@@ -269,9 +269,14 @@ runs:
         let milestoneTitles = null;
         const milestoneExists = title => {
           if (milestoneTitles === null) {
-            const r = gh(['api', `repos/${REPO}/milestones?state=open&per_page=100`,
-              '--jq', '[.[].title]']);
-            milestoneTitles = r.ok ? new Set(parseJson(r.out, [])) : new Set();
+            // --paginate, with --slurp instead of --jq because gh refuses both together:
+            // a repository past a hundred open milestones would otherwise lose the newest
+            // ones, and those are the only ones this ever looks for.
+            const r = gh(['api', '--paginate', '--slurp',
+              `repos/${REPO}/milestones?state=open&per_page=100`]);
+            milestoneTitles = r.ok
+              ? new Set(parseJson(r.out, []).flat().map(m => m.title))
+              : new Set();
             if (!r.ok) warnings.push(`could not list milestones: ${r.err}`);
           }
           return milestoneTitles.has(title);

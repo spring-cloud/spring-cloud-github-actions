@@ -26,8 +26,13 @@ runs:
         version="${{ inputs.version }}"
 
         echo "Checking for milestone '${version}' in ${repo}..."
-        milestone_number=$(gh api "repos/${repo}/milestones?per_page=100" \
-          | jq -r --arg title "$version" '.[] | select(.title == $title) | .number')
+        # state=all and --paginate, both load-bearing. Milestone titles are not unique, so
+        # missing an existing one here creates a duplicate - and the default state=open on
+        # a single unpaginated page misses two different ways: a closed milestone with this
+        # title, and, in the repositories past a hundred milestones, anything after page
+        # one. The list comes back sorted by due date ascending, so the newest go last.
+        milestone_number=$(gh api --paginate "repos/${repo}/milestones?state=all&per_page=100" \
+          | jq -r -s --arg title "$version" 'add | .[] | select(.title == $title) | .number')
 
         if [[ -n "$milestone_number" ]]; then
           echo "Milestone '${version}' already exists (#${milestone_number})."

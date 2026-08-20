@@ -607,10 +607,13 @@ jobs:
           echo "New milestone title: ${TITLE}"
           echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
 
-          # Piped through jq rather than gh's --jq, which takes no --arg. Same shape as the
-          # lookup in the create-milestone action.
-          NUMBER=$(gh api "repos/${REPO}/milestones?state=all&per_page=100" 2>/dev/null \
-            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .number' || echo "")
+          # --paginate, and not optional: several of these repos are past a hundred
+          # milestones - spring-cloud-release has 167 - and the list comes back sorted by
+          # due date ascending, so it is precisely the newest ones that fall off page one.
+          # `jq -s add` folds the pages gh emits back into one array; piped through jq
+          # rather than gh's --jq because that takes no --arg (and no --slurp either).
+          NUMBER=$(gh api --paginate "repos/${REPO}/milestones?state=all&per_page=100" 2>/dev/null \
+            | jq -r -s --arg t "$TITLE" 'add | .[] | select(.title == $t) | .number' || echo "")
           if [[ -n "$NUMBER" ]]; then
             echo "Milestone '${TITLE}' already exists (#${NUMBER})."
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -1236,6 +1239,13 @@ jobs:
           const gh = (args, input) => execFileSync('gh', args,
             { encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] });
 
+          // Every milestone in the repository, across pages. --paginate is load-bearing:
+          // several of these repos are past a hundred milestones, and the API returns them
+          // sorted by due date ascending, so an unpaginated read silently loses exactly the
+          // newest ones - the release just made and the one after it.
+          const milestones = r => JSON.parse(gh(['api', '--paginate', '--slurp',
+            `repos/${r}/milestones?state=all&per_page=100`])).flat();
+
           // matching-refs returns an array, so an exact comparison is required: a plain
           // git/refs/tags/v5.0.2 lookup also prefix-matches v5.0.20. Same check verify-tags
           // makes, repeated here because the tag can arrive between the two jobs.
@@ -1261,7 +1271,7 @@ jobs:
           } else {
             milestone = 'not-found';
             try {
-              const list = JSON.parse(gh(['api', `repos/${repo}/milestones?state=all&per_page=100`]));
+              const list = milestones(repo);
               const found = list.find(m => m.title === version);
               if (!found) {
                 console.log(`Milestone '${version}' not found in ${repo}.`);
@@ -2788,8 +2798,8 @@ jobs:
                   fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
                   content{
                     __typename
-                    ... on Issue{ id number title state milestone{ title number } repository{ name owner{ login } } }
-                    ... on PullRequest{ id number title state milestone{ title number } repository{ name owner{ login } } }
+                    ... on Issue{ id number title state milestone{ title number state } repository{ name owner{ login } } }
+                    ... on PullRequest{ id number title state milestone{ title number state } repository{ name owner{ login } } }
                   }
                 }
               } } } }`, { id: oldBoard.id, after }).node.items;
@@ -2819,7 +2829,10 @@ jobs:
             if (milestoneCache.has(key)) return milestoneCache.get(key);
             let number = null;
             try {
-              const list = JSON.parse(gh(['api', `repos/${owner}/${repo}/milestones?state=all&per_page=100`]));
+              // --paginate, and not optional: repositories past a hundred milestones return
+              // them oldest-first, so an unpaginated read cannot see the new one.
+              const list = JSON.parse(gh(['api', '--paginate', '--slurp',
+                `repos/${owner}/${repo}/milestones?state=all&per_page=100`])).flat();
               number = (list.find(m => m.title === title) || {}).number || null;
             } catch (err) { /* reported by the caller */ }
             milestoneCache.set(key, number);
@@ -2874,12 +2887,21 @@ jobs:
             // ── the milestone ──
             const target = nextMilestoneOf(repo);
             const current = c.milestone?.title || null;
+            // A milestone this run declines to touch is not a failure, but it is the one
+            // thing here nobody finds out about on their own - the item just sits on the new
+            // board wearing an old milestone. So the reason is recorded, along with whether
+            // that milestone is closed: an open item pinned to a closed milestone is drift,
+            // whereas one pointing at a future release is somebody's decision.
+            const leave = why => {
+              record.milestone = why;
+              record.leftAlone = { current, closed: c.milestone?.state === 'CLOSED', target, why };
+            };
             if (!target) {
-              record.milestone = current ? 'left alone (repo not in this train)' : '';
+              if (current) leave(`kept ${current} - ${repo} is not in this train`);
             } else if (current === target) {
               record.milestone = 'already set';
             } else if (current && current !== releasedVersionOf(repo)) {
-              record.milestone = `left alone (set to ${current})`;
+              leave(`kept ${current} - not the train just released, so left as a choice`);
             } else if (dryRun) {
               record.milestone = `would set to ${target}`;
             } else {
@@ -3201,6 +3223,8 @@ jobs:
               `${board.status === 'would-run' ? 'would be carried over' : 'carried over'}`);
             const remilestoned = (board.milestones || []).filter(m => /→|would set/.test(m.detail));
             if (remilestoned.length) L.push(`- ${remilestoned.length} milestone(s) updated`);
+            const stale = (board.moved || []).filter(m => m.leftAlone);
+            if (stale.length) L.push(`- ${stale.length} milestone(s) left alone — listed below`);
             if (board.teams && board.teams.length) {
               L.push(`- access: ${board.teams.map(t => `\`${t.slug}\` ${t.role}`).join(', ')}`);
             }
@@ -3214,6 +3238,27 @@ jobs:
               L.push(`- ⚠️ …and ${board.problems.length - 10} more, see the job log`);
             }
             L.push('');
+
+            // Listed rather than counted. Leaving these alone is deliberate, and it is also
+            // exactly the sort of thing nobody notices unless it is written down: the item
+            // moves to the new board and quietly keeps a milestone from an old train.
+            if (stale.length) {
+              L.push('#### Milestones left alone — worth a look');
+              L.push('');
+              L.push('These carried over but kept the milestone they had, because it is neither');
+              L.push('empty nor the train just released, and a milestone somebody chose is never');
+              L.push('overwritten. Update them by hand where it is drift rather than a decision —');
+              L.push('**a closed milestone usually is**.');
+              L.push('');
+              for (const m of stale) {
+                const a = m.leftAlone;
+                L.push(`- ${a.closed ? '⚠️ ' : ''}\`${m.ref}\` — on \`${a.current}\`` +
+                  `${a.closed ? ' **(closed)**' : ''}` +
+                  `${a.target ? `, this train wants \`${a.target}\`` : ''}` +
+                  `${m.title ? ` — ${m.title}` : ''}`);
+              }
+              L.push('');
+            }
           }
 
           const blocked = mb.filter(r => r.mergeStatus === 'merge-conflict');
@@ -3424,8 +3469,12 @@ jobs:
           }
           if (board) {
             const carried = (board.moved || []).filter(m => !m.failed).length;
+            // The left-alone count earns its place here: the full list is in the summary,
+            // but nobody goes looking at the summary for something they do not know about.
+            const kept = (board.moved || []).filter(m => m.leftAlone).length;
             C.push(`Release board: ${phrase(board.status)} ${board.from} → ${board.to}` +
-              ` (${carried} item(s))`);
+              ` (${carried} item(s)` +
+              `${kept ? `, ${kept} kept an old milestone - see the summary` : ''})`);
           }
           if (start) {
             C.push(`start.spring.io: ${phrase(start.status, PR_PHRASE)}` +
