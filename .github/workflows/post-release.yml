@@ -89,6 +89,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_release_board:
+        description: 'Skip rolling the release train GitHub Project board over to the next version. OSS releases only.'
+        required: false
+        type: boolean
+        default: false
       token:
         description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
@@ -2542,9 +2547,403 @@ jobs:
           path: result-startsite.json
           if-no-files-found: ignore
 
+  # ── The release train's project board ────────────────────────────────────────────────
+  # Rolls the org-level GitHub Project from the train just released to the next one:
+  # copies the board, carries the unfinished work over, and closes the old one.
+  #
+  # OSS only - the boards are OSS by design, the same assumption dependabot-scan makes -
+  # and never on a filtered run, since the board covers the whole train.
+  #
+  # Runs after new-milestones because carrying an item over re-milestones it, and the
+  # milestone it moves to is the one that job opens.
+  release-board:
+    name: Release Board
+    needs: [setup, verify-tags, next-snapshot-config, new-milestones]
+    if: |
+      !cancelled() &&
+      needs.next-snapshot-config.result == 'success' &&
+      needs.setup.outputs.commercial != 'true' &&
+      needs.setup.outputs.hotfix != 'true' &&
+      inputs.skip_release_board != true &&
+      inputs.projects == ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Roll the board over to the next release
+        id: run
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
+          ENTRIES: ${{ needs.setup.outputs.entries }}
+          NEXT_VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+          # The columns whose contents follow the train. Anything else - Done, and whatever
+          # else a board has grown - stays on the board being closed.
+          CARRY_OVER_COLUMNS: 'Todo,In Progress'
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const ORG = 'spring-cloud';
+          const releaseVersion = process.env.RELEASE_VERSION;
+          const nextVersion = process.env.NEXT_VERSION;
+          const dryRun = process.env.DRY_RUN === 'true';
+          const runUrl = process.env.RUN_URL || '';
+          const entries = JSON.parse(process.env.ENTRIES || '[]');
+          const nextVersions = JSON.parse(process.env.NEXT_VERSIONS || '{}');
+          const carryOver = (process.env.CARRY_OVER_COLUMNS || 'Todo,In Progress')
+            .split(',').map(s => s.trim()).filter(Boolean);
+
+          // Whatever the old board had, a release board is always these. Read teams are given the
+          // middle role, because the API can say which teams a board is linked to but not what any
+          // of them is allowed to do - see README-post-release.md.
+          const REQUIRED_TEAMS = [
+            { slug: 'spring-cloud-core-developers', role: 'ADMIN' },
+            { slug: 'spring-cloud-core', role: 'WRITER' },
+          ];
+          const INHERITED_TEAM_ROLE = 'WRITER';
+
+          const result = {
+            phase: 'release-board', org: ORG, from: releaseVersion, to: nextVersion,
+            status: 'skipped', columns: carryOver, boardUrl: '', boardCreated: false,
+            teams: [], moved: [], milestones: [], problems: [], closedOld: false, drafts: 0,
+          };
+          const out = process.env.GITHUB_OUTPUT;
+          const finish = (status, message) => {
+            if (message) console.log(message);
+            result.status = status;
+            fs.writeFileSync('result-board.json', JSON.stringify(result));
+            if (out) {
+              fs.appendFileSync(out, `status=${status}\n`);
+              fs.appendFileSync(out, `board-url=${result.boardUrl}\n`);
+            }
+            process.exit(0);
+          };
+
+          // ── plumbing ─────────────────────────────────────────────────────────────────
+          // Variables go through a file rather than gh's -f/-F flags, which only carry scalars -
+          // updateProjectV2Collaborators takes an array of objects.
+          let seq = 0;
+          const graphql = (query, variables) => {
+            const file = `gql-${++seq}.json`;
+            fs.writeFileSync(file, JSON.stringify({ query, variables: variables || {} }));
+            let raw;
+            try {
+              raw = execFileSync('gh', ['api', 'graphql', '--input', file],
+                { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+            } catch (err) {
+              // gh exits non-zero on a GraphQL error but still prints the response body, which is
+              // where the useful message is.
+              raw = err.stdout || '';
+              if (!raw) throw new Error((err.stderr || err.message || '').split('\n')[0]);
+            } finally {
+              try { fs.unlinkSync(file); } catch (e) { /* nothing to clean up */ }
+            }
+            const body = JSON.parse(raw);
+            if (body.errors) throw new Error(body.errors.map(e => e.message).join('; '));
+            return body.data;
+          };
+
+          const gh = args => execFileSync('gh', args,
+            { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+
+          const problem = msg => { console.log(`  ! ${msg}`); result.problems.push(msg); };
+
+          // ── a. find the two boards ───────────────────────────────────────────────────
+          // By title, which is how every other workflow here resolves a release board (see
+          // dependabot-scan). Paged rather than first:100 - the org is past its hundredth project.
+          const boardsByTitle = () => {
+            const map = new Map();
+            let after = null;
+            for (let page = 0; page < 20; page++) {
+              const c = graphql(`query($login:String!,$after:String){
+                organization(login:$login){
+                  projectsV2(first:100, after:$after){
+                    pageInfo{ hasNextPage endCursor }
+                    nodes{ id number title url closed public }
+                  }
+                }
+              }`, { login: ORG, after }).organization.projectsV2;
+              for (const n of c.nodes) if (!map.has(n.title)) map.set(n.title, n);
+              if (!c.pageInfo.hasNextPage) break;
+              after = c.pageInfo.endCursor;
+            }
+            return map;
+          };
+
+          console.log(`Looking for boards '${releaseVersion}' and '${nextVersion}' in ${ORG}...`);
+          const boards = boardsByTitle();
+          const oldBoard = boards.get(releaseVersion);
+          if (!oldBoard) {
+            finish('no-old-board',
+              `No board titled '${releaseVersion}' in ${ORG} - nothing to carry over or close.`);
+          }
+          console.log(`Old board: #${oldBoard.number} ${oldBoard.url}${oldBoard.closed ? ' (closed)' : ''}`);
+
+          // ── b. the new board ─────────────────────────────────────────────────────────
+          const orgId = graphql('query($login:String!){ organization(login:$login){ id } }',
+            { login: ORG }).organization.id;
+
+          let newBoard = boards.get(nextVersion);
+          if (newBoard) {
+            // A re-run, or someone made it by hand. Either way it is the board to fill.
+            console.log(`New board already exists: #${newBoard.number} ${newBoard.url}`);
+          } else if (dryRun) {
+            console.log(`[dry run] would copy #${oldBoard.number} to a new board titled '${nextVersion}'.`);
+          } else {
+            // A copy rather than a fresh project: GitHub carries the views, custom fields,
+            // configured workflows and insights across, which is the whole of "modelled after the
+            // old one". It does not carry items, collaborators or team links - hence the rest.
+            const copied = graphql(`mutation($src:ID!,$owner:ID!,$title:String!){
+              copyProjectV2(input:{projectId:$src,ownerId:$owner,title:$title,includeDraftIssues:false}){
+                projectV2{ id number title url public }
+              }
+            }`, { src: oldBoard.id, owner: orgId, title: nextVersion }).copyProjectV2.projectV2;
+            newBoard = copied;
+            result.boardCreated = true;
+            console.log(`Created #${copied.number} ${copied.url}`);
+          }
+          if (newBoard) result.boardUrl = newBoard.url;
+
+          // ── c. public, and who can use it ────────────────────────────────────────────
+          if (newBoard && !newBoard.public && !dryRun) {
+            graphql('mutation($id:ID!){ updateProjectV2(input:{projectId:$id,public:true}){ projectV2{ id } } }',
+              { id: newBoard.id });
+            console.log('Made the board public.');
+          }
+
+          const oldTeams = graphql(`query($id:ID!){ node(id:$id){ ... on ProjectV2 {
+            teams(first:50){ nodes{ id slug name } } } } }`, { id: oldBoard.id }).node.teams.nodes;
+          console.log(`Teams linked to the old board: ${oldTeams.map(t => t.slug).join(', ') || 'none'}`);
+
+          const collaborators = new Map();
+          for (const t of oldTeams) {
+            collaborators.set(t.slug, { teamId: t.id, role: INHERITED_TEAM_ROLE, why: 'from the old board' });
+          }
+          for (const req of REQUIRED_TEAMS) {
+            let id = null;
+            try {
+              id = graphql('query($login:String!,$slug:String!){ organization(login:$login){ team(slug:$slug){ id } } }',
+                { login: ORG, slug: req.slug }).organization.team?.id || null;
+            } catch (err) {
+              problem(`could not look up team ${req.slug}: ${err.message}`);
+            }
+            if (!id) { problem(`team ${req.slug} not found in ${ORG} - not granted`); continue; }
+            collaborators.set(req.slug, { teamId: id, role: req.role, why: 'always on a release board' });
+          }
+
+          result.teams = [...collaborators.entries()].map(([slug, c]) => ({ slug, role: c.role, why: c.why }));
+          for (const t of result.teams) console.log(`  ${t.slug}: ${t.role} (${t.why})`);
+
+          if (newBoard && !dryRun && collaborators.size) {
+            graphql(`mutation($id:ID!,$c:[ProjectV2Collaborator!]!){
+              updateProjectV2Collaborators(input:{projectId:$id,collaborators:$c}){ collaborators{ totalCount } }
+            }`, {
+              id: newBoard.id,
+              c: [...collaborators.values()].map(c => ({ teamId: c.teamId, role: c.role })),
+            });
+            console.log(`Granted ${collaborators.size} team(s) access.`);
+          }
+
+          // ── d. the Status field on each board ────────────────────────────────────────
+          // Found by shape rather than by name: the single-select field carrying the columns being
+          // carried over. A board whose field is called something other than Status still works,
+          // and one whose options have been renamed is reported instead of half-moved.
+          const statusField = board => {
+            const fields = graphql(`query($id:ID!){ node(id:$id){ ... on ProjectV2 {
+              fields(first:50){ nodes{
+                ... on ProjectV2SingleSelectField{ id name options{ id name } } } } } } }`,
+              { id: board.id }).node.fields.nodes.filter(f => f && f.options);
+            const named = fields.find(f => f.name === 'Status');
+            const byOptions = fields.find(f =>
+              carryOver.every(c => f.options.some(o => o.name === c)));
+            return byOptions || named || null;
+          };
+
+          const oldStatus = statusField(oldBoard);
+          if (!oldStatus) finish('no-status-field', `Could not find a single-select column field on '${releaseVersion}'.`);
+          const missing = carryOver.filter(c => !oldStatus.options.some(o => o.name === c));
+          if (missing.length) {
+            finish('unknown-columns',
+              `'${releaseVersion}' has no ${missing.map(m => `'${m}'`).join(' or ')} column ` +
+              `(it has: ${oldStatus.options.map(o => o.name).join(', ')}).`);
+          }
+
+          const newStatus = newBoard ? statusField(newBoard) : null;
+          if (newBoard && !newStatus) {
+            finish('no-status-field', `Could not find a single-select column field on '${nextVersion}'.`);
+          }
+
+          // ── e. what is on the old board ──────────────────────────────────────────────
+          const items = [];
+          let after = null;
+          for (let page = 0; page < 50; page++) {
+            const c = graphql(`query($id:ID!,$after:String){ node(id:$id){ ... on ProjectV2 {
+              items(first:100, after:$after){
+                pageInfo{ hasNextPage endCursor }
+                nodes{
+                  id type
+                  fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
+                  content{
+                    __typename
+                    ... on Issue{ id number title state milestone{ title number } repository{ name owner{ login } } }
+                    ... on PullRequest{ id number title state milestone{ title number } repository{ name owner{ login } } }
+                  }
+                }
+              } } } }`, { id: oldBoard.id, after }).node.items;
+            items.push(...c.nodes);
+            if (!c.pageInfo.hasNextPage) break;
+            after = c.pageInfo.endCursor;
+          }
+          console.log(`\n${items.length} item(s) on '${releaseVersion}'.`);
+
+          const wanted = items.filter(i => carryOver.includes(i.fieldValueByName?.name));
+          const drafts = wanted.filter(i => i.type === 'DRAFT_ISSUE' || !i.content?.id);
+          result.drafts = drafts.length;
+          if (drafts.length) {
+            problem(`${drafts.length} draft issue(s) in ${carryOver.join('/')} cannot be moved - ` +
+              'drafts belong to a board, not to a repository. Recreate them by hand.');
+          }
+          const movable = wanted.filter(i => i.content && i.content.id);
+          console.log(`${movable.length} to carry over (${carryOver.join(', ')}).`);
+
+          // ── f. milestones ────────────────────────────────────────────────────────────
+          // The new milestone for a repo is the version step 3 wrote to the snapshot file, which is
+          // what step 4 opened a milestone for. Only set when the item has none, or still carries
+          // the train that just shipped - a milestone somebody chose deliberately is left alone.
+          const milestoneCache = new Map();
+          const milestoneNumber = (owner, repo, title) => {
+            const key = `${owner}/${repo}#${title}`;
+            if (milestoneCache.has(key)) return milestoneCache.get(key);
+            let number = null;
+            try {
+              const list = JSON.parse(gh(['api', `repos/${owner}/${repo}/milestones?state=all&per_page=100`]));
+              number = (list.find(m => m.title === title) || {}).number || null;
+            } catch (err) { /* reported by the caller */ }
+            milestoneCache.set(key, number);
+            return number;
+          };
+
+          const releasedVersionOf = repo => (entries.find(e => e.key === repo) || {}).version || null;
+          const nextMilestoneOf = repo => {
+            const v = nextVersions[repo];
+            return v ? v.replace(/-SNAPSHOT$/, '') : null;
+          };
+
+          // ── g. move ──────────────────────────────────────────────────────────────────
+          let moved = 0, failed = 0;
+          for (const item of movable) {
+            const c = item.content;
+            const repo = c.repository.name;
+            const owner = c.repository.owner.login;
+            const ref = `${owner}/${repo}#${c.number}`;
+            const column = item.fieldValueByName.name;
+            const record = { ref, title: c.title, column, milestone: '' };
+
+            if (dryRun || !newBoard) {
+              console.log(`[dry run] would move ${ref} (${column})`);
+            } else {
+              try {
+                const newItem = graphql(`mutation($p:ID!,$c:ID!){
+                  addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }`,
+                  { p: newBoard.id, c: c.id }).addProjectV2ItemById.item;
+
+                const option = newStatus.options.find(o => o.name === column);
+                if (!option) throw new Error(`'${nextVersion}' has no '${column}' column`);
+                graphql(`mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
+                  updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,
+                    value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }`,
+                  { p: newBoard.id, i: newItem.id, f: newStatus.id, o: option.id });
+
+                // Added to the new board first and removed from the old second, deliberately: if the
+                // second call fails the item is on both boards, which is visible and fixable. The
+                // other order can lose it from both.
+                graphql('mutation($p:ID!,$i:ID!){ deleteProjectV2Item(input:{projectId:$p,itemId:$i}){ deletedItemId } }',
+                  { p: oldBoard.id, i: item.id });
+                console.log(`  moved ${ref} (${column})`);
+              } catch (err) {
+                failed++;
+                problem(`${ref}: ${err.message}`);
+                result.moved.push(Object.assign(record, { failed: true }));
+                continue;
+              }
+            }
+
+            // ── the milestone ──
+            const target = nextMilestoneOf(repo);
+            const current = c.milestone?.title || null;
+            if (!target) {
+              record.milestone = current ? 'left alone (repo not in this train)' : '';
+            } else if (current === target) {
+              record.milestone = 'already set';
+            } else if (current && current !== releasedVersionOf(repo)) {
+              record.milestone = `left alone (set to ${current})`;
+            } else if (dryRun) {
+              record.milestone = `would set to ${target}`;
+            } else {
+              const number = milestoneNumber(owner, repo, target);
+              if (!number) {
+                record.milestone = `no ${target} milestone in ${repo}`;
+                problem(`${ref}: ${repo} has no '${target}' milestone, so it was left on ${current || 'none'}`);
+              } else {
+                try {
+                  gh(['api', `repos/${owner}/${repo}/issues/${c.number}`, '--method', 'PATCH',
+                    '-F', `milestone=${number}`]);
+                  record.milestone = `${current || 'none'} → ${target}`;
+                } catch (err) {
+                  record.milestone = 'failed';
+                  problem(`${ref}: could not set the milestone: ${(err.message || '').split('\n')[0]}`);
+                }
+              }
+            }
+            if (record.milestone) result.milestones.push({ ref, detail: record.milestone });
+            result.moved.push(record);
+            moved++;
+          }
+
+          // ── h. close the old board ───────────────────────────────────────────────────
+          // Only when everything got across. Closing a board that still holds unfinished work hides
+          // it, and hiding it is worse than leaving a red run to look at.
+          if (failed || drafts.length) {
+            console.log(`\nNot closing '${releaseVersion}': ${failed} item(s) failed to move` +
+              `${drafts.length ? `, ${drafts.length} draft(s) left behind` : ''}.`);
+          } else if (oldBoard.closed) {
+            console.log(`\n'${releaseVersion}' is already closed.`);
+            result.closedOld = true;
+          } else if (dryRun) {
+            console.log(`\n[dry run] would close '${releaseVersion}'.`);
+          } else {
+            graphql('mutation($id:ID!){ updateProjectV2(input:{projectId:$id,closed:true}){ projectV2{ id } } }',
+              { id: oldBoard.id });
+            console.log(`\nClosed '${releaseVersion}'.`);
+            result.closedOld = true;
+          }
+
+          console.log(`\n${moved} item(s) ${dryRun ? 'would move' : 'moved'}, ${failed} failed.`);
+          finish(dryRun ? 'would-run' : (failed ? 'partial' : 'done'));
+          JSEOF
+
+      - name: Record failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [[ ! -f result-board.json ]]; then
+            printf '%s' '{"phase":"release-board","status":"error"}' > result-board.json
+          fi
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-board
+          path: result-board.json
+          if-no-files-found: ignore
+
   summary:
     name: Summary
-    needs: [setup, verify-tags, milestones-and-releases, next-snapshot-config, new-milestones, merge-back-and-update, website-pr, start-site-pr]
+    needs: [setup, verify-tags, milestones-and-releases, next-snapshot-config, new-milestones, merge-back-and-update, website-pr, start-site-pr, release-board]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -2595,6 +2994,7 @@ jobs:
           const mb = byPhase('merge-back-and-update');
           const sc = all.find(r => r.phase === 'next-snapshot-config');
           const web = all.find(r => r.phase === 'website-pr');
+          const board = all.find(r => r.phase === 'release-board');
           const start = all.find(r => r.phase === 'start-site-pr');
 
           const L = [];
@@ -2623,6 +3023,9 @@ jobs:
             // start-site-pr
             'already-current': '➖', 'no-mapping': '⚠️',
             'file-not-found': '❌', 'bom-not-found': '❌',
+            // release-board
+            done: '✅', 'would-run': '🔎', partial: '⚠️',
+            'no-old-board': '❔', 'no-status-field': '❌', 'unknown-columns': '❌',
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
             skipped: '⏭️', 'skipped-by-request': '⏭️',
             'merge-conflict': '❌', 'branch-not-found': '❌',
@@ -2784,6 +3187,33 @@ jobs:
               L.push(`\`${start.file}\` — \`${start.from}\` → \`${start.to}\``);
               L.push('');
             }
+          }
+
+          if (board) {
+            L.push('### Release board');
+            L.push('');
+            const link = board.boardUrl ? `[${board.status}](${board.boardUrl})` : `**${board.status}**`;
+            L.push(`${icon(board.status)} \`${board.from}\` → \`${board.to}\` — ${link}` +
+              (board.boardCreated ? ' (created)' : ''));
+            L.push('');
+            const carried = (board.moved || []).filter(m => !m.failed);
+            L.push(`- ${carried.length} item(s) in ${(board.columns || []).join(' / ')} ` +
+              `${board.status === 'would-run' ? 'would be carried over' : 'carried over'}`);
+            const remilestoned = (board.milestones || []).filter(m => /→|would set/.test(m.detail));
+            if (remilestoned.length) L.push(`- ${remilestoned.length} milestone(s) updated`);
+            if (board.teams && board.teams.length) {
+              L.push(`- access: ${board.teams.map(t => `\`${t.slug}\` ${t.role}`).join(', ')}`);
+            }
+            // Left open is a warning on a real run and simply what a dry run does, so the
+            // two must not read alike - an unclosed board is the thing to notice here.
+            L.push(board.closedOld ? `- \`${board.from}\` closed`
+              : board.status === 'would-run' ? `- \`${board.from}\` would be closed`
+              : `- ⚠️ \`${board.from}\` left open — carry the rest over by hand, then close it`);
+            for (const p of (board.problems || []).slice(0, 10)) L.push(`- ⚠️ ${p}`);
+            if ((board.problems || []).length > 10) {
+              L.push(`- ⚠️ …and ${board.problems.length - 10} more, see the job log`);
+            }
+            L.push('');
           }
 
           const blocked = mb.filter(r => r.mergeStatus === 'merge-conflict');
@@ -2954,6 +3384,9 @@ jobs:
             error: 'errored', skipped: 'not reached', unknown: 'unknown',
             'branch-exists': 'branch already existed, left alone', 'no-changes': 'nothing to change',
             'already-current': 'already up to date', 'no-mapping': 'NO MAPPING - nothing opened',
+            done: 'rolled over', 'would-run': 'would roll over (dry run)',
+            partial: 'PARTLY rolled over', 'no-old-board': 'no board found',
+            'no-status-field': 'no column field found', 'unknown-columns': 'columns not found',
             'file-not-found': 'application.yml has moved', 'bom-not-found': 'could not find the bom',
             'no-tag': 'NO TAG - not published',
             'merge-incomplete': 'HELD BACK - the merge back did not land',
@@ -2988,6 +3421,11 @@ jobs:
           if (web) {
             C.push(`Website PR: ${phrase(web.status, PR_PHRASE)}` +
               (web.prUrl ? ` — <${web.prUrl}|${web.repo}>` : ''));
+          }
+          if (board) {
+            const carried = (board.moved || []).filter(m => !m.failed).length;
+            C.push(`Release board: ${phrase(board.status)} ${board.from} → ${board.to}` +
+              ` (${carried} item(s))`);
           }
           if (start) {
             C.push(`start.spring.io: ${phrase(start.status, PR_PHRASE)}` +

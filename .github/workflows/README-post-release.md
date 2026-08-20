@@ -16,7 +16,8 @@ It:
 6. **Closes the release milestone** and **publishes the GitHub release** for each tag — nothing is published for a project whose merge back did not land, see [Releases wait for the merge back](#releases-wait-for-the-merge-back); `skip_close_milestones` leaves the milestones open and still publishes the releases
 7. **Opens a PR against the website content repository** — the blog post and the `documentation.json` version bumps on the OSS site, a new `documentation.json` entry per released project on the commercial one, see [The website PR](#the-website-pr)
 8. **Opens a PR against [start.spring.io](https://github.com/spring-io/start.spring.io)** bumping the Spring Cloud version the Initializr offers — OSS only, see [The start.spring.io PR](#the-startspringio-pr)
-9. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
+9. **Rolls the release train's GitHub Project board** over to the next version — OSS only, see [The release board](#the-release-board)
+10. **Writes a summary** covering every phase, with everything that was skipped or blocked called out explicitly
 
 Step 5's version bump also exists on its own, as [update-versions](README-update-versions.md) — for when the projects have to move to a train's versions before, or independently of, a post-release run. The normal end-of-release path is still this workflow; running that one first is not required.
 
@@ -101,6 +102,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 | `skip_close_milestones` | Leave the release milestones open. Nothing else changes — the releases are still published, the next round of milestones is still opened, and the merge back still runs. Use it when issues are still being moved between milestones, then re-run with it unchecked (closing a milestone is idempotent, and everything else is a no-op the second time). | No | boolean (default: `false`) |
 | `skip_website_pr` | Skip the [website PR](#the-website-pr). It is already skipped for a run with `projects` set. | No | boolean (default: `false`) |
 | `skip_start_site_pr` | Skip the [start.spring.io PR](#the-startspringio-pr). It is already skipped for a commercial run, a hotfix, and a run with `projects` set. | No | boolean (default: `false`) |
+| `skip_release_board` | Skip [rolling the release board](#the-release-board) over to the next train. Same exclusions. | No | boolean (default: `false`) |
 | `dry_run` | When checked, nothing is created, committed or pushed — but the summary shows what would happen. | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
@@ -108,7 +110,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 | Secret | Description | Required |
 |--------|-------------|----------|
-| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there — and, for the website PR, push and pull-request access to `spring-io/spring-website-content` on an OSS run or `spring-io/spring-website-commercial-content` on a commercial one, plus `spring-io/start.spring.io` on an OSS run. | Yes, unless `token` is passed |
+| `GH_ACTIONS_REPO_TOKEN` | Used whenever the `token` input is empty. Needs the **`project` scope** for the release board, write access to every target repository (contents, issues for milestones, and releases), plus write access to `spring-cloud-release-commercial` — required on **every** run, OSS included, since the releaser config lives there — and, for the website PR, push and pull-request access to `spring-io/spring-website-content` on an OSS run or `spring-io/spring-website-commercial-content` on a commercial one, plus `spring-io/start.spring.io` on an OSS run. | Yes, unless `token` is passed |
 | `SPRING_CLOUD_CORE_POST_RELEASE_GCHAT_WEBHOOK` | Incoming webhook URL for the Google Chat space to notify when the run finishes. If unset, the step logs that it is skipping and the run still succeeds. Never used on a dry run. | No |
 
 Cross-repo writes rely entirely on this token — the workflow's own `permissions:` block is `contents: read`.
@@ -438,6 +440,65 @@ The summary gets its own **start.spring.io PR** section spelling out the reason 
 | `no-mapping` | ⚠️ nothing to bump, see above |
 | `file-not-found` / `bom-not-found` | ❌ `application.yml` moved, or the `spring-cloud` bom is no longer identifiable in it |
 
+## The release board
+
+Rolls the org-level GitHub Project from the train just released to the next one: `2025.1.3` → `2025.1.4`. **OSS only** — the boards are OSS by design, the same assumption [dependabot-scan](README-dependabot-report.md) makes — and never on a filtered run, since a board covers the whole train.
+
+Boards are found **by title**, which is how everything else here resolves them: a board is titled with its train version, and both versions are already computed by steps 1 and 3.
+
+It runs **after step 4**, because carrying an item over re-milestones it and the milestone it moves to is the one step 4 opens.
+
+### 1. The new board
+
+`copyProjectV2` rather than a fresh project. GitHub's copy carries over "the same views, custom fields, draft issues and associated field values, configured workflows (except any auto-add workflows), and insights" — which is the whole of "modelled after the old one". It explicitly does **not** carry "the original project's items, collaborators, or team and repository links", so the rest is done by hand:
+
+- **Public** — set with `updateProjectV2(public: true)`, since a copy is not.
+- **Access** — see below.
+- **Auto-add workflows are not copied.** If the old board had one, it needs recreating.
+
+If a board titled with the next version already exists — a re-run, or one made by hand — it is used as-is rather than duplicated.
+
+### Access, and what the API cannot tell us
+
+**`ProjectV2Collaborator` exists in the GraphQL schema only as a mutation input.** Nothing in the API returns a board's collaborators, so the old board's permissions cannot be read back. What *is* readable is `ProjectV2.teams`, the teams a board is linked to — but not what role any of them holds.
+
+So access on the new board is assembled from two sources:
+
+| | Role |
+|---|---|
+| `spring-cloud-core-developers` | `ADMIN` — always, whatever the old board had |
+| `spring-cloud-core` | `WRITER` — always |
+| any other team linked to the old board | `WRITER`, because its real role is not knowable |
+
+Every team granted access is listed in the summary with the role it got and why, so an inherited team that should have had something other than `WRITER` is visible rather than silent. **Individual user collaborators are not recoverable at all** and are not reproduced.
+
+### 2. Carrying the work over
+
+Items whose Status is **Todo** or **In Progress** move to the new board. Everything else — `Done`, and whatever else a board has grown — stays on the board being closed.
+
+There is no "change an item's project" operation: in Projects v2 an issue or PR can sit on many boards at once, so board membership is not a field to overwrite. Adding to the new board and removing from the old *is* what the Projects picker on an issue does, and it is two calls. **They are made in that order deliberately** — if the removal fails the item is on both boards, which is visible and fixable, whereas the other order can leave it on neither.
+
+The Status field is found **by shape, not by name**: the single-select field whose options include the columns being carried over. A board whose field is called something else still works, and one whose options have been renamed is reported rather than half-moved. Option IDs are per-board, so the column is matched across by name.
+
+**Draft issues cannot be moved** — they belong to a board, not a repository, so there is no content ID to add. These boards do not use them; if any turn up in a carried-over column they are reported and the old board is left open.
+
+### 3. Milestones
+
+Each carried-over item is re-milestoned to its repository's new milestone — the version step 3 wrote to the snapshot file, which is what step 4 opened a milestone for. Following [what triage already does](README-dependabot-triage.md), **a milestone somebody chose deliberately is never overwritten**:
+
+| Current milestone | Action |
+|---|---|
+| none | set to the new one |
+| the train just released (e.g. `5.0.3`) | set to the new one |
+| anything else | left alone, and reported |
+| — (repo not in this train) | left alone |
+
+A repo with no such milestone — it was not part of the last release, so step 4 opened nothing — is reported and the item keeps what it had.
+
+### 4. Closing the old board
+
+Only **when everything got across**. If any item failed to move, or a draft was left behind, the old board stays open and the summary says so: closing a board that still holds unfinished work hides it, and hiding it is worse than leaving something to look at.
+
 ## Output
 
 The job summary has one table per phase. Because most steps are no-ops when their target already exists, the icons distinguish *did it* from *it was already done* — otherwise a run that changed nothing would look identical to one that did all the work.
@@ -449,7 +510,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — a **start.spring.io PR** section, and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **Releases held back**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — a **start.spring.io PR** section, a **Release board** section, and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **Releases held back**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 
