@@ -82,7 +82,7 @@ After editing `src/index.js`, rebuild the bundle with `npm run build` and commit
 
 ```yaml
 - name: Update repositories to commercial Broadcom repositories
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-commercial-repositories@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-commercial-repositories@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     branch: 4.3.x

@@ -10,7 +10,7 @@
 #           RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
 #           USERNAME: ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
 #           RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-#         uses: "spring-cloud/spring-cloud-github-actions/.github/set-commercial-creds-env-vars@main"
+#         uses: "spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@v1"
 name: Set Commercial Creds Env Vars
 description: Sets environment variables for commercial repos
 runs:

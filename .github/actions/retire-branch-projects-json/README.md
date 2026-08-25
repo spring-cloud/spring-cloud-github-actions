@@ -44,7 +44,7 @@ No commit is made if neither `scheduled` nor `jdkVersions` contained the branch.
 
 ```yaml
 - name: Update projects.json
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/retire-branch-projects-json@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/retire-branch-projects-json@v1
   with:
     repo: spring-cloud/spring-cloud-build-commercial
     branch: 4.1.x

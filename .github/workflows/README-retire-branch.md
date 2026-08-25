@@ -61,7 +61,7 @@ the repository and branch name.
 ```yaml
 jobs:
   retire:
-    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/retire-branch.yml@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/retire-branch.yml@v1
     with:
       repo: spring-cloud/spring-cloud-circuitbreaker-commercial
       branch: 3.1.x

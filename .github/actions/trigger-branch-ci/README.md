@@ -26,7 +26,7 @@ dispatching anything.
 
 ```yaml
 - name: Trigger CI for non-default branches
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     non-default-branches: '["3.3.x","4.2.x"]'

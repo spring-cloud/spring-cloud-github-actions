@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   initialize:
-    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/initialize-commercial-branch.yml@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/initialize-commercial-branch.yml@v1
     with:
       oss_repo: spring-cloud/spring-cloud-foo
       oss_branch: ${{ inputs.oss_branch }}

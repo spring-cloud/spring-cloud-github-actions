@@ -30,6 +30,8 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 | [dependabot-report.yml](.github/workflows/dependabot-report.yml) | Daily read-only report on Dependabot across every OSS and commercial repo: failing update jobs, and open PRs that are ready, blocked, conflicting, or on retired branches. Posts to Google Chat. | [README](.github/workflows/README-dependabot-report.md) |
 | [dependabot-triage.yml](.github/workflows/dependabot-triage.yml) | Acts on open Dependabot PRs: sets the milestone, adds OSS PRs to the release train's GitHub Project, and comments `@dependabot rebase` on conflicts. Defaults to a dry run. | [README](.github/workflows/README-dependabot-triage.md) |
 | [check-token-permissions.yml](.github/workflows/check-token-permissions.yml) | Probes a token for every permission the Dependabot automation needs and reports which features it can support. Run after rotating `GH_ACTIONS_REPO_TOKEN`. | [README](.github/workflows/README-check-token-permissions.md) |
+| [release.yml](.github/workflows/release.yml) | Cuts a release: verifies every bundled action, resolves the next version, tags it, moves the floating major tag, and publishes a GitHub Release. Defaults to a dry run. | [Versioning](#versioning) |
+| [verify-dist.yml](.github/workflows/verify-dist.yml) | Rebuilds every JavaScript action and fails if a committed `dist/` bundle does not match its source. Discovers actions automatically. | — |
 
 ## Actions
 
@@ -39,6 +41,7 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 | [create-commercial-branch](.github/actions/create-commercial-branch/) | Copies the content of an OSS branch into a new orphan branch in a commercial repository, with no OSS git history. Optionally sets the new branch as the repo default. | [README](.github/actions/create-commercial-branch/README.md) |
 | [generate-workflows-for-branch](.github/actions/generate-workflows-for-branch/) | Copies release-train action files and runs the workflow generator for a single repository branch. Used by both the generator workflow and `create-hotfix-branch`. | [README](.github/actions/generate-workflows-for-branch/README.md) |
 | [create-milestone](.github/actions/create-milestone/) | Creates a milestone in a GitHub repository for a given version if one does not already exist. | [README](.github/actions/create-milestone/README.md) |
+| [close-milestone](.github/actions/close-milestone/) | Closes a milestone by title, optionally moving any issues still open in it to another milestone first. Missing or already-closed milestones are skipped, not failed. | [README](.github/actions/close-milestone/README.md) |
 | [copy-dependabot-config](.github/actions/copy-dependabot-config/) | Copies `dependabot.yml` / `dependabot.yaml` from one branch to another within the same repository as a separate commit. | [README](.github/actions/copy-dependabot-config/README.md) |
 | [copy-settings-xml](.github/actions/copy-settings-xml/) | Replaces `.settings.xml` on a target branch with the version from the source (or default) branch. | [README](.github/actions/copy-settings-xml/README.md) |
 | [update-oss-workflows-to-commercial](.github/actions/update-oss-workflows-to-commercial/) | Updates `ci` and `pr` workflow files on a commercial branch: restricts branches, adds `runs_on`, and injects Artifactory secrets. | [README](.github/actions/update-oss-workflows-to-commercial/README.md) |
@@ -66,3 +69,33 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 3. Trigger via push, schedule, and/or `workflow_dispatch`. The deploy workflow will use this repo's config and actions to decide what to build and deploy.
 
 For full details on inputs, secrets, and behavior, see the [Deploy workflow README](.github/workflows/README-deploy.md) and the [Determine Matrix action README](.github/actions/determine-matrix/README.md).
+
+## Versioning
+
+Releases are git tags — there is nothing published to a registry. Two kinds of tag are maintained:
+
+| Tag | Mutable? | Use it when |
+|-----|----------|-------------|
+| `v1` | Yes — moves to each new `v1.x.y` | Normal use. You get fixes automatically, and a bad release can be undone by moving the tag back. |
+| `v1.0.0` | No — never moves | You need a byte-for-byte reproducible pin. |
+
+```yaml
+uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@v1
+```
+
+`config/projects.json` is **not** versioned with the code. The [determine-matrix](.github/actions/determine-matrix/README.md) action reads it from `main` via its `config-ref` input, so pinning `@v1` gives you v1 behavior with current project configuration — retiring a branch or changing a JDK version takes effect immediately for everyone, regardless of the tag they pin.
+
+> **Migration in progress.** Consumer repositories currently still pin `@main`. New callers should use `@v1`; existing ones are being moved over separately.
+
+Internal references are pinned by the release itself. The reusable workflows here call sibling actions by absolute ref, because a relative `./` reference inside a *called* reusable workflow resolves against the caller's workspace rather than this repository. `uses:` also cannot take an expression, so the release workflow rewrites those refs to the exact version on the tagged commit. The commit a tag points at therefore differs from `main` by exactly those lines — that is deliberate, and it is what makes `deploy.yml@v1` call `determine-matrix` at the same version rather than at `main`.
+
+### Cutting a release
+
+Run the [Release](.github/workflows/release.yml) workflow, which picks the next version, tags it, moves the floating major tag, and publishes a GitHub Release with generated notes.
+
+1. Run it with **dry run** checked (the default) to see the version it resolves, the milestones it would close and open, and confirmation that every bundled action is up to date.
+2. Re-run with dry run unchecked. The job pauses for approval from the `release` environment's reviewers before any tag is pushed.
+
+Each release also closes the milestone matching the version just cut and opens the next one, applying the same bump. Releasing `v1.1.0` with a minor bump closes milestone `1.1.0` and opens `1.2.0`; anything still open in the closed milestone is moved forward so it is not stranded. Milestone titles are bare version numbers with no `v` prefix, matching the convention used across Spring Cloud, so tag `v1.1.0` pairs with milestone `1.1.0`.
+
+Releasing requires approval in the `release` environment, and a ruleset restricts `v*` tags so they cannot be pushed by hand. The workflow authenticates with `GH_ACTIONS_REPO_TOKEN`, the same token the rest of this repository uses.

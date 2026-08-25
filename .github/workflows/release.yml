@@ -1,0 +1,296 @@
+name: Release
+
+# Cuts a release of this repository's actions and reusable workflows.
+#
+# A GitHub Actions "release" is just a git tag - there is nothing to publish to
+# a registry. Consumers pin a tag in `uses:`, so this workflow maintains two:
+#
+#   vX.Y.Z  immutable, one per release, gets a GitHub Release
+#   vX      mutable, always points at the newest vX.Y.Z - this is what
+#           consumers pin, and moving it back is how a bad release is undone
+#
+# Force-pushing vX is intended, not a workaround: it is what lets @v1 consumers
+# receive fixes without opening a PR in every repository.
+#
+# Internal references are pinned onto the tagged commit. The reusable workflows
+# here call sibling actions by absolute ref (spring-cloud/spring-cloud-github-
+# actions/...@main) because a relative `./` ref inside a *called* reusable
+# workflow resolves against the CALLER's workspace, not this repository - so
+# relative refs are not an option for anything consumers call. `uses:` also
+# cannot take an expression, so the ref cannot be templated at runtime. The only
+# way a tag can be self-consistent is for the tagged commit to carry the version
+# in those refs, so this workflow rewrites them on a detached commit and tags
+# that. The tagged commit therefore intentionally differs from main by exactly
+# those ref lines.
+#
+# Access control: workflow_dispatch already requires write access, and the
+# tagging job additionally runs in the `release` environment, so it cannot start
+# until a reviewer approves it. A ruleset on v* tags stops anyone pushing a
+# release tag by hand; GH_ACTIONS_REPO_TOKEN - the same token every other
+# workflow here uses - is the bypass identity.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Which part of the version to increment (ignored if "version" is set)'
+        required: false
+        type: choice
+        options: [patch, minor, major]
+        default: minor
+      version:
+        description: 'Exact version to cut, e.g. v1.0.0. Overrides "bump".'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Resolve and report the version without tagging or publishing'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Gate: every bundled action must match its source ───────────────────────
+  verify-dist:
+    name: Verify dist
+    uses: ./.github/workflows/verify-dist.yml
+
+  # ── Resolve the version to cut ─────────────────────────────────────────────
+  # Runs on dry runs too, so a dry run is a full rehearsal of everything except
+  # the push itself. Deliberately outside the `release` environment so it never
+  # raises an approval request.
+  plan:
+    name: Resolve version
+    needs: verify-dist
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      major: ${{ steps.resolve.outputs.major }}
+      milestone: ${{ steps.resolve.outputs.milestone }}
+      next-milestone: ${{ steps.resolve.outputs.next-milestone }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve the next version
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$INPUT_VERSION" ]]; then
+            version="$INPUT_VERSION"
+            if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::'$version' is not a vX.Y.Z version."
+              exit 1
+            fi
+          else
+            latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+
+            if [[ -z "$latest" ]]; then
+              # First release. A bump has nothing to bump from, so start at v1.0.0.
+              version="v1.0.0"
+              echo "No existing version tags - starting at $version"
+            else
+              IFS=. read -r major minor patch <<< "${latest#v}"
+              case "$INPUT_BUMP" in
+                major) version="v$((major + 1)).0.0" ;;
+                minor) version="v${major}.$((minor + 1)).0" ;;
+                patch) version="v${major}.${minor}.$((patch + 1))" ;;
+                *) echo "::error::Unknown bump '$INPUT_BUMP'."; exit 1 ;;
+              esac
+              echo "Latest tag $latest, bumping $INPUT_BUMP -> $version"
+            fi
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+            echo "::error::Tag $version already exists. Releases are immutable - pick another version."
+            exit 1
+          fi
+
+          major="${version%%.*}"
+
+          # The milestone being released, and the one to open in its place. Spring
+          # Cloud milestone titles are bare version numbers with no v prefix - the
+          # same convention create-milestone and post-release.yml already use - so
+          # these deliberately differ from the tag names.
+          milestone="${version#v}"
+          IFS=. read -r vmaj vmin vpat <<< "$milestone"
+          case "$INPUT_BUMP" in
+            major) next_milestone="$((vmaj + 1)).0.0" ;;
+            minor) next_milestone="${vmaj}.$((vmin + 1)).0" ;;
+            patch) next_milestone="${vmaj}.${vmin}.$((vpat + 1))" ;;
+          esac
+
+          echo "version=$version"                 >> "$GITHUB_OUTPUT"
+          echo "major=$major"                     >> "$GITHUB_OUTPUT"
+          echo "milestone=$milestone"             >> "$GITHUB_OUTPUT"
+          echo "next-milestone=$next_milestone"   >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          MAJOR: ${{ steps.resolve.outputs.major }}
+          MILESTONE: ${{ steps.resolve.outputs.milestone }}
+          NEXT_MILESTONE: ${{ steps.resolve.outputs.next-milestone }}
+        run: |
+          {
+            echo "### Release plan"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`$VERSION\` |"
+            echo "| Floating tag | \`$MAJOR\` -> $VERSION |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Milestone to close | \`$MILESTONE\` |"
+            echo "| Milestone to open | \`$NEXT_MILESTONE\` |"
+            echo "| Dry run | ${{ inputs.dry_run }} |"
+            echo ""
+            if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+              echo "Dry run - no tag was created and no approval was requested."
+            else
+              echo "Awaiting approval in the \`release\` environment before tagging."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Tag and publish ────────────────────────────────────────────────────────
+  # `environment: release` gates this job on reviewer approval, so no tag is
+  # pushed until a reviewer signs off. Uses GH_ACTIONS_REPO_TOKEN, the token the
+  # rest of this repository already runs on, rather than introducing a second
+  # PAT to rotate and re-validate.
+  release:
+    name: Tag and publish
+    needs: plan
+    if: ${{ inputs.dry_run == false }}
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Pin internal references to the release version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Detached, so the rewrite never lands on main - main keeps @main and
+          # stays the branch everyone develops against.
+          git checkout --detach --quiet
+
+          mapfile -t files < <(
+            grep -rl 'uses: spring-cloud/spring-cloud-github-actions/[^ ]*@main' \
+              .github/workflows .github/actions --include='*.yml' \
+            | grep -v 'add-commercial-release-files/action.yml' \
+            | sort
+          )
+
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "::error::No internal @main references found - the rewrite pattern is wrong."
+            exit 1
+          fi
+
+          printf 'Pinning to %s in:\n' "$VERSION"
+          printf '  %s\n' "${files[@]}"
+
+          sed -i "s|\(uses: spring-cloud/spring-cloud-github-actions/[^ ]*\)@main|\1@${VERSION}|g" "${files[@]}"
+
+          # add-commercial-release-files writes a workflow into consumer repos and
+          # examples/ is copied by hand; both must keep whatever ref consumers are
+          # actually on, so neither is rewritten here.
+          leftover=$(grep -rn 'uses: spring-cloud/spring-cloud-github-actions/[^ ]*@main' \
+            .github/workflows .github/actions --include='*.yml' \
+            | grep -v 'add-commercial-release-files/action.yml' || true)
+          if [[ -n "$leftover" ]]; then
+            echo "::error::Internal references still on @main after the rewrite:"
+            echo "$leftover"
+            exit 1
+          fi
+
+          # config-ref must keep floating on main: it selects config/projects.json,
+          # which is data every consumer needs current regardless of pinned version.
+          if ! grep -q "default: 'main'" .github/actions/determine-matrix/action.yml; then
+            echo "::error::determine-matrix config-ref no longer defaults to main - config would be frozen at this tag."
+            exit 1
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet -am "Pin internal action references to ${VERSION}"
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Create and push tags
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          MAJOR: ${{ needs.plan.outputs.major }}
+        run: |
+          set -euo pipefail
+
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+          echo "Pushed immutable tag $VERSION at $release_sha"
+
+          # Moving the floating major tag is the point of the exercise, so this
+          # force-push is expected. It is what @$MAJOR consumers follow.
+          # ^{} peels to the commit: without it the annotated $MAJOR tag would
+          # point at the $VERSION *tag object*, creating a nested tag.
+          git tag -f -a "$MAJOR" -m "$MAJOR -> $VERSION" "${VERSION}^{}"
+          git push -f origin "$MAJOR"
+          echo "Moved floating tag $MAJOR to $VERSION"
+
+      # Milestones are opened before the release milestone is closed, because the
+      # close step moves anything still open into the new one and needs it to
+      # exist. Both actions are idempotent, so a re-run is safe.
+      - name: Open the next milestone
+        uses: ./.github/actions/create-milestone
+        with:
+          repo: ${{ github.repository }}
+          version: ${{ needs.plan.outputs.next-milestone }}
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Close the released milestone
+        uses: ./.github/actions/close-milestone
+        with:
+          repo: ${{ github.repository }}
+          version: ${{ needs.plan.outputs.milestone }}
+          migrate-to: ${{ needs.plan.outputs.next-milestone }}
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Only immutable tags get a Release; the floating major tag does not,
+          # or the release list would rewrite itself on every publish.
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --generate-notes \
+            --verify-tag
+
+      - name: Summarise
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          MAJOR: ${{ needs.plan.outputs.major }}
+          MILESTONE: ${{ needs.plan.outputs.milestone }}
+          NEXT_MILESTONE: ${{ needs.plan.outputs.next-milestone }}
+        run: |
+          {
+            echo "### Released $VERSION"
+            echo ""
+            echo "- Immutable tag \`$VERSION\` at \`$release_sha\` (main \`${{ github.sha }}\` + pinned refs)"
+            echo "- Floating tag \`$MAJOR\` now points at \`$VERSION\`"
+            echo "- Consumers pinning \`@$MAJOR\` pick this up on their next run"
+            echo "- Milestone \`$MILESTONE\` closed, \`$NEXT_MILESTONE\` opened"
+          } >> "$GITHUB_STEP_SUMMARY"

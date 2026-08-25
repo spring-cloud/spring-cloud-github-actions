@@ -51,7 +51,7 @@ using the [`yaml`](https://www.npmjs.com/package/yaml) Node.js package.
 
 ```yaml
 - name: Update Antora playbook
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-antora-playbook@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-antora-playbook@v1
   with:
     repository: spring-cloud/spring-cloud-contract-commercial
     branch: 4.3.x
@@ -62,7 +62,7 @@ To remove a branch (e.g. when it is retired or released), set `operation: remove
 
 ```yaml
 - name: Remove branch from Antora playbook
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-antora-playbook@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-antora-playbook@v1
   with:
     repository: spring-cloud/spring-cloud-contract-commercial
     branch: release/4.3.1.1

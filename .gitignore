@@ -26,4 +26,4 @@ _spans.adoc
 _metrics.adoc
 _conventions.adoc
 /package.json
-package-lock.json
+coverage/

@@ -82,7 +82,7 @@ In your project’s `.github/workflows/ci.yml`:
 ```yaml
 jobs:
   deploy:
-    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@v1
     with:
       branches: ${{ inputs.branches }}
       runs_on: ${{ inputs.runs_on }}

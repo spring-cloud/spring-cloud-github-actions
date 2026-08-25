@@ -31,7 +31,7 @@ initialization to ensure the new branch has the correct Maven settings.
 
 ```yaml
 - name: Copy settings.xml
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-settings-xml@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-settings-xml@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     target-branch: 4.3.x
@@ -42,7 +42,7 @@ To copy from a specific branch rather than the default:
 
 ```yaml
 - name: Copy settings.xml
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-settings-xml@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-settings-xml@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     source-branch: main

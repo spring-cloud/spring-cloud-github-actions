@@ -124,7 +124,7 @@ gh workflow run create-hotfix-release-branch.yml \
 ```yaml
 jobs:
   hotfix:
-    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/create-hotfix-release-branch.yml@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/create-hotfix-release-branch.yml@v1
     with:
       oss_repo: spring-cloud-foo
       oss_tag: v5.0.1

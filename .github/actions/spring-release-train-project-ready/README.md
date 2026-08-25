@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Mark spring-cloud-config ready in release train
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/spring-release-train-project-ready@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/spring-release-train-project-ready@v1
         with:
           project: spring-cloud-config
           project-version: '4.2.0'
@@ -54,7 +54,7 @@ When the project name ends in `-commercial`, the `commercial` flag is automatica
 
 ```yaml
 - name: Mark spring-cloud-config-commercial ready in release train
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/spring-release-train-project-ready@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/spring-release-train-project-ready@v1
   with:
     project: spring-cloud-config-commercial
     project-version: '4.2.0'
@@ -79,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: spring-cloud/spring-cloud-github-actions/.github/actions/spring-release-train-project-ready@main
+      - uses: spring-cloud/spring-cloud-github-actions/.github/actions/spring-release-train-project-ready@v1
         with:
           project: ${{ matrix.project }}
           project-version: '4.2.0'
