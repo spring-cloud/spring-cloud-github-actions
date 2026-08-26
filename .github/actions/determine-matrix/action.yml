@@ -47,7 +47,7 @@ runs:
 
     - name: Check if commercial repository
       id: is-commercial
-      uses: spring-cloud/spring-cloud-github-actions/.github/actions/is-commercial-repo@main
+      uses: spring-cloud/spring-cloud-github-actions/.github/actions/is-commercial-repo@v1.0.0
       with:
         repository: ${{ inputs.repository }}
 
