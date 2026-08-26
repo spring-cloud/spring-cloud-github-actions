@@ -40,7 +40,7 @@ No commit is made if the JSON is unchanged.
 
 ```yaml
 - name: Update projects.json
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-projects-json@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-projects-json@v1
   with:
     oss-repo: spring-cloud/spring-cloud-build
     oss-branch: 4.3.x

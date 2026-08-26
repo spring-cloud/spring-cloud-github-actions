@@ -14,7 +14,7 @@ commercial BOM (`spring-cloud-release-commercial`).
 ```yaml
 - name: Extract versions from Spring Cloud BOM
   id: extract-versions
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/extract-bom-versions@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/extract-bom-versions@v1
   with:
     ref: '2023.0.x'
 
@@ -35,7 +35,7 @@ commercial BOM (`spring-cloud-release-commercial`).
 ```yaml
 - name: Extract versions from commercial Spring Cloud BOM
   id: extract-versions
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/extract-bom-versions@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/extract-bom-versions@v1
   with:
     ref: '2023.0.x'
     commercial: 'true'

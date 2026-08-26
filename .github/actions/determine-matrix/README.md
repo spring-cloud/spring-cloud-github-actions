@@ -81,7 +81,7 @@ Other Spring Cloud repositories can reference this action:
 ```yaml
 - name: Determine build matrix
   id: determine-matrix
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@v1
   with:
     repository: ${{ github.repository }}
     event-name: ${{ github.event_name }}
@@ -96,7 +96,7 @@ You can specify multiple branches using a comma-separated list. This is useful f
 ```yaml
 - name: Determine build matrix
   id: determine-matrix
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@v1
   with:
     repository: ${{ github.repository }}
     event-name: ${{ github.event_name }}
@@ -231,7 +231,7 @@ jobs:
 
       - name: Determine build matrix
         id: determine-matrix
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@v1
         with:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}

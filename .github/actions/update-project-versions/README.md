@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Update project versions
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@v1
         with:
           release-train-version: '2025.1.0'
 ```
@@ -77,7 +77,7 @@ jobs:
 
 ```yaml
 - name: Update project versions
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@v1
   with:
     release-train-version: '2025.1.0'
     commercial: 'true'
@@ -95,12 +95,12 @@ jobs:
 
       - name: Extract BOM versions
         id: bom
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/extract-bom-versions@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/extract-bom-versions@v1
         with:
           ref: '2023.0.x'
 
       - name: Update project versions
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@v1
         with:
           versions: ${{ steps.bom.outputs.versions }}
           project-version: '4.1.2'
@@ -110,7 +110,7 @@ jobs:
 
 ```yaml
 - name: Update project versions
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@v1
   with:
     versions: '{"spring-boot":"3.3.0","spring-cloud-commons":"4.1.1"}'
     project-version: '4.1.2'
@@ -168,7 +168,7 @@ For example, `spring-cloud-contract` uses `verifierVersion` in its `gradle.prope
 
 ```yaml
 - name: Update project versions
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-project-versions@v1
   with:
     release-train-version: '2025.1.0'
     project-version-substitutions: '{"verifier":"spring-cloud-contract"}'

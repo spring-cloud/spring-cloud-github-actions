@@ -28,7 +28,7 @@ Or from a reusable action reference:
 
 ```yaml
 - name: Create milestone if missing
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-milestone@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-milestone@v1
   with:
     repo:    spring-cloud/spring-cloud-config-commercial
     version: 5.0.2.1
@@ -38,5 +38,5 @@ Or from a reusable action reference:
 ## Notes
 
 - The `version` input is used as the milestone **title** exactly as supplied — no `v` prefix is added.
-- Milestones are searched by title with `per_page=100`. If a repository has more than 100 open milestones the check may not find an existing one; close old milestones to avoid duplicates in that unlikely case.
+- Milestones are read with `--paginate` and `state=all`. Both matter: titles are not unique, the default `state=open` hides an already-closed milestone with the same title, and repositories past a hundred milestones return the newest ones on a later page.
 - The token must have write access to the target repository's issues (the `repo` scope on a classic PAT, or `issues: write` on a fine-grained PAT).

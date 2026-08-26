@@ -50,7 +50,7 @@ Files that already contain the Broadcom header are skipped.
 
 ```yaml
 - name: Update license headers
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-license-headers@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-license-headers@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     branch: 4.3.x

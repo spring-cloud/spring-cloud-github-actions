@@ -1,0 +1,91 @@
+name: Verify dist
+
+# The node20 actions in this repository commit their bundled dist/index.js, so a
+# tag is only trustworthy if every bundle matches its source. This workflow
+# discovers each JavaScript action and rebuilds it, rather than relying on a
+# per-action test workflow that has to be remembered when a new action is added.
+#
+# release.yml calls this workflow as a gate before it will cut a tag.
+
+on:
+  push:
+    paths:
+      - '.github/actions/**'
+      - '.github/workflows/verify-dist.yml'
+  pull_request:
+    paths:
+      - '.github/actions/**'
+      - '.github/workflows/verify-dist.yml'
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Discover the JavaScript actions ────────────────────────────────────────
+  # Any directory under .github/actions with a src/index.js is a node20 action
+  # that bundles into dist/. New actions are picked up with no edit here.
+  discover:
+    name: Discover JavaScript actions
+    runs-on: ubuntu-latest
+    outputs:
+      actions: ${{ steps.find.outputs.actions }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find actions with a bundled dist
+        id: find
+        run: |
+          actions=$(find .github/actions -mindepth 2 -maxdepth 2 -name src -type d \
+            | sed 's|/src$||' | sort | jq -R . | jq -sc .)
+          echo "Found: $actions"
+          if [[ "$actions" == "[]" ]]; then
+            echo "::error::No JavaScript actions found - the discovery glob is wrong."
+            exit 1
+          fi
+          echo "actions=$actions" >> "$GITHUB_OUTPUT"
+
+  # ── Rebuild each bundle and diff it against what is committed ──────────────
+  verify:
+    name: ${{ matrix.action }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        action: ${{ fromJson(needs.discover.outputs.actions) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.action }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ${{ matrix.action }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: |
+          if [[ -d __tests__ ]]; then
+            npm test
+          else
+            echo "No __tests__ directory - skipping tests for ${{ matrix.action }}"
+          fi
+
+      - name: Rebuild dist
+        run: npm run build
+
+      - name: Fail if the bundle is out of date
+        run: |
+          if git diff --quiet dist/; then
+            echo "✅ dist/ is up to date"
+          else
+            echo "❌ dist/ is out of date — run 'npm run build' in ${{ matrix.action }} and commit the result"
+            git diff --stat dist/
+            exit 1
+          fi

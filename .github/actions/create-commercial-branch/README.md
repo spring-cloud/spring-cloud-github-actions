@@ -34,7 +34,7 @@ From a branch:
 ```yaml
 - name: Create commercial branch
   id: create-branch
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-commercial-branch@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-commercial-branch@v1
   with:
     oss-repo: spring-cloud/spring-cloud-foo
     oss-branch: 3.3.x
@@ -47,7 +47,7 @@ From a tag (commercial branch name is required):
 ```yaml
 - name: Create commercial branch from tag
   id: create-branch
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-commercial-branch@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-commercial-branch@v1
   with:
     oss-repo: spring-cloud/spring-cloud-foo
     oss-tag: v3.3.0

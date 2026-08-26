@@ -91,7 +91,7 @@ permissions: read-all
 
 jobs:
   deploy-docs:
-    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy-docs.yml@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy-docs.yml@v1
     with:
       build_refname: ${{ github.event.inputs.build-refname }}
     secrets: inherit

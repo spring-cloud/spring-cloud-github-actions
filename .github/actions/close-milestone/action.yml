@@ -1,0 +1,102 @@
+name: 'Close Milestone'
+description: >
+  Closes the milestone with the given title, optionally moving any issues still
+  open in it to another milestone first. A missing or already-closed milestone
+  is reported and skipped rather than failing.
+
+inputs:
+  repo:
+    description: 'Full repository path (e.g. spring-cloud/spring-cloud-github-actions)'
+    required: true
+  version:
+    description: 'Milestone title / version string to close (e.g. 1.0.0)'
+    required: true
+  migrate-to:
+    description: >
+      Title of the milestone to move still-open issues into before closing. Must
+      already exist. Leave empty to close without moving anything.
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token with repository write access'
+    required: true
+  dry-run:
+    description: 'Report what would happen without changing anything'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Close milestone
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        VERSION: ${{ inputs.version }}
+        MIGRATE_TO: ${{ inputs.migrate-to }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+
+        # state=all and --paginate, both load-bearing, for the same reasons as in
+        # create-milestone: titles are not unique, the default state=open hides a
+        # milestone that is already closed, and repositories past a hundred
+        # milestones return the newest ones on a later page.
+        milestones=$(gh api --paginate "repos/${REPO}/milestones?state=all&per_page=100" | jq -s 'add // []')
+
+        number=$(jq -r --arg t "$VERSION" '.[] | select(.title == $t) | .number' <<< "$milestones" | head -1)
+        state=$(jq  -r --arg t "$VERSION" '.[] | select(.title == $t) | .state'  <<< "$milestones" | head -1)
+
+        # Not every release has a milestone - this repository had none before
+        # versioning was introduced - so a miss is normal and must not fail a run
+        # whose tag has already been pushed.
+        if [[ -z "$number" ]]; then
+          echo "Milestone '${VERSION}' not found in ${REPO} - nothing to close."
+          exit 0
+        fi
+
+        if [[ "$state" == "closed" ]]; then
+          echo "Milestone '${VERSION}' (#${number}) is already closed."
+          exit 0
+        fi
+
+        # Issues and pull requests both count; the issues API returns both, which
+        # is what we want - an open PR against the released milestone should roll
+        # forward the same way an issue does.
+        open_issues=$(gh api --paginate \
+          "repos/${REPO}/issues?milestone=${number}&state=open&per_page=100" \
+          | jq -s 'add // [] | map(.number) | .[]' || true)
+
+        if [[ -n "$open_issues" ]]; then
+          count=$(wc -l <<< "$open_issues" | tr -d ' ')
+          if [[ -z "$MIGRATE_TO" ]]; then
+            echo "::warning::${count} issue(s) still open in '${VERSION}' and no migrate-to given - they will stay in the closed milestone."
+          else
+            target=$(jq -r --arg t "$MIGRATE_TO" '.[] | select(.title == $t) | .number' <<< "$milestones" | head -1)
+            if [[ -z "$target" ]]; then
+              echo "::error::migrate-to milestone '${MIGRATE_TO}' does not exist in ${REPO}. Create it before closing '${VERSION}'."
+              exit 1
+            fi
+            echo "Moving ${count} open issue(s) from '${VERSION}' to '${MIGRATE_TO}' (#${target})..."
+            while read -r issue; do
+              [[ -n "$issue" ]] || continue
+              if [[ "$DRY_RUN" == "true" ]]; then
+                echo "  [dry run] would move #${issue}"
+              else
+                gh api "repos/${REPO}/issues/${issue}" --method PATCH --field milestone="$target" --silent
+                echo "  moved #${issue}"
+              fi
+            done <<< "$open_issues"
+          fi
+        else
+          echo "No open issues in '${VERSION}'."
+        fi
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "[dry run] would close milestone '${VERSION}' (#${number})."
+          exit 0
+        fi
+
+        gh api "repos/${REPO}/milestones/${number}" --method PATCH --field state=closed --silent
+        echo "Closed milestone '${VERSION}' (#${number})."

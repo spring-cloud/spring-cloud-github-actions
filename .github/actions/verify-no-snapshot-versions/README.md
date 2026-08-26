@@ -88,7 +88,7 @@ steps:
   - uses: actions/checkout@v4
 
   - name: Verify no pre-release versions
-    uses: spring-cloud/spring-cloud-github-actions/.github/actions/verify-no-snapshot-versions@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/actions/verify-no-snapshot-versions@v1
 ```
 
 ### With a Non-Default Directory
@@ -98,7 +98,7 @@ steps:
   - uses: actions/checkout@v4
 
   - name: Verify no pre-release versions
-    uses: spring-cloud/spring-cloud-github-actions/.github/actions/verify-no-snapshot-versions@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/actions/verify-no-snapshot-versions@v1
     with:
       directory: 'my-subproject'
 ```
@@ -111,7 +111,7 @@ steps:
 
   - name: Verify no pre-release versions
     id: verify
-    uses: spring-cloud/spring-cloud-github-actions/.github/actions/verify-no-snapshot-versions@main
+    uses: spring-cloud/spring-cloud-github-actions/.github/actions/verify-no-snapshot-versions@v1
     continue-on-error: true
 
   - name: Print violations

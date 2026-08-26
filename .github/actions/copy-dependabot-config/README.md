@@ -20,7 +20,7 @@ If no dependabot config file is found on the source branch, the action exits cle
 
 ```yaml
 - name: Copy dependabot config
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-dependabot-config@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-dependabot-config@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     target-branch: 3.3.x
@@ -31,7 +31,7 @@ If no dependabot config file is found on the source branch, the action exits cle
 
 ```yaml
 - name: Copy dependabot config
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-dependabot-config@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-dependabot-config@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     source-branch: main
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create commercial branch from OSS
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-commercial-branch@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/create-commercial-branch@v1
         with:
           oss-repo: spring-cloud/spring-cloud-foo
           oss-branch: ${{ inputs.oss_branch }}
@@ -58,7 +58,7 @@ jobs:
           token: ${{ secrets.COMMERCIAL_REPO_TOKEN }}
 
       - name: Copy dependabot config to new branch
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-dependabot-config@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/copy-dependabot-config@v1
         with:
           repository: spring-cloud/spring-cloud-foo-commercial
           target-branch: ${{ inputs.oss_branch }}

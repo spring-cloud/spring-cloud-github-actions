@@ -35,7 +35,7 @@ step rather than `with`, so they are never exposed in the Actions UI.
     RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
     USERNAME:    ${{ secrets.COMMERCIAL_ARTIFACTORY_USERNAME }}
     RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@v1
 
 - name: Build
   run: ./mvnw verify

@@ -66,7 +66,7 @@ Gradle `publishing.repositories` blocks containing old `repo.spring.io` URLs are
 
 ```yaml
 - name: Update distribution management
-  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-distribution-management@main
+  uses: spring-cloud/spring-cloud-github-actions/.github/actions/update-distribution-management@v1
   with:
     repository: spring-cloud/spring-cloud-foo-commercial
     branch: 4.3.x
