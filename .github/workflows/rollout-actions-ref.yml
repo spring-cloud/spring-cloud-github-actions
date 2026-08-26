@@ -15,6 +15,15 @@ name: Rollout Actions Ref
 # immutable SHA, so they do not follow a moved tag.
 
 on:
+  # Weekly drift check. A scheduled run is always a dry run - it reports what has
+  # drifted from the current release and posts to Google Chat, and never pushes.
+  #
+  # Deliberately not restricted to March-October the way the other scheduled
+  # workflows here are: that window keeps them aligned to EDT, but it would also
+  # silence this report for four months a year.
+  schedule:
+    - cron: '0 12 * * 1' # ~7:00am EST / 8:00am EDT, Monday
+
   workflow_dispatch:
     inputs:
       projects:
@@ -41,6 +50,11 @@ on:
         required: false
         type: boolean
         default: true
+      notify:
+        description: 'Post a summary of anything out of date to Google Chat.'
+        required: false
+        type: boolean
+        default: false
       token:
         description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
@@ -55,6 +69,10 @@ jobs:
     name: Build Matrix
     runs-on: ubuntu-latest
     outputs:
+      # A schedule event carries no inputs, so inputs.dry_run is null there. Passing
+      # that through would reach the sync action as an empty string, which is not
+      # "true" - and it would push to every branch. Force it instead.
+      dry-run: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
       matrix: ${{ steps.build-matrix.outputs.matrix }}
       count: ${{ steps.build-matrix.outputs.count }}
       tag: ${{ steps.resolve.outputs.tag }}
@@ -116,7 +134,20 @@ jobs:
                 ? `spring-cloud/${projectKey}-commercial`
                 : `spring-cloud/${projectKey}`;
               for (const branch of section.branches?.scheduled || []) {
-                include.push({ repo, branch, type: typeKey });
+                // -internal branches are rebased from their OSS branch, so ci.yml
+                // and pr.yml there are overwritten from OSS and must not be pinned
+                // here. ci-release.yml is internal-only and survives the rebase, so
+                // it is the one file the rollout owns on those branches - and the
+                // one file it must not touch anywhere else.
+                const internal = branch.endsWith('-internal');
+                include.push({
+                  repo,
+                  branch,
+                  type: typeKey,
+                  scope: internal ? 'ci-release.yml only' : 'all but ci-release.yml',
+                  includeFiles: internal ? 'ci-release.yml' : '',
+                  excludeFiles: internal ? '' : 'ci-release.yml',
+                });
               }
             }
           }
@@ -124,7 +155,7 @@ jobs:
           include.sort((a, b) => a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
 
           console.log(`${include.length} (repo, branch) pairs:`);
-          for (const e of include) console.log(`  ${e.repo}@${e.branch}`);
+          for (const e of include) console.log(`  ${e.repo}@${e.branch}  [${e.scope}]`);
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT,
             `matrix=${JSON.stringify({ include })}\n` +
@@ -153,12 +184,14 @@ jobs:
         id: sync
         uses: ./.github/actions/sync-actions-ref
         with:
-          repository: ${{ matrix.repo }}
-          branch:     ${{ matrix.branch }}
-          to-sha:     ${{ needs.setup.outputs.sha }}
-          to-tag:     ${{ needs.setup.outputs.tag }}
-          dry-run:    ${{ inputs.dry_run }}
-          token:      ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          repository:    ${{ matrix.repo }}
+          branch:        ${{ matrix.branch }}
+          to-sha:        ${{ needs.setup.outputs.sha }}
+          to-tag:        ${{ needs.setup.outputs.tag }}
+          include-files: ${{ matrix.includeFiles }}
+          exclude-files: ${{ matrix.excludeFiles }}
+          dry-run:       ${{ needs.setup.outputs.dry-run }}
+          token:         ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Record result
         if: always()
@@ -167,6 +200,7 @@ jobs:
           REPO: ${{ matrix.repo }}
           BRANCH: ${{ matrix.branch }}
           TYPE: ${{ matrix.type }}
+          SCOPE: ${{ matrix.scope }}
           STATUS: ${{ steps.sync.outputs.status }}
           FILES: ${{ steps.sync.outputs.files }}
           OUTCOME: ${{ steps.sync.outcome }}
@@ -178,10 +212,11 @@ jobs:
             --arg repo "$REPO" \
             --arg branch "$BRANCH" \
             --arg type "$TYPE" \
+            --arg scope "$SCOPE" \
             --arg status "${STATUS:-failed}" \
             --arg files "${FILES:-}" \
             --arg outcome "$OUTCOME" \
-            '{repo: $repo, branch: $branch, type: $type, status: $status, files: $files, outcome: $outcome}' \
+            '{repo: $repo, branch: $branch, type: $type, scope: $scope, status: $status, files: $files, outcome: $outcome}' \
             > "result-${safe}.json"
 
       - name: Upload result
@@ -205,8 +240,9 @@ jobs:
           path: results
 
       - name: Write summary
+        id: write-summary
         env:
-          DRY_RUN: ${{ inputs.dry_run }}
+          DRY_RUN: ${{ needs.setup.outputs.dry-run }}
           TAG: ${{ needs.setup.outputs.tag }}
           SHA: ${{ needs.setup.outputs.sha }}
         run: |
@@ -234,10 +270,10 @@ jobs:
           lines.push('');
           lines.push(`Pinning to \`${process.env.TAG}\` (\`${process.env.SHA}\`).`);
           lines.push('');
-          lines.push('| | Repository | Branch | Type | Result |');
+          lines.push('| | Repository | Branch | Scope | Result |');
           lines.push('|---|---|---|---|---|');
           for (const r of results) {
-            lines.push(`| ${icon(r)} | \`${r.repo}\` | \`${r.branch}\` | ${r.type} | ` +
+            lines.push(`| ${icon(r)} | \`${r.repo}\` | \`${r.branch}\` | ${r.scope || 'all'} | ` +
               `${r.outcome !== 'success' ? 'failed' : r.status} |`);
           }
           lines.push('');
@@ -262,5 +298,67 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
           console.log(lines.join('\n'));
 
+          // Chat text, built only when something is actually out of date - a weekly
+          // "nothing to do" ping trains people to ignore the channel.
+          const drifted = results.filter(r => r.status === 'would-update');
+          if (drifted.length || failed.length) {
+            const chat = [];
+            chat.push(`*spring-cloud-github-actions refs are out of date* — current release \`${process.env.TAG}\``);
+
+            const section = (title, items, render, limit = 15) => {
+              if (!items.length) return;
+              chat.push('', `*${title}* (${items.length})`);
+              for (const i of items.slice(0, limit)) chat.push(`• ${render(i)}`);
+              if (items.length > limit) chat.push(`• …and ${items.length - limit} more`);
+            };
+
+            section('Out of date', drifted, r =>
+              `${r.repo} — \`${r.branch}\` — ${(r.files || '').trim().split(/\s+/)
+                .filter(Boolean).map(f => f.replace('.github/workflows/', '')).join(', ')}`);
+            section('Failed to check', failed, r => `${r.repo} — \`${r.branch}\``);
+
+            if (drifted.length) {
+              chat.push('', 'Run *Rollout Actions Ref* with `dry_run` unchecked to update them.');
+            }
+
+            // Multiline GITHUB_OUTPUT values need the <<delimiter heredoc form.
+            const delimiter = `ghadelim_${Date.now()}`;
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,
+              `chat-text<<${delimiter}\n${chat.join('\n')}\n${delimiter}\n`);
+          } else {
+            console.log('Everything is on the current release - no Google Chat notification.');
+          }
+
           if (failed.length) process.exit(1);
           JSEOF
+
+      # Scheduled runs always notify; a manual run only when asked, so a dry run
+      # you are watching in the UI does not also ping the channel.
+      - name: Send Google Chat notification
+        if: always() && (github.event_name == 'schedule' || inputs.notify)
+        env:
+          WEBHOOK_URL: ${{ secrets.SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL }}
+          CHAT_TEXT: ${{ steps.write-summary.outputs.chat-text }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${WEBHOOK_URL}" ]]; then
+            echo "SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL is not set - skipping Google Chat notification."
+            exit 0
+          fi
+
+          if [[ -z "${CHAT_TEXT:-}" ]]; then
+            echo "Nothing out of date - skipping Google Chat notification."
+            exit 0
+          fi
+
+          TEXT=$(printf '%s\n\n<%s|View full report>' "$CHAT_TEXT" "$RUN_URL")
+
+          jq -n --arg text "$TEXT" '{text: $text}' > chat-message.json
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'Content-Type: application/json; charset=UTF-8' \
+            -d @chat-message.json \
+            "${WEBHOOK_URL}"
