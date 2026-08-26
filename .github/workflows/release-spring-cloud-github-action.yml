@@ -42,7 +42,7 @@ on:
         required: false
         type: choice
         options: [patch, minor, major]
-        default: minor
+        default: patch
       dry_run:
         description: 'Dry run, resolve and report the version without tagging or publishing'
         required: false
