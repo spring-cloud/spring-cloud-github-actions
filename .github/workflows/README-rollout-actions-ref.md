@@ -16,11 +16,11 @@ The trade-off: consumers no longer follow the floating `vX` tag, so **rollback m
 
 ## Weekly drift check
 
-Runs every Monday (`0 12 * * 1`) as a **dry run**, comparing the refs on every scheduled branch against the current release. When anything has drifted it posts to Google Chat listing the repository, branch, and files, and says to run this workflow to fix them. When everything is current it posts nothing — a weekly "all clear" only teaches people to ignore the channel.
+Runs every Monday at ~7:30am Eastern as a **dry run**, comparing the refs on every scheduled branch against the current release. When anything has drifted it posts to Google Chat listing the repository, branch, and files, and says to run this workflow to fix them. When everything is current it posts nothing — a weekly "all clear" only teaches people to ignore the channel.
 
 A scheduled run can never push. `schedule` events carry no inputs, so `inputs.dry_run` is null there; the workflow forces the dry run rather than passing that through, because an empty value would otherwise reach the sync action as "not a dry run" and it would commit to every branch.
 
-Unlike the other scheduled workflows here, this one is not restricted to March–October. That window keeps them aligned to EDT, but it would also silence this report for four months a year.
+The schedule uses paired cron entries — one for the EDT months, one an hour later for the EST months — so the run holds at the same local time year-round. That is the same shape the other scheduled workflows in this repository use.
 
 ## Inputs
 

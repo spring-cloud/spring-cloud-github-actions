@@ -18,11 +18,12 @@ on:
   # Weekly drift check. A scheduled run is always a dry run - it reports what has
   # drifted from the current release and posts to Google Chat, and never pushes.
   #
-  # Deliberately not restricted to March-October the way the other scheduled
-  # workflows here are: that window keeps them aligned to EDT, but it would also
-  # silence this report for four months a year.
+  # Paired entries hold the run at ~7:30am Eastern year-round, the same shape the
+  # other scheduled workflows here use. Offset half an hour from
+  # update-maven-wrapper's Monday slot so the two do not contend for runners.
   schedule:
-    - cron: '0 12 * * 1' # ~7:00am EST / 8:00am EDT, Monday
+    - cron: '30 11 * 3-10 1'      # ~7:30am EDT Monday, March-October
+    - cron: '30 12 * 11,12,1,2 1' # ~7:30am EST Monday, November-February
 
   workflow_dispatch:
     inputs:
