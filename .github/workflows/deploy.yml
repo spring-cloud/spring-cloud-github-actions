@@ -69,7 +69,7 @@ jobs:
     steps:
       - name: Determine branches and JDK versions
         id: set-matrix
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/determine-matrix@v1.1.1
         with:
           repository: ${{ github.repository }}
           event-name: ${{ github.event_name }}
@@ -89,7 +89,7 @@ jobs:
     steps:
       - name: Check if commercial repository
         id: is-commercial
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/is-commercial-repo@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/is-commercial-repo@v1.1.1
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -252,7 +252,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch CI for non-default branches
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/trigger-branch-ci@v1.1.1
         with:
           non-default-branches: ${{ needs.setup.outputs.non-default-branches }}
           repository: ${{ github.repository }}
