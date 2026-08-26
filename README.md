@@ -17,6 +17,7 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 | [pr.yml](.github/workflows/pr.yml) | Reusable build workflow called during pull requests. Accepts a custom build command and Artifactory/Dockerhub secrets. | — |
 | [deploy-docs.yml](.github/workflows/deploy-docs.yml) | Builds the Antora reference docs and publishes them. Called from the `docs-build` branch of each project; auto-detects OSS vs commercial and picks the runner and publish target accordingly. | [README](.github/workflows/README-deploy-docs.md) |
 | [rollout-deploy-docs.yml](.github/workflows/rollout-deploy-docs.yml) | Pushes the shared `deploy-docs` caller to the `docs-build` branch of every project in `projects.json`. Defaults to a dry run. | [README](.github/workflows/README-rollout-deploy-docs.md) |
+| [rollout-actions-ref.yml](.github/workflows/rollout-actions-ref.yml) | Repoints every consumer reference to this repository at a released commit SHA, annotated with its tag, across every scheduled branch in `projects.json`. Defaults to a dry run. | [README](.github/workflows/README-rollout-actions-ref.md) |
 | [rollout-deploy-docs-trigger.yml](.github/workflows/rollout-deploy-docs-trigger.yml) | Pushes the canonical `Deploy Docs` trigger to every source branch in `projects.json` that already has one. Fixes the `contents: read` gap, unifies the token, and allow-lists each branch. Defaults to a dry run. | [README](.github/workflows/README-rollout-deploy-docs-trigger.md) |
 | [initialize-commercial-branch.yml](.github/workflows/initialize-commercial-branch.yml) | Full-control workflow that creates a new commercial branch from an OSS branch and runs all commercial setup steps (settings, CI/PR workflows, licenses, repositories, distribution management, Antora playbook, projects.json). | [Example](examples/initialize-commercial-branch.yml) |
 | [create-commercial-branch.yml](.github/workflows/create-commercial-branch.yml) | Simplified wrapper over `initialize-commercial-branch` for the common case: copies an OSS branch to `<repo>-commercial` using the same branch name. | — |
@@ -53,6 +54,8 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 | [retire-branch-projects-json](.github/actions/retire-branch-projects-json/) | Updates `config/projects.json` when a branch is retired: removes it from `scheduled` and `jdkVersions`. Fails fast if the branch is still set as the default. | [README](.github/actions/retire-branch-projects-json/README.md) |
 | [trigger-branch-ci](.github/actions/trigger-branch-ci/) | Dispatches the `ci.yml` or `ci.yaml` workflow for each non-default branch in a Spring Cloud project. | [README](.github/actions/trigger-branch-ci/README.md) |
 | [dependabot-scan](.github/actions/dependabot-scan/) | Scans one repository for open Dependabot PRs and the state of its Dependabot update jobs, classifies each PR, and writes the result as JSON. Read-only, so [reporting](.github/workflows/README-dependabot-report.md) and [triage](.github/workflows/README-dependabot-triage.md) share it. | [README](.github/workflows/README-dependabot-report.md) |
+| [resolve-actions-ref](.github/actions/resolve-actions-ref/) | Resolves the latest published release of this repository to a commit SHA plus its tag. The single lookup used by everything that writes a ref into another repository. | [README](.github/actions/resolve-actions-ref/README.md) |
+| [sync-actions-ref](.github/actions/sync-actions-ref/) | Repoints references to this repository in one branch of one repository at a given SHA, with the tag as a trailing comment. Idempotent. | [README](.github/actions/sync-actions-ref/README.md) |
 | [set-commercial-creds-env-vars](.github/actions/set-commercial-creds-env-vars/) | Sets `COMMERCIAL_ARTIFACTORY_USERNAME/PASSWORD` environment variables, falling back to read-only credentials during PR builds. | [README](.github/actions/set-commercial-creds-env-vars/README.md) |
 | [sync-deploy-docs-workflow](.github/actions/sync-deploy-docs-workflow/) | Renders the shared `deploy-docs` caller from `examples/deploy-docs.yml` and commits it to a repository's `docs-build` branch. Supports dry runs. | [README](.github/workflows/README-rollout-deploy-docs.md) |
 | [sync-deploy-docs-trigger](.github/actions/sync-deploy-docs-trigger/) | Renders the canonical `Deploy Docs` trigger from `examples/deploy-docs-trigger.yml` and commits it to a source branch. Skips branches with no existing trigger. Supports dry runs. | [README](.github/workflows/README-rollout-deploy-docs-trigger.md) |
@@ -72,22 +75,29 @@ For full details on inputs, secrets, and behavior, see the [Deploy workflow READ
 
 ## Versioning
 
-Releases are git tags — there is nothing published to a registry. Two kinds of tag are maintained:
-
-| Tag | Mutable? | Use it when |
-|-----|----------|-------------|
-| `v1` | Yes — moves to each new `v1.x.y` | Normal use. You get fixes automatically, and a bad release can be undone by moving the tag back. |
-| `v1.0.0` | No — never moves | You need a byte-for-byte reproducible pin. |
+Releases are git tags — there is nothing published to a registry. Consumers pin the **commit SHA** of a release, with the tag it came from as a trailing comment:
 
 ```yaml
-uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@v1
+uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@d52d95a… # v1.0.0
 ```
 
-`config/projects.json` is **not** versioned with the code. The [determine-matrix](.github/actions/determine-matrix/README.md) action reads it from `main` via its `config-ref` input, so pinning `@v1` gives you v1 behavior with current project configuration — retiring a branch or changing a JDK version takes effect immediately for everyone, regardless of the tag they pin.
+A SHA is immutable: moving or deleting a tag cannot change what a consumer runs. The comment keeps the pin readable, and **Dependabot maintains both** — every consumer repository already runs the `github-actions` ecosystem, which [supports reusable workflows](https://github.blog/changelog/2023-03-13-dependabot-updates-support-reusable-workflows-for-github-actions/) pinned by SHA and [updates the version comment alongside it](https://github.blog/changelog/2022-10-31-dependabot-now-updates-comments-in-github-actions-workflows-referencing-action-versions/). So later releases reach consumers as Dependabot PRs.
 
-> **Migration in progress.** Consumer repositories currently still pin `@main`. New callers should use `@v1`; existing ones are being moved over separately.
+Three refs exist per release:
 
-Internal references are pinned by the release itself. The reusable workflows here call sibling actions by absolute ref, because a relative `./` reference inside a *called* reusable workflow resolves against the caller's workspace rather than this repository. `uses:` also cannot take an expression, so the release workflow rewrites those refs to the exact version on the tagged commit. The commit a tag points at therefore differs from `main` by exactly those lines — that is deliberate, and it is what makes `deploy.yml@v1` call `determine-matrix` at the same version rather than at `main`.
+| Ref | Mutable? | Use it for |
+|-----|----------|------------|
+| `<sha>` | No | What consumers pin. Written by [rollout-actions-ref](.github/workflows/README-rollout-actions-ref.md). |
+| `v1.0.0` | No | Human-readable equivalent of that SHA. Also what the tagged commit's own internal refs use. |
+| `v1` | Yes — moves to each new `v1.x.y` | Ad-hoc and manual runs. Nothing migrated follows it. |
+
+Usage examples in the per-action READMEs show `@v1` for readability. Real callers are SHA-pinned by the rollout, which rewrites whatever ref it finds — so a hand-written `@v1` is corrected on the next run rather than left as a moving pin.
+
+Because consumers pin a SHA rather than following `v1`, **rolling back means re-running [rollout-actions-ref](.github/workflows/README-rollout-actions-ref.md) at the previous release**, not moving a tag.
+
+`config/projects.json` is **not** versioned with the code. The [determine-matrix](.github/actions/determine-matrix/README.md) action reads it from `main` via its `config-ref` input, so a pinned consumer gets pinned *behavior* with current project *configuration* — retiring a branch or changing a JDK version takes effect immediately for everyone, whatever they pin.
+
+Internal references are pinned by the release itself. The reusable workflows here call sibling actions by absolute ref, because a relative `./` reference resolves against `$GITHUB_WORKSPACE` — the caller's checkout — both [inside a called reusable workflow](https://github.com/orgs/community/discussions/18601) and [inside a composite action](https://github.com/actions/runner/issues/1348). `uses:` also cannot take an expression, so the release workflow rewrites those refs to the exact version on a detached commit and tags that. The tagged commit therefore differs from `main` by exactly those lines, and `main` keeps `@main` so that day-to-day development tests the code being edited rather than the last release.
 
 ### Cutting a release
 

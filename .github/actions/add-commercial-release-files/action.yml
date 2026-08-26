@@ -42,6 +42,13 @@ inputs:
       branch. Regenerating is what points the trigger at the release branch.
     required: false
     default: 'false'
+  actions-ref:
+    description: >
+      Tag of spring-cloud-github-actions the generated ci-release.yml should call.
+      Empty (the default) resolves the latest published release and pins its commit
+      SHA, so a new branch is born pinned rather than tracking a moving ref.
+    required: false
+    default: ''
   commit-message:
     description: 'Commit message'
     required: false
@@ -58,10 +65,21 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    # Relative ref: this action is only invoked from workflows in this repository,
+    # which check it out first - the same pattern spring-release-train-project-ready
+    # already uses.
+    - name: Resolve the actions ref to generate
+      id: actions-ref
+      uses: ./.github/actions/resolve-actions-ref
+      with:
+        ref: ${{ inputs.actions-ref }}
+        token: ${{ inputs.token }}
+
     - name: Add ci-release.yml and release-ci-settings.xml
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
+        ACTIONS_REF: ${{ steps.actions-ref.outputs.pinned-ref }}
       run: |
         REPO="${{ inputs.repository }}"
         BRANCH="${{ inputs.branch }}"
@@ -143,7 +161,7 @@ runs:
 
         jobs:
           deploy:
-            uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@main
+            uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@ACTIONS_REF_PLACEHOLDER
             with:
               branches: EXPR_inputs.branches_EXPR
               # Commercial Artifactory only serves runners in the spring-enterprise-builds
@@ -170,6 +188,7 @@ runs:
         # Note: YAML already strips the block scalar's leading indentation before
         # running this script, so no space-stripping sed pass is needed here.
         sed -i \
+          -e "s|ACTIONS_REF_PLACEHOLDER|${ACTIONS_REF}|g" \
           -e "s|RELEASE_BRANCH_PLACEHOLDER|${BRANCH}|g" \
           -e "s|EXPR_\(.*\)_EXPR|${D}${L} \1 ${R}|g" \
           /tmp/ci-release-generated.yml

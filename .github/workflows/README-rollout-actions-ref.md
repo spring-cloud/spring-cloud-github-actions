@@ -1,0 +1,56 @@
+# Rollout Actions Ref
+
+Repoints every consumer reference to this repository at a released commit SHA, annotated with the tag it came from, across every branch listed under `branches.scheduled` in [config/projects.json](../../config/projects.json).
+
+```yaml
+uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@d52d95a… # v1.0.0
+```
+
+Defaults to a dry run.
+
+## Why a SHA and not the tag
+
+A SHA is immutable: moving or deleting a tag cannot change what a consumer runs. The tag rides along as a comment so the pin stays readable, and **Dependabot maintains both** — every consumer repository already runs the `github-actions` ecosystem, which [supports reusable workflows](https://github.blog/changelog/2023-03-13-dependabot-updates-support-reusable-workflows-for-github-actions/) pinned by SHA and [updates the accompanying version comment](https://github.blog/changelog/2022-10-31-dependabot-now-updates-comments-in-github-actions-workflows-referencing-action-versions/). After the one-time migration, later releases arrive as Dependabot PRs.
+
+The trade-off: consumers no longer follow the floating `vX` tag, so **rollback means re-running this workflow at the previous release's tag** rather than moving a tag. That is why this is a workflow and not a one-off script.
+
+## Inputs
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `projects` | *(all)* | Comma-separated project names, e.g. `spring-cloud-build,spring-cloud-config` |
+| `repo_type` | `both` | `oss`, `commercial`, or `both` |
+| `to_ref` | *(latest release)* | Tag to pin to. Empty resolves the latest published release. |
+| `dry_run` | `true` | When true, reports what would change and pushes nothing |
+| `token` | `GH_ACTIONS_REPO_TOKEN` | Token with write access to the target repositories |
+
+## What it targets
+
+One matrix entry per `(repository, branch)` pair drawn from `branches.scheduled`. That is deliberately the set of branches actively built:
+
+- **Retired branches are not touched.** `retire-branch` removes them from `projects.json`, and their `Locked Branches` rulesets have no bypass actors, so a push would fail by design.
+- **`docs-build` branches are not touched here.** They carry the `deploy-docs` caller and are handled by [rollout-deploy-docs](README-rollout-deploy-docs.md), which resolves the same release.
+- **Archived repositories are not reachable** and are excluded from `projects.json`.
+
+## Typical use
+
+```
+# 1. see what would change, everywhere
+dry_run: true
+
+# 2. canary a single project
+projects: spring-cloud-cloudfoundry, repo_type: commercial, dry_run: false
+
+# 3. the rest
+repo_type: commercial, dry_run: false
+repo_type: oss,        dry_run: false
+
+# 4. the docs-build branches
+run "Rollout Deploy Docs Workflow" with actions_ref empty
+```
+
+## Notes
+
+- **Re-running is safe.** A branch already on the target ref reports `no-change`, and no line gains a second comment.
+- **Fails fast when no release exists.** Falling back to `main` would stamp a moving ref into every consumer, which is what this exists to undo.
+- **`determine-matrix`'s `config-ref` is unaffected.** It selects `config/projects.json` and stays on `main` permanently, so pinning code does not freeze project configuration.

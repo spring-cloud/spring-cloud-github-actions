@@ -1,0 +1,266 @@
+name: Rollout Actions Ref
+
+# Repoints every consumer reference to this repository at a released commit SHA,
+# annotated with the tag it came from:
+#
+#   uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@<sha> # v1.0.0
+#
+# Targets every branch listed under branches.scheduled in config/projects.json.
+# Retired branches are absent from that file and are left alone - their Locked
+# Branches rulesets would reject a push anyway.
+#
+# Defaults to a dry run. Set dry_run to false to actually commit and push.
+#
+# Re-running this at an older release is the rollback path: consumers pin an
+# immutable SHA, so they do not follow a moved tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated Spring Cloud project names (e.g. spring-cloud-build,spring-cloud-config). Empty means every project in projects.json.'
+        required: false
+        type: string
+        default: ''
+      repo_type:
+        description: 'Update commercial, oss, or both?'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      to_ref:
+        description: 'Tag to pin to. Empty means the latest published release.'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run, if checked no changes will be committed, but you can see what would be updated'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the ref to pin to
+        id: resolve
+        uses: ./.github/actions/resolve-actions-ref
+        with:
+          ref: ${{ inputs.to_ref }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # Resolving to "main" means no release exists. Pinning consumers to a
+      # branch is the thing this rollout exists to undo, so stop here rather
+      # than quietly rewriting 79 branches back to a moving ref.
+      - name: Require a released ref
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if [[ "$TAG" == "main" ]]; then
+            echo "::error::No release found. Cut a release first, or pass an explicit to_ref."
+            exit 1
+          fi
+          echo "Pinning to ${TAG} (${{ steps.resolve.outputs.sha }})."
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
+          const filter = filterRaw
+            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
+            : new Set();
+
+          const repoType = (process.env.REPO_TYPE || 'both').trim();
+          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
+
+          // One matrix entry per (repo, branch). branches.scheduled is the set of
+          // branches actively built, which is exactly the set worth migrating -
+          // retired branches are removed from it by the retire-branch workflow.
+          const include = [];
+          for (const [projectKey, config] of Object.entries(projects)) {
+            if (projectKey === 'defaults') continue;
+            if (filter.size > 0 && !filter.has(projectKey)) continue;
+            for (const typeKey of typeKeys) {
+              const section = config[typeKey];
+              if (!section) continue;
+              const repo = typeKey === 'commercial'
+                ? `spring-cloud/${projectKey}-commercial`
+                : `spring-cloud/${projectKey}`;
+              for (const branch of section.branches?.scheduled || []) {
+                include.push({ repo, branch, type: typeKey });
+              }
+            }
+          }
+
+          include.sort((a, b) => a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
+
+          console.log(`${include.length} (repo, branch) pairs:`);
+          for (const e of include) console.log(`  ${e.repo}@${e.branch}`);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include })}\n` +
+            `count=${include.length}\n`);
+          JSEOF
+
+  sync:
+    name: "Sync — ${{ matrix.repo }}@${{ matrix.branch }}"
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Avoid persisting this repository's GITHUB_TOKEN as a git
+          # extraheader; it would override the credentials the sync action
+          # uses when talking to the target repositories.
+          persist-credentials: false
+
+      - name: Sync actions ref
+        id: sync
+        uses: ./.github/actions/sync-actions-ref
+        with:
+          repository: ${{ matrix.repo }}
+          branch:     ${{ matrix.branch }}
+          to-sha:     ${{ needs.setup.outputs.sha }}
+          to-tag:     ${{ needs.setup.outputs.tag }}
+          dry-run:    ${{ inputs.dry_run }}
+          token:      ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Record result
+        if: always()
+        id: record
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          TYPE: ${{ matrix.type }}
+          STATUS: ${{ steps.sync.outputs.status }}
+          FILES: ${{ steps.sync.outputs.files }}
+          OUTCOME: ${{ steps.sync.outcome }}
+        run: |
+          set -euo pipefail
+          safe="${REPO//\//-}-${BRANCH//\//-}"
+          echo "safe-name=${safe}" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg repo "$REPO" \
+            --arg branch "$BRANCH" \
+            --arg type "$TYPE" \
+            --arg status "${STATUS:-failed}" \
+            --arg files "${FILES:-}" \
+            --arg outcome "$OUTCOME" \
+            '{repo: $repo, branch: $branch, type: $type, status: $status, files: $files, outcome: $outcome}' \
+            > "result-${safe}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ steps.record.outputs.safe-name }}
+          path: result-${{ steps.record.outputs.safe-name }}.json
+
+  summary:
+    name: Summary
+    needs: [setup, sync]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          TAG: ${{ needs.setup.outputs.tag }}
+          SHA: ${{ needs.setup.outputs.sha }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) => a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+          const icon = r => r.outcome !== 'success' ? '❌'
+            : r.status === 'no-change' ? '➖'
+            : r.status === 'skipped' ? '⏭️'
+            : '✅';
+
+          const lines = [];
+          lines.push(dryRun ? '## Rollout summary (dry run — nothing pushed)' : '## Rollout summary');
+          lines.push('');
+          lines.push(`Pinning to \`${process.env.TAG}\` (\`${process.env.SHA}\`).`);
+          lines.push('');
+          lines.push('| | Repository | Branch | Type | Result |');
+          lines.push('|---|---|---|---|---|');
+          for (const r of results) {
+            lines.push(`| ${icon(r)} | \`${r.repo}\` | \`${r.branch}\` | ${r.type} | ` +
+              `${r.outcome !== 'success' ? 'failed' : r.status} |`);
+          }
+          lines.push('');
+
+          const failed = results.filter(r => r.outcome !== 'success');
+          const changed = results.filter(r => r.outcome === 'success' &&
+            (r.status === 'updated' || r.status === 'would-update'));
+          const unchanged = results.filter(r => r.status === 'no-change');
+          const skipped = results.filter(r => r.status === 'skipped');
+
+          lines.push(`**${results.length}** branches processed — ` +
+            `**${changed.length}** ${dryRun ? 'would change' : 'changed'}, ` +
+            `**${unchanged.length}** already up to date, ` +
+            `**${skipped.length}** skipped, ` +
+            `**${failed.length}** failed.`);
+
+          if (failed.length) {
+            lines.push('');
+            lines.push('Failed: ' + failed.map(r => `\`${r.repo}@${r.branch}\``).join(', '));
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          console.log(lines.join('\n'));
+
+          if (failed.length) process.exit(1);
+          JSEOF
