@@ -22,6 +22,18 @@ inputs:
   to-tag:
     description: 'Tag name the SHA came from, written as a trailing comment'
     required: true
+  include-files:
+    description: >
+      Comma-separated workflow file names to restrict the rewrite to, e.g.
+      "ci-release.yml". Empty (the default) considers every workflow file.
+    required: false
+    default: ''
+  exclude-files:
+    description: >
+      Comma-separated workflow file names to leave alone, applied after
+      include-files.
+    required: false
+    default: ''
   token:
     description: 'GitHub token with contents: write on the target repository'
     required: true
@@ -55,6 +67,8 @@ runs:
         ACTIONS_REPO: ${{ inputs.actions-repository }}
         TO_SHA: ${{ inputs.to-sha }}
         TO_TAG: ${{ inputs.to-tag }}
+        INCLUDE_FILES: ${{ inputs.include-files }}
+        EXCLUDE_FILES: ${{ inputs.exclude-files }}
         COMMIT_MESSAGE: ${{ inputs.commit-message }}
         DRY_RUN: ${{ inputs.dry-run }}
       run: |
@@ -112,8 +126,27 @@ runs:
         done < <(grep -rlE "uses:[[:space:]]*${ACTIONS_REPO}/" \
           .github/workflows --include='*.yml' --include='*.yaml' 2>/dev/null | sort || true)
 
+        # Which files are in scope differs by branch: -internal branches are rebased
+        # from their OSS branch, so a pin written into their ci.yml/pr.yml would be
+        # overwritten - only ci-release.yml, which is internal-only, survives.
+        if [[ -n "$INCLUDE_FILES" || -n "$EXCLUDE_FILES" ]]; then
+          scoped=()
+          for f in "${files[@]}"; do
+            base="${f##*/}"
+            if [[ -n "$INCLUDE_FILES" ]]; then
+              case ",${INCLUDE_FILES}," in *",${base},"*) ;; *) continue ;; esac
+            fi
+            if [[ -n "$EXCLUDE_FILES" ]]; then
+              case ",${EXCLUDE_FILES}," in *",${base},"*) continue ;; esac
+            fi
+            scoped+=("$f")
+          done
+          echo "File scope: include=[${INCLUDE_FILES:-any}] exclude=[${EXCLUDE_FILES:-none}] -> ${#scoped[@]} of ${#files[@]} file(s)"
+          files=("${scoped[@]}")
+        fi
+
         if [[ ${#files[@]} -eq 0 ]]; then
-          echo "No references to ${ACTIONS_REPO} in ${REPO}@${BRANCH}."
+          echo "No in-scope references to ${ACTIONS_REPO} in ${REPO}@${BRANCH}."
           echo "status=no-change" >> "$GITHUB_OUTPUT"
           echo "files=" >> "$GITHUB_OUTPUT"
           exit 0
