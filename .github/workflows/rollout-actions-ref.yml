@@ -270,10 +270,21 @@ jobs:
           lines.push('');
           lines.push(`Pinning to \`${process.env.TAG}\` (\`${process.env.SHA}\`).`);
           lines.push('');
-          lines.push('| | Repository | Branch | Scope | Result |');
+          // The files the sync step actually rewrote, rather than the scope it was
+          // allowed to consider - a branch already on the current release has an
+          // empty list, which is the honest answer to "what would be updated".
+          const fileList = r => {
+            const raw = (r.files || '').trim();
+            if (!raw) return '—';
+            return raw.split(/\s+/).filter(Boolean)
+              .map(f => `\`${f.replace('.github/workflows/', '')}\``)
+              .join(', ');
+          };
+
+          lines.push('| | Repository | Branch | Files | Result |');
           lines.push('|---|---|---|---|---|');
           for (const r of results) {
-            lines.push(`| ${icon(r)} | \`${r.repo}\` | \`${r.branch}\` | ${r.scope || 'all'} | ` +
+            lines.push(`| ${icon(r)} | \`${r.repo}\` | \`${r.branch}\` | ${fileList(r)} | ` +
               `${r.outcome !== 'success' ? 'failed' : r.status} |`);
           }
           lines.push('');
