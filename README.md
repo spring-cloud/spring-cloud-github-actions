@@ -30,7 +30,7 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 | [dependabot-report.yml](.github/workflows/dependabot-report.yml) | Daily read-only report on Dependabot across every OSS and commercial repo: failing update jobs, and open PRs that are ready, blocked, conflicting, or on retired branches. Posts to Google Chat. | [README](.github/workflows/README-dependabot-report.md) |
 | [dependabot-triage.yml](.github/workflows/dependabot-triage.yml) | Acts on open Dependabot PRs: sets the milestone, adds OSS PRs to the release train's GitHub Project, and comments `@dependabot rebase` on conflicts. Defaults to a dry run. | [README](.github/workflows/README-dependabot-triage.md) |
 | [check-token-permissions.yml](.github/workflows/check-token-permissions.yml) | Probes a token for every permission the Dependabot automation needs and reports which features it can support. Run after rotating `GH_ACTIONS_REPO_TOKEN`. | [README](.github/workflows/README-check-token-permissions.md) |
-| [release.yml](.github/workflows/release.yml) | Cuts a release: verifies every bundled action, resolves the next version, tags it, moves the floating major tag, and publishes a GitHub Release. Defaults to a dry run. | [Versioning](#versioning) |
+| [release.yml](.github/workflows/release-spring-cloud-github-action.yml) | Cuts a release: verifies every bundled action, resolves the next version, tags it, moves the floating major tag, and publishes a GitHub Release. Defaults to a dry run. | [Versioning](#versioning) |
 | [verify-dist.yml](.github/workflows/verify-dist.yml) | Rebuilds every JavaScript action and fails if a committed `dist/` bundle does not match its source. Discovers actions automatically. | — |
 
 ## Actions
@@ -91,7 +91,7 @@ Internal references are pinned by the release itself. The reusable workflows her
 
 ### Cutting a release
 
-Run the [Release](.github/workflows/release.yml) workflow, which picks the next version, tags it, moves the floating major tag, and publishes a GitHub Release with generated notes.
+Run the [Release](.github/workflows/release-spring-cloud-github-action.yml) workflow, which picks the next version, tags it, moves the floating major tag, and publishes a GitHub Release with generated notes.
 
 1. Run it with **dry run** checked (the default) to see the version it resolves, the milestones it would close and open, and confirmation that every bundled action is up to date.
 2. Re-run with dry run unchecked. The job pauses for approval from the `release` environment's reviewers before any tag is pushed.

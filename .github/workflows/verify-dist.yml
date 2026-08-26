@@ -5,7 +5,7 @@ name: Verify dist
 # discovers each JavaScript action and rebuilds it, rather than relying on a
 # per-action test workflow that has to be remembered when a new action is added.
 #
-# release.yml calls this workflow as a gate before it will cut a tag.
+# release-spring-cloud-github-action.yml calls this workflow as a gate before it will cut a tag.
 
 on:
   push:

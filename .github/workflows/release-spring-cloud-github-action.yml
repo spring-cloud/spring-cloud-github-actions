@@ -1,4 +1,4 @@
-name: Release
+name: Release Spring Cloud GitHub Actions
 
 # Cuts a release of this repository's actions and reusable workflows.
 #
@@ -32,19 +32,19 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Exact version to cut, e.g. v1.0.0. If not set, the latest tag is used to determine the next version.'
+        required: false
+        type: string
+        default: ''
       bump:
         description: 'Which part of the version to increment (ignored if "version" is set)'
         required: false
         type: choice
         options: [patch, minor, major]
         default: minor
-      version:
-        description: 'Exact version to cut, e.g. v1.0.0. Overrides "bump".'
-        required: false
-        type: string
-        default: ''
       dry_run:
-        description: 'Resolve and report the version without tagging or publishing'
+        description: 'Dry run, resolve and report the version without tagging or publishing'
         required: false
         type: boolean
         default: true
