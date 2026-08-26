@@ -13,8 +13,8 @@ If no dependabot config file is found on the source branch, the action exits cle
 | `target-branch` | yes | — | Branch to copy the dependabot config to |
 | `token` | yes | — | GitHub token with `contents: write` permission on the repository |
 | `commit-message` | no | `adding dependabot yaml` | Commit message |
-| `git-user-name` | no | `github-actions[bot]` | Git author name |
-| `git-user-email` | no | `github-actions[bot]@users.noreply.github.com` | Git author email |
+| `git-user-name` | no | `Spring Builds` | Git author name |
+| `git-user-email` | no | `svc.spring-builds@broadcom.com` | Git author email |
 
 ## Usage
 

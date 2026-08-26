@@ -15,8 +15,8 @@ The new branch is created as a [git orphan branch](https://git-scm.com/docs/git-
 | `commercial-branch` | no (yes when `oss-tag` is used) | same as `oss-branch` | Target branch name in the commercial repository |
 | `token` | yes | — | GitHub token with `contents: write` permission on the commercial repo |
 | `commit-message` | no | `Initialize <branch> from <oss-repo>@<ref>` | Commit message for the initial commit |
-| `git-user-name` | no | `github-actions[bot]` | Git author name |
-| `git-user-email` | no | `github-actions[bot]@users.noreply.github.com` | Git author email |
+| `git-user-name` | no | `Spring Builds` | Git author name |
+| `git-user-email` | no | `svc.spring-builds@broadcom.com` | Git author email |
 
 `oss-branch` and `oss-tag` are mutually exclusive — exactly one must be provided.
 

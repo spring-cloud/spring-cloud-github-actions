@@ -224,8 +224,8 @@ jobs:
             exit 1
           fi
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name  "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
           git commit --quiet -am "Pin internal action references to ${VERSION}"
           echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 

@@ -75,8 +75,8 @@ After editing `src/index.js`, rebuild the bundle with `npm run build` and commit
 | `branch` | yes | — | Branch to update |
 | `token` | yes | — | GitHub token with `contents: write` permission on the repository |
 | `commit-message` | no | `Updating repositories to commercial Broadcom repositories` | Commit message |
-| `git-user-name` | no | `github-actions[bot]` | Git author name |
-| `git-user-email` | no | `github-actions[bot]@users.noreply.github.com` | Git author email |
+| `git-user-name` | no | `Spring Builds` | Git author name |
+| `git-user-email` | no | `svc.spring-builds@broadcom.com` | Git author email |
 
 ## Usage
 

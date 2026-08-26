@@ -20,6 +20,8 @@ Idempotent — a branch already on the target ref reports `no-change` and pushes
 | `include-files` | no | Comma-separated workflow file names to restrict the rewrite to, e.g. `ci-release.yml`. Empty considers every workflow file. |
 | `exclude-files` | no | Comma-separated workflow file names to leave alone, applied after `include-files`. |
 | `token` | yes | GitHub token with `contents: write` on the target repository |
+| `git-user-name` | no | Git author name. Defaults to `Spring Builds`. |
+| `git-user-email` | no | Git author email. Defaults to `svc.spring-builds@broadcom.com`, which is what attributes the commit to the `spring-builds` account on GitHub. |
 | `commit-message` | no | Defaults to ``Pin spring-cloud-github-actions to <tag>`` |
 | `dry-run` | no | Render and diff without committing or pushing. Defaults to `false`. |
 
