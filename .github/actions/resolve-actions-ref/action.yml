@@ -1,0 +1,99 @@
+name: Resolve Actions Ref
+description: >
+  Resolves the ref that generated workflows should point at - the latest release
+  of the shared actions repository, as a commit SHA plus the tag it came from.
+author: Spring Cloud Team
+
+inputs:
+  repository:
+    description: 'Shared actions repository to resolve a release from'
+    required: false
+    default: 'spring-cloud/spring-cloud-github-actions'
+  ref:
+    description: >
+      Explicit override. When set, it is used verbatim as the tag and resolved to
+      a SHA; when empty, the latest release is looked up.
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token with read access to the actions repository'
+    required: true
+
+outputs:
+  tag:
+    description: 'Tag name of the resolved release (or the fallback ref)'
+    value: ${{ steps.resolve.outputs.tag }}
+  sha:
+    description: 'Commit SHA the tag points at, with annotated tags peeled'
+    value: ${{ steps.resolve.outputs.sha }}
+  pinned-ref:
+    description: 'Ready-to-write ref of the form "<sha> # <tag>", or just "main" when unresolved'
+    value: ${{ steps.resolve.outputs.pinned-ref }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve release ref
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repository }}
+        OVERRIDE: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+
+        if [[ -n "$OVERRIDE" ]]; then
+          tag="$OVERRIDE"
+          echo "Using explicit ref '${tag}'."
+        else
+          # releases/latest ignores prereleases and drafts, which is what we want -
+          # a generated workflow should never be pointed at an unpublished release.
+          #
+          # Assign only on success: gh prints the API error body to STDOUT, so a
+          # plain `tag=$(gh api ... || true)` on a repo with no releases captures
+          # the 404 JSON as if it were a tag name.
+          if out=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null); then
+            tag="$out"
+          else
+            tag=""
+          fi
+          # A successful response can still carry a null tag_name.
+          [[ "$tag" == "null" ]] && tag=""
+          if [[ -n "$tag" ]]; then
+            echo "Latest release of ${REPO} is '${tag}'."
+          fi
+        fi
+
+        # No release yet (or a fork with none): fall back to the default branch so
+        # generated workflows still work. This is the pre-first-release state, not
+        # an error - callers that require a pinned release should check the output.
+        if [[ -z "$tag" ]]; then
+          echo "::warning::No release found for ${REPO} - falling back to 'main'."
+          {
+            echo "tag=main"
+            echo "sha=main"
+            echo "pinned-ref=main"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # The commits endpoint peels an annotated tag to the commit it points at.
+        # Reading git/ref/tags/<tag> instead would return the tag object's own SHA,
+        # which is not a commit and is not what `uses:` can be pinned to.
+        sha=$(gh api "repos/${REPO}/commits/${tag}" --jq '.sha')
+        if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::Resolved SHA '${sha}' for ${tag} is not a full commit SHA."
+          exit 1
+        fi
+
+        echo "Resolved ${tag} -> ${sha}"
+        {
+          echo "tag=$tag"
+          echo "sha=$sha"
+          echo "pinned-ref=$sha # $tag"
+        } >> "$GITHUB_OUTPUT"
+
+branding:
+  icon: 'tag'
+  color: 'green'

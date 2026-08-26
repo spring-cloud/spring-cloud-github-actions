@@ -1,0 +1,154 @@
+name: Sync Actions Ref
+description: >
+  Repoints every reference to the shared actions repository in one branch of one
+  repository at a given commit SHA, annotated with the release tag it came from.
+  Idempotent - a branch already on the target ref reports no-change.
+author: Spring Cloud Team
+
+inputs:
+  repository:
+    description: 'Repository to update (e.g. spring-cloud/spring-cloud-vault)'
+    required: true
+  branch:
+    description: 'Branch to update'
+    required: true
+  actions-repository:
+    description: 'Shared actions repository whose references are rewritten'
+    required: false
+    default: 'spring-cloud/spring-cloud-github-actions'
+  to-sha:
+    description: 'Commit SHA to pin to (from resolve-actions-ref)'
+    required: true
+  to-tag:
+    description: 'Tag name the SHA came from, written as a trailing comment'
+    required: true
+  token:
+    description: 'GitHub token with contents: write on the target repository'
+    required: true
+  commit-message:
+    description: 'Commit message for the change'
+    required: false
+    default: ''
+  dry-run:
+    description: 'Render and diff the change without committing or pushing'
+    required: false
+    default: 'false'
+
+outputs:
+  status:
+    description: 'updated, no-change, or skipped'
+    value: ${{ steps.sync.outputs.status }}
+  files:
+    description: 'Space-separated list of files that changed'
+    value: ${{ steps.sync.outputs.files }}
+
+runs:
+  using: composite
+  steps:
+    - name: Sync actions ref
+      id: sync
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repository }}
+        BRANCH: ${{ inputs.branch }}
+        ACTIONS_REPO: ${{ inputs.actions-repository }}
+        TO_SHA: ${{ inputs.to-sha }}
+        TO_TAG: ${{ inputs.to-tag }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$TO_SHA" == "main" || -z "$TO_SHA" ]]; then
+          echo "::error::to-sha is '${TO_SHA}' - refusing to run. Cut a release first, or pass an explicit ref."
+          exit 1
+        fi
+
+        # actions/checkout writes an `http.https://github.com/.extraheader`
+        # credential into the *local* git config of the repository it checks out,
+        # and that header takes precedence over credentials embedded in a remote
+        # URL. Running from inside that checkout would authenticate every git call
+        # below as the caller's GITHUB_TOKEN rather than the token given to this
+        # action. Work from outside the checkout instead.
+        WORKDIR="$(mktemp -d)"
+        cd "$WORKDIR"
+
+        REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+        if ! git clone --quiet --depth 1 --single-branch --branch "$BRANCH" \
+             "$REMOTE_URL" repo 2>/dev/null; then
+          echo "::warning::Could not clone ${REPO}@${BRANCH} - skipping."
+          echo "status=skipped" >> "$GITHUB_OUTPUT"
+          echo "files=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        cd repo
+
+        if [[ ! -d .github/workflows ]]; then
+          echo "No .github/workflows in ${REPO}@${BRANCH} - nothing to do."
+          echo "status=no-change" >> "$GITHUB_OUTPUT"
+          echo "files=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Match on the `uses:` string rather than on filenames or line numbers.
+        # Consumers spell these ci.yml / ci.yaml / pr.yml / pr.yaml / maven.yaml,
+        # line numbers differ per branch, and some repositories call the actions
+        # directly instead of going through deploy.yml.
+        #
+        # The optional trailing-comment group is what makes a re-run idempotent:
+        # without it, every run would append another " # <tag>" to the same line.
+        # `.*` rather than `[^\n]*`: inside a POSIX bracket expression `\n` is a
+        # literal backslash-or-n, not a newline, so `[^\n]*` would stop at any "n".
+        # sed works a line at a time, so `.*` cannot cross lines anyway.
+        pattern="(uses:[[:space:]]*${ACTIONS_REPO}/[^@[:space:]]+)@[^[:space:]]+([[:space:]]*#.*)?"
+
+        # while-read rather than mapfile: a composite action can be run on any
+        # runner, and mapfile needs bash 4+.
+        files=()
+        while IFS= read -r f; do
+          [[ -n "$f" ]] && files+=("$f")
+        done < <(grep -rlE "uses:[[:space:]]*${ACTIONS_REPO}/" \
+          .github/workflows --include='*.yml' --include='*.yaml' 2>/dev/null | sort || true)
+
+        if [[ ${#files[@]} -eq 0 ]]; then
+          echo "No references to ${ACTIONS_REPO} in ${REPO}@${BRANCH}."
+          echo "status=no-change" >> "$GITHUB_OUTPUT"
+          echo "files=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        sed -i -E "s|${pattern}|\1@${TO_SHA} # ${TO_TAG}|g" "${files[@]}"
+
+        if git diff --quiet; then
+          echo "${REPO}@${BRANCH} is already on ${TO_TAG} - nothing to do."
+          echo "status=no-change" >> "$GITHUB_OUTPUT"
+          echo "files=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        changed=$(git diff --name-only | tr '\n' ' ')
+        echo "Changed in ${REPO}@${BRANCH}: ${changed}"
+        git --no-pager diff
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "[dry run] not committing."
+          echo "status=would-update" >> "$GITHUB_OUTPUT"
+          echo "files=${changed}" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        message="${COMMIT_MESSAGE:-Pin spring-cloud-github-actions to ${TO_TAG}}"
+        git config user.name  "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit --quiet -am "$message"
+        git push --quiet origin "$BRANCH"
+        echo "Pushed to ${REPO}@${BRANCH}."
+
+        echo "status=updated" >> "$GITHUB_OUTPUT"
+        echo "files=${changed}" >> "$GITHUB_OUTPUT"
+
+branding:
+  icon: 'git-branch'
+  color: 'green'

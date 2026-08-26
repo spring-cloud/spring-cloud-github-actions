@@ -35,10 +35,10 @@ on:
         type: boolean
         default: true
       actions_ref:
-        description: 'Tag or SHA of the shared deploy-docs workflow from this repo to use'
+        description: 'Tag of this repo to pin the generated caller to. Empty means the latest published release.'
         required: false
         type: string
-        default: 'main'
+        default: ''
       token:
         description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
@@ -56,6 +56,8 @@ jobs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
       count: ${{ steps.build-matrix.outputs.count }}
       skipped: ${{ steps.build-matrix.outputs.skipped }}
+      actions-ref: ${{ steps.resolve.outputs.sha }}
+      actions-tag: ${{ steps.resolve.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,6 +66,25 @@ jobs:
           # extraheader; it would override the credentials the sync action
           # uses when talking to the target repositories.
           persist-credentials: false
+
+      - name: Resolve the ref to pin to
+        id: resolve
+        uses: ./.github/actions/resolve-actions-ref
+        with:
+          ref: ${{ inputs.actions_ref }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # Falling back to "main" would stamp a moving ref into 32 repositories,
+      # which is what pinning exists to avoid.
+      - name: Require a released ref
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if [[ "$TAG" == "main" ]]; then
+            echo "::error::No release found. Cut a release first, or pass an explicit actions_ref."
+            exit 1
+          fi
+          echo "Pinning generated callers to ${TAG} (${{ steps.resolve.outputs.sha }})."
 
       - name: Build matrix
         id: build-matrix
@@ -157,8 +178,9 @@ jobs:
         id: sync
         uses: ./.github/actions/sync-deploy-docs-workflow
         with:
-          repository:      ${{ matrix.repo }}
-          actions-ref:     ${{ inputs.actions_ref }}
+          repository:          ${{ matrix.repo }}
+          actions-ref:         ${{ needs.setup.outputs.actions-ref }}
+          actions-ref-comment: ${{ needs.setup.outputs.actions-tag }}
           dry-run:         ${{ inputs.dry_run }}
           enable-workflow: ${{ inputs.enable_workflow }}
           token:           ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
