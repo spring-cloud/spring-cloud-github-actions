@@ -34,9 +34,33 @@ spring-cloud-commons@main    Maven 3.9.11   wrapperVersion 3.3.4 + distributionT
 1. **`versions`** resolves the target Maven and `maven-wrapper` versions.
 2. **`setup`** expands [`config/projects.json`](../../config/projects.json) into one matrix
    entry per repo/branch.
-3. **`update`** compares each branch's wrapper and, if behind, creates a branch, commits,
-   and opens a PR.
+3. **`update`** compares **every** wrapper on the branch and, if any is behind or
+   unreadable, creates a branch, commits them all in one commit, and opens a PR.
 4. **`summary`** reports every combination in one table.
+
+## Every wrapper, not just the root one
+
+Dependabot's Maven file fetcher looks for `.mvn/wrapper/maven-wrapper.properties` in the
+directory of **every pom it fetches** — the root plus each `<module>`. Its parser raises on
+any file it cannot read a wrapper version out of, and it raises while *parsing*, before any
+dependency work. That aborts the repository's **entire** Dependabot update job: no pull
+requests at all, not merely no wrapper PR.
+
+So a pristine root wrapper buys nothing while a submodule still carries the single-line file
+it was given in 2018:
+
+```properties
+distributionUrl=https://repo1.maven.org/maven2/org/apache/maven/apache-maven/3.6.0/apache-maven-3.6.0-bin.zip
+```
+
+No `wrapperVersion`, no `wrapperUrl`, and — where `mvnw` is old or absent — no version banner
+to fall back on. Four repositories were found in exactly that state, with 45 such files
+across their maintained branches, and it was the sole cause of every failing Dependabot job
+in the estate.
+
+Scope is therefore **every `maven-wrapper.properties` in a directory that also contains a
+`pom.xml`** — precisely the set Dependabot reads. A wrapper directory with no `pom.xml`
+beside it is left alone: Dependabot never looks at it, so touching it would be pure churn.
 
 ### What is out of scope
 
@@ -63,9 +87,22 @@ Unchecking `regenerate` falls back to editing **only
   file already has that key**. This is what migrates the oldest branches off `io.takari` and
   fixes Mode B.
 - `wrapperVersion` → the target version, **only if the file already has that key**
+- `wrapperVersion` is **added** when the file has neither `wrapperVersion` nor `wrapperUrl`.
+  This is the one key the workflow invents rather than merely refreshes, and it is the whole
+  point: without it Dependabot's parser raises and takes the repository's update job with it.
+  It is inserted next to `distributionUrl`, so a licence header stays on top.
 
-Existing comments, licence headers and file shape are preserved — it is a targeted edit, not
-a regeneration.
+Existing comments, licence headers, line endings and the trailing newline are preserved — it
+is a targeted edit, not a regeneration. Applying it to an already-current file is a
+byte-for-byte no-op, and applying it twice gives the same result as applying it once.
+
+A file already **ahead** of the target keeps its own Maven version and is still eligible for
+the `wrapperVersion` repair. The two concerns are independent: being on a newer Maven is no
+reason to stay unreadable to Dependabot.
+
+All of a branch's files land in **one commit**, built through the git data API. The contents
+API writes one file per call and therefore makes one commit per file, which would turn a
+nine-module repository into nine identical-looking commits.
 
 ### When to turn `regenerate` off
 
@@ -178,8 +215,14 @@ the only record.
 
 ### `-N` and import BOMs
 
-`-N` keeps the run to the root project, but it also means sibling modules are not built. That
-matters for `spring-cloud-build`, whose root POM imports one of its own modules as a BOM:
+`-N` is **not** just a speed-up and must not be removed. `wrapper:wrapper` is not an
+aggregator goal, so on a full reactor it executes once per module and writes a brand-new
+`mvnw`, `mvnw.cmd` and `.mvn/wrapper/` into **every** submodule — including the ~180 across
+the estate that have never had one. Module wrappers that already exist are brought up by the
+same textual edit the properties-only path uses, applied to the checkout right after the
+plugin runs, so both modes produce identical files.
+
+`-N` also means sibling modules are not built. That matters for `spring-cloud-build`, whose root POM imports one of its own modules as a BOM:
 
 ```xml
 <artifactId>spring-cloud-build-dependencies</artifactId>
@@ -274,6 +317,7 @@ together or DCO fails.
 | `wrapper_version` | Target `maven-wrapper` version. Empty uses the newest stable release. | No | `''` |
 | `auto_merge` | Merge existing wrapper PRs whose checks have all passed. **Manual runs only** — see [Auto-merge](#auto-merge) | No | `true` |
 | `merge_method` | `squash`, `merge`, or `rebase` | No | `squash` |
+| `check_only` | **Audit only** — see [Check mode](#check-mode). Changes nothing; every other input is ignored | No | `false` |
 | `dry_run` | Report what would happen without creating, updating or merging anything | No | `true` |
 | `token` | Needs `contents:write` and `pull-requests:write` on all targets. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | `''` |
 
@@ -354,9 +398,29 @@ Set `auto_merge` to false to only open and update PRs and leave merging to a hum
 | `branch-exists` | The branch exists with no open PR — a previous PR was closed unmerged, so it is **left alone** rather than reopened |
 | `up-to-date` | Already on the target |
 | `ahead` | Newer than the target; never walked backwards |
-| `no-wrapper` | No `.mvn/wrapper/maven-wrapper.properties` on that branch |
-| `unparsed` | `distributionUrl` didn't match the expected shape — needs a look |
+| `no-wrapper` | No `maven-wrapper.properties` in any directory with a `pom.xml` |
+| `unparsed` | No `distributionUrl` on the branch matched the expected shape — needs a look |
+| `check-ok` | `check_only` — every wrapper file is readable by Dependabot |
+| `check-broken` | `check_only` — at least one file would break Dependabot; **the run fails** |
 | `error` | An API call failed; the detail is in the summary |
+
+The summary's **Files** column reads *changed / total wrapper files found*, so `2/12` means
+two of the twelve wrappers on that branch are moving.
+
+## Check mode
+
+Ticking `check_only` runs the audit alone. Nothing is created, updated or merged, and
+`regenerate`, `dry_run` and `auto_merge` are all ignored.
+
+For every wrapper file in a directory with a `pom.xml`, it answers one question: **would
+Dependabot's parser survive this file?** It applies Dependabot's own rules, in its order —
+`wrapperVersion`, then a version parsed out of `wrapperUrl`, then the
+`Apache Maven Wrapper startup script, version X` banner in `mvnw` / `mvnw.cmd`. The scripts
+are only fetched for files that need them, so a healthy branch costs no extra API calls.
+
+The summary lists every broken file with the reason, and **the run fails** when any exist.
+That makes it usable as a canary — scheduled from elsewhere, or run by hand before wondering
+why Dependabot has gone quiet. The normal mode is the fix; this is the alarm.
 
 ## Rerunning
 

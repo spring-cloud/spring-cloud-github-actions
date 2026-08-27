@@ -1,14 +1,14 @@
 name: Update Maven Wrapper
 
-run-name: "Update Maven Wrapper${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }} (${{ inputs.repo_type || 'both' }})${{ (github.event_name != 'schedule' && inputs.regenerate == false) && ' - Properties Only' || '' }}${{ github.event_name != 'schedule' && inputs.dry_run != false && ' - Dry Run' || '' }}"
+run-name: "${{ (github.event_name != 'schedule' && inputs.check_only == true) && 'Check' || 'Update' }} Maven Wrapper${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }} (${{ inputs.repo_type || 'both' }})${{ (github.event_name != 'schedule' && inputs.check_only != true && inputs.regenerate == false) && ' - Properties Only' || '' }}${{ (github.event_name != 'schedule' && inputs.check_only != true && inputs.dry_run != false) && ' - Dry Run' || '' }}"
 
 # Opens a pull request against every maintained repository/branch whose Maven wrapper is
 # behind, so CI decides whether the upgrade is safe rather than a bulk push doing it blind.
 #
-#   1. versions — resolve the target Maven and maven-wrapper versions
-#   2. setup    — read config/projects.json and build one matrix entry per repo/branch
-#   3. update   — per repo/branch: compare, and open a PR if it is behind
-#   4. summary  — one report covering every combination
+#   1. versions - resolve the target Maven and maven-wrapper versions
+#   2. setup    - read config/projects.json and build one matrix entry per repo/branch
+#   3. update   - per repo/branch: compare, and open a PR if it is behind
+#   4. summary  - one report covering every combination
 #
 # Written after GitHub enabled its `maven-wrapper-updater` experiment, which made Dependabot
 # start updating the wrapper itself and fail across the estate in two ways:
@@ -21,6 +21,19 @@ run-name: "Update Maven Wrapper${{ inputs.projects != '' && format(' [{0}]', inp
 # Bringing every wrapper up to a current, consistent version removes both. Note the first
 # of those returns whenever a new Maven is released and the wrappers fall behind again -
 # this workflow running weekly is what keeps that from becoming an outage.
+#
+# EVERY wrapper in the repository is in scope, not only the root one. Dependabot looks for
+# a wrapper in the directory of every pom it fetches - the root plus each <module> - and
+# raises while *parsing* any it cannot read a version out of, which aborts that
+# repository's entire update job: no pull requests at all, not merely no wrapper PR. A
+# pristine root wrapper therefore buys nothing while a submodule still carries the
+# single-line file it was given in 2018, which is the state four repositories were found
+# in. Directories with a wrapper but no pom.xml are left alone: Dependabot never reads
+# those, so changing them would be churn.
+#
+# `check_only` runs the audit on its own - it reports every wrapper file Dependabot cannot
+# read and fails the run if any exist, changing nothing. That is the canary; the normal
+# mode is the fix.
 #
 # See README-update-maven-wrapper.md for details.
 
@@ -84,6 +97,11 @@ on:
           - squash
           - merge
           - rebase
+      check_only:
+        description: 'Audit only. Reports every maven-wrapper.properties that Dependabot cannot read a wrapper version from, and fails if any exist. Changes nothing; every other input is ignored.'
+        required: false
+        type: boolean
+        default: false
       dry_run:
         description: 'Dry run, if checked nothing is created, updated or merged, but you can see what would change'
         required: false
@@ -260,10 +278,20 @@ jobs:
       max-parallel: 8
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
+      # This repository, for .github/scripts/maven-wrapper-properties.js - the rules both
+      # this step and the regenerate step below edit properties files by. Checked out into
+      # a subdirectory on purpose: a checkout at the workspace root would clean the
+      # wrapper-*.json result file the steps here write there.
+      - name: Checkout shared scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci-actions
+
       - name: Check and update wrapper
         id: update
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          WRAPPER_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/maven-wrapper-properties.js
           REPO: ${{ matrix.repo }}
           BRANCH: ${{ matrix.branch }}
           PROJECT: ${{ matrix.project }}
@@ -275,10 +303,16 @@ jobs:
           # manual dispatch still defaults to a dry run so a human can look first.
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
           REGENERATE: ${{ (github.event_name == 'schedule' || inputs.regenerate == true) }}
+          # Audit only. A scheduled run never audits: it fixes, which is strictly better.
+          CHECK_ONLY: ${{ github.event_name != 'schedule' && inputs.check_only == true }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
           const { execFileSync } = require('child_process');
+
+          // Same rules the regenerate step applies against a real checkout - see the header of that
+          // file for why they live outside this workflow.
+          const W = require(process.env.WRAPPER_LIB);
 
           const REPO = process.env.REPO;
           const BRANCH = process.env.BRANCH;
@@ -289,7 +323,8 @@ jobs:
           const REGENERATE = process.env.REGENERATE === 'true';
           const WRAPPER = process.env.WRAPPER_VERSION;
           const DRY = process.env.DRY_RUN !== 'false';
-          const PROPS = '.mvn/wrapper/maven-wrapper.properties';
+          // Audit mode: report what Dependabot would fail to parse, and write nothing at all.
+          const CHECK = process.env.CHECK_ONLY === 'true';
 
           const gh = args => {
             try {
@@ -321,7 +356,7 @@ jobs:
           const safe = `${REPO}@${BRANCH}`.replace(/[/@]/g, '-');
           const finish = (status, detail, extra = {}) => {
             const result = { project: process.env.PROJECT, repo: REPO, type: process.env.TYPE,
-              branch: BRANCH, status, detail, dryRun: DRY, ...extra };
+              branch: BRANCH, status, detail, dryRun: DRY, checkOnly: CHECK, ...extra };
             fs.writeFileSync(`wrapper-${safe}.json`, JSON.stringify(result, null, 2));
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `safe-name=${safe}\n`);
             // Only a PR that is already open AND already at the target is a merge
@@ -333,89 +368,123 @@ jobs:
             process.exit(0);
           };
 
-          // ── Read the current wrapper properties ─────────────────────────────────────
           // Encoded for query strings; left raw inside a path, where GitHub accepts the
           // slashes a branch name may contain.
           const enc = encodeURIComponent(BRANCH);
-          const owner = REPO.split('/')[0];
-          const got = ghRetry(['api', `repos/${REPO}/contents/${PROPS}?ref=${enc}`]);
-          if (!got.ok) {
-            // A branch with no wrapper is normal, not a problem to report loudly.
-            const missing = /404|Not Found/i.test(got.err);
+
+          // ── Find every wrapper Dependabot will read ─────────────────────────────────────
+          // Not just the root one. Dependabot's Maven file fetcher looks for a wrapper in the
+          // directory of every pom it fetches - the root plus each <module> - and its parser raises
+          // on any it cannot read a version out of, which aborts the whole repository's update job.
+          // A root wrapper in perfect shape therefore buys nothing while a submodule still carries
+          // the single-line 2018 file. One recursive tree listing finds them all in one request.
+          const tree = ghRetry(['api', `repos/${REPO}/git/trees/${enc}?recursive=1`]);
+          if (!tree.ok) {
+            const missing = /404|Not Found/i.test(tree.err);
             finish(missing ? 'no-wrapper' : 'error',
-              missing ? 'no .mvn/wrapper/maven-wrapper.properties' : got.err);
+              missing ? 'branch not found' : `could not list the tree: ${tree.err}`);
+          }
+          const treeJson = JSON.parse(tree.out);
+          const paths = (treeJson.tree || []).map(e => e.path);
+          const pathSet = new Set(paths);
+
+          // GitHub caps a recursive tree listing and says so rather than lying about it. Falling
+          // back to the root wrapper keeps the run useful, and the flag is carried into the summary
+          // so "no module wrappers found" is never confused with "modules were not looked at".
+          const truncated = treeJson.truncated === true;
+          let dirs = W.wrapperDirs(paths);
+          if (truncated) dirs = dirs.filter(d => d === '.');
+
+          if (!dirs.length) {
+            finish('no-wrapper', 'no maven-wrapper.properties in any directory with a pom.xml',
+              { truncated });
           }
 
-          const meta = JSON.parse(got.out);
-          const body = Buffer.from(meta.content, 'base64').toString('utf8');
-
-          // The version appears TWICE in a distributionUrl - once as the directory and once
-          // in the filename:
-          //
-          //   .../org/apache/maven/apache-maven/3.9.11/apache-maven-3.9.11-bin.zip
-          //                                     ^^^^^^              ^^^^^^
-          //
-          // Both are captured by one pattern so detection and rewriting can never disagree.
-          // Rewriting only the filename would produce a URL that 404s, which would break
-          // every build using the wrapper. The host prefix is preserved rather than
-          // hard-coded, so a repository pointing at a mirror keeps pointing at it.
-          const DIST =
-            /^(distributionUrl=\s*\S*apache-maven\/)([0-9][^/\s]*)(\/apache-maven-)([0-9][^-\s]*)(-bin\.(?:zip|tar\.gz))\s*$/m;
-
-          const distMatch = body.match(DIST);
-          if (!distMatch) {
-            finish('unparsed', 'could not read a Maven version from distributionUrl');
-          }
-          const current = distMatch[2];
-
-          const cmp = (a, b) => {
-            const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
-            for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-              if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
-            }
-            return 0;
+          const readAt = (path, ref) => {
+            const r = gh(['api', `repos/${REPO}/contents/${path}?ref=${ref}`]);
+            if (!r.ok) return null;
+            const meta = JSON.parse(r.out);
+            return { sha: meta.sha, text: Buffer.from(meta.content, 'base64').toString('utf8') };
           };
 
-          // ── Build the updated file ──────────────────────────────────────────────────
-          // Only the version numbers are rewritten - the file's existing shape, comments
-          // and licence header are preserved. Nothing regenerates the wrapper by running
-          // `mvn wrapper:wrapper`, because that is exactly the parent-POM resolution that
-          // fails for a SNAPSHOT parent; a textual edit sidesteps it entirely and CI on the
-          // resulting PR is what proves the new Maven actually works.
-          // A function rather than a one-off, because it is applied twice: once to the base
-          // branch when opening a PR, and once to an existing PR's own head branch when
-          // refreshing it to a newer target.
-          const rewrite = text => {
-            let out = text.replace(DIST, `$1${MAVEN}$3${MAVEN}$5`);
-            // wrapperUrl also carries a version, and on the oldest branches it still points
-            // at the pre-Apache io.takari wrapper, which the current Dependabot cannot parse
-            // at all. Rewriting it to the Apache coordinates is what fixes those. Only keys
-            // the file already has are touched - none are invented.
-            if (/^wrapperUrl=/m.test(out)) {
-              out = out.replace(/^wrapperUrl=.*$/m,
-                'wrapperUrl=https://repo.maven.apache.org/maven2/org/apache/maven/wrapper/' +
-                `maven-wrapper/${WRAPPER}/maven-wrapper-${WRAPPER}.jar`);
+          const files = [];
+          for (const dir of dirs) {
+            const path = W.propsPath(dir);
+            const got = readAt(path, enc);
+            if (!got) finish('error', `could not read ${path}`);
+            files.push({ dir, path, sha: got.sha, text: got.text });
+          }
+
+          // ── Audit mode ──────────────────────────────────────────────────────────────────
+          // Answers one question: would Dependabot's parser survive this branch? The scripts are
+          // only fetched for files that need them - i.e. those with neither wrapperVersion nor
+          // wrapperUrl - so a healthy branch costs no extra requests.
+          if (CHECK) {
+            const broken = [];
+            for (const f of files) {
+              if (W.dependabotWrapperVersion(f.text)) continue;
+              const present = W.scriptPaths(f.dir).filter(p => pathSet.has(p));
+              const scripts = present.map(p => readAt(p, enc)).filter(Boolean).map(s => s.text);
+              if (W.dependabotWrapperVersion(f.text, scripts)) continue;
+              broken.push({ path: f.path, reason: present.length
+                ? `no wrapperVersion or wrapperUrl, and no version banner in ${present.join(', ')}`
+                : 'no wrapperVersion or wrapperUrl, and no mvnw script to read one from' });
             }
-            if (/^wrapperVersion=/m.test(out)) {
-              out = out.replace(/^wrapperVersion=.*$/m, `wrapperVersion=${WRAPPER}`);
+            const extra = { wrappers: files.length, broken, truncated };
+            if (broken.length) {
+              finish('check-broken',
+                `${broken.length} of ${files.length} wrapper file(s) would break Dependabot`, extra);
             }
-            return out;
+            finish('check-ok', `all ${files.length} wrapper file(s) readable by Dependabot`, extra);
+          }
+
+          // ── Work out what each file should become ───────────────────────────────────────
+          // Per file, not per branch: a repository can be current at the root and years behind in a
+          // submodule, which is exactly the state the estate was found in.
+          const plan = list => list.map(f => {
+            const current = W.currentMaven(f.text);
+            // Never walk a file backwards. A file already past the target keeps its own Maven
+            // version and is still eligible for the wrapper-key repair, which is what Dependabot
+            // actually needs - the two concerns are independent.
+            const ahead = current !== null && W.cmp(current, MAVEN) > 0;
+            const updated = W.rewrite(f.text, { maven: ahead ? current : MAVEN, wrapper: WRAPPER });
+            return { ...f, current, ahead, updated, changed: updated !== f.text };
+          });
+
+          const planned = plan(files);
+          const changed = planned.filter(f => f.changed);
+          const rootFile = planned.find(f => f.dir === '.') || planned[0];
+          const current = rootFile.current;
+          const extras = { current, target: MAVEN, wrappers: planned.length,
+            changedPaths: changed.map(f => f.path), truncated };
+
+          // How the work reads in the summary and the PR title/body: one file names itself, several
+          // are counted, because a nine-module repository would otherwise fill the table.
+          const describe = list => list.length === 1
+            ? (list[0].dir === '.' ? 'the root wrapper' : `\`${list[0].path}\``)
+            : `${list.length} wrapper files`;
+
+          // Only quote an arrow when the root wrapper is actually one of the files moving.
+          // A repository current at the root and years behind in nine submodules would
+          // otherwise report "Maven 3.9.16 -> 3.9.16", which reads like a no-op.
+          const versionPhrase = list => {
+            const root = list.find(f => f.dir === '.');
+            return root ? `Maven ${root.current} -> ${MAVEN}` : `Maven ${MAVEN}`;
           };
 
-          const hadWrapperUrl = /^wrapperUrl=/m.test(body);
-          const hadWrapperVersion = /^wrapperVersion=/m.test(body);
-          const updated = rewrite(body);
-
-          if (updated === body) {
-            finish('up-to-date', `Maven ${current}`, { current, target: MAVEN });
+          if (!changed.length) {
+            if (planned.every(f => f.current === null)) {
+              finish('unparsed', 'could not read a Maven version from any distributionUrl', extras);
+            }
+            if (planned.some(f => f.ahead)) {
+              finish('ahead', `Maven ${current} is newer than the target ${MAVEN}`, extras);
+            }
+            finish('up-to-date',
+              `Maven ${current}` + (planned.length > 1 ? ` (${planned.length} wrapper files)` : ''),
+              extras);
           }
-          if (cmp(current, MAVEN) > 0) {
-            // Ahead of the target - never walk a branch backwards.
-            finish('ahead', `Maven ${current} is newer than the target ${MAVEN}`,
-              { current, target: MAVEN });
-          }
 
-          // ── Is there already a PR for this branch? ──────────────────────────────────
+          // ── Is there already a PR for this branch? ──────────────────────────────────────
           // The head name includes the base branch. Without it every branch in a repo would
           // share one head ref, so the first matrix job would create it and the rest would
           // collide - and with several maintained branches per repo, most would silently be
@@ -423,6 +492,49 @@ jobs:
           const slug = BRANCH.replace(/\//g, '-');
           const PREFIX = 'maven-wrapper-update/';
           const head = `${PREFIX}${slug}-${MAVEN}`;
+
+          const authorName = 'spring-builds';
+          const authorEmail = 'spring-builds@users.noreply.github.com';
+          // Spring Cloud repositories run a required DCO check, so the commit needs a
+          // Signed-off-by trailer whose address matches the commit author. Both are set
+          // explicitly here rather than left to the token's default identity.
+          const message = `Update Maven wrapper to ${MAVEN}\n\n` +
+            `Signed-off-by: ${authorName} <${authorEmail}>`;
+
+          // One commit for N files. The contents API writes a single file per call and therefore
+          // makes a separate commit for each, so a branch touching nine module wrappers would arrive
+          // as nine commits with the same message. The git data API builds one tree and one commit
+          // instead, which is also the shape the regenerate path produces.
+          const commitFiles = (ref, list) => {
+            const refSha = ghRetry(['api', `repos/${REPO}/git/ref/heads/${ref}`, '--jq', '.object.sha']);
+            if (!refSha.ok) return { ok: false, err: `could not read ${ref}: ${refSha.err}` };
+            const parent = refSha.out.trim();
+
+            const baseTree = ghRetry(['api', `repos/${REPO}/git/commits/${parent}`, '--jq', '.tree.sha']);
+            if (!baseTree.ok) return { ok: false, err: `could not read the tree of ${ref}: ${baseTree.err}` };
+
+            // mode 100644: maven-wrapper.properties is never executable. Everything not listed is
+            // inherited from base_tree, so file modes elsewhere in the repository are untouched.
+            const made = ghJson(`repos/${REPO}/git/trees`, 'POST', {
+              base_tree: baseTree.out.trim(),
+              tree: list.map(f => ({ path: f.path, mode: '100644', type: 'blob', content: f.updated })),
+            });
+            if (!made.ok) return { ok: false, err: `could not build a tree: ${made.err}` };
+
+            const commit = ghJson(`repos/${REPO}/git/commits`, 'POST', {
+              message,
+              tree: JSON.parse(made.out).sha,
+              parents: [parent],
+              author: { name: authorName, email: authorEmail },
+              committer: { name: authorName, email: authorEmail },
+            });
+            if (!commit.ok) return { ok: false, err: `could not create a commit: ${commit.err}` };
+
+            const moved = ghJson(`repos/${REPO}/git/refs/heads/${ref}`, 'PATCH',
+              { sha: JSON.parse(commit.out).sha });
+            if (!moved.ok) return { ok: false, err: `could not move ${ref}: ${moved.err}` };
+            return { ok: true };
+          };
 
           // Matched by prefix and base rather than by exact head, so a PR opened for an
           // earlier target version is found too. Otherwise each new Maven release would
@@ -436,51 +548,46 @@ jobs:
           if (mine.length) {
             const pr = mine[0];
             // Read the PR's own head branch: it may already be at the target (nothing to
-            // do), or behind it (a newer Maven has shipped since it was opened).
-            const onHead = ghRetry(['api',
-              `repos/${REPO}/contents/${PROPS}?ref=${encodeURIComponent(pr.head.ref)}`]);
-            if (!onHead.ok) finish('error', `could not read ${PROPS} on ${pr.head.ref}: ${onHead.err}`);
-            const headMeta = JSON.parse(onHead.out);
-            const headBody = Buffer.from(headMeta.content, 'base64').toString('utf8');
-            const headUpdated = rewrite(headBody);
+            // do), or behind it (a newer Maven has shipped since it was opened). The file list
+            // comes from the base branch, so a wrapper added to the base after the PR was opened is
+            // picked up too; one that has since been deleted is skipped rather than failing the job.
+            const headRef = encodeURIComponent(pr.head.ref);
+            const onHead = [];
+            for (const f of planned) {
+              const got = readAt(f.path, headRef);
+              if (got) onHead.push({ ...f, sha: got.sha, text: got.text });
+            }
+            const headPlan = plan(onHead);
+            const headChanged = headPlan.filter(f => f.changed);
 
-            if (headUpdated === headBody) {
+            if (!headChanged.length) {
               finish('pr-open', `#${pr.number} already open for ${MAVEN}`,
-                { current, target: MAVEN, prUrl: pr.html_url, prNumber: pr.number });
+                { ...extras, prUrl: pr.html_url, prNumber: pr.number });
             }
             if (DRY) {
               finish('would-update-pr',
-                `#${pr.number} would be moved up to ${MAVEN}` + (REGENERATE ? ' (regenerated)' : ''),
-                { current, target: MAVEN, prUrl: pr.html_url });
+                `#${pr.number} would be moved up to ${MAVEN} (${describe(headChanged)})` +
+                (REGENERATE ? ' (regenerated)' : ''),
+                { ...extras, prUrl: pr.html_url });
             }
             if (REGENERATE) {
               fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-head=${pr.head.ref}\n`);
               fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-pr=${pr.number}\n`);
               fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-current=${current}\n`);
               finish('regenerating', `#${pr.number} on ${pr.head.ref}`,
-                { current, target: MAVEN, prUrl: pr.html_url });
+                { ...extras, prUrl: pr.html_url });
             }
             // Commit onto the existing PR's branch so it updates in place - one wrapper PR
             // per branch, always at the current target, rather than a growing stack.
-            const bump = ghJson(`repos/${REPO}/contents/${PROPS}`, 'PUT', {
-              message: `Update Maven wrapper to ${MAVEN}\n\n` +
-                `Signed-off-by: spring-builds <spring-builds@users.noreply.github.com>`,
-              content: Buffer.from(headUpdated, 'utf8').toString('base64'),
-              sha: headMeta.sha,
-              branch: pr.head.ref,
-              committer: { name: 'spring-builds', email: 'spring-builds@users.noreply.github.com' },
-              author: { name: 'spring-builds', email: 'spring-builds@users.noreply.github.com' },
-            });
+            const bump = commitFiles(pr.head.ref, headChanged);
             if (!bump.ok) finish('error', `could not update #${pr.number}: ${bump.err}`);
-            finish('pr-updated', `#${pr.number} moved up to ${MAVEN}`,
-              { current, target: MAVEN, prUrl: pr.html_url });
+            finish('pr-updated', `#${pr.number} moved up to ${MAVEN} (${describe(headChanged)})`,
+              { ...extras, prUrl: pr.html_url, prNumber: pr.number });
           }
 
           if (DRY) {
-            finish('would-open', `Maven ${current} -> ${MAVEN}` +
-              (hadWrapperUrl || hadWrapperVersion ? `, wrapper -> ${WRAPPER}` : '') +
-              (REGENERATE ? ' (regenerated)' : ''),
-              { current, target: MAVEN });
+            finish('would-open', `${versionPhrase(changed)}, ${describe(changed)}` +
+              (REGENERATE ? ' (regenerated)' : ''), extras);
           }
 
           // Regenerate mode stops here: the branch is created by `git push` from the real
@@ -488,11 +595,10 @@ jobs:
           if (REGENERATE) {
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-head=${head}\n`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `regenerate-current=${current}\n`);
-            finish('regenerating', `${current} -> ${MAVEN} on ${head}`,
-              { current, target: MAVEN });
+            finish('regenerating', `${current} -> ${MAVEN} on ${head}`, extras);
           }
 
-          // ── Create the branch ───────────────────────────────────────────────────────
+          // ── Create the branch ───────────────────────────────────────────────────────────
           const baseRef = ghRetry(['api', `repos/${REPO}/git/ref/heads/${BRANCH}`, '--jq', '.object.sha']);
           if (!baseRef.ok) finish('error', `could not read ${BRANCH}: ${baseRef.err}`);
           const baseSha = baseRef.out.trim();
@@ -505,55 +611,53 @@ jobs:
           // An existing branch with no open PR means a previous PR was closed unmerged.
           // Leaving it alone is deliberate - reopening it would re-litigate that decision.
           if (!madeRef.ok) {
-            finish('branch-exists', `${head} exists but no PR is open - left alone`,
-              { current, target: MAVEN });
+            finish('branch-exists', `${head} exists but no PR is open - left alone`, extras);
           }
 
-          // ── Commit the change ───────────────────────────────────────────────────────
-          // Spring Cloud repositories run a required DCO check, so the commit needs a
-          // Signed-off-by trailer whose address matches the commit author. Both are set
-          // explicitly here rather than left to the token's default identity.
-          const authorName = 'spring-builds';
-          const authorEmail = 'spring-builds@users.noreply.github.com';
-          const message = `Update Maven wrapper to ${MAVEN}\n\n` +
-            `Signed-off-by: ${authorName} <${authorEmail}>`;
-
-          const put = ghJson(`repos/${REPO}/contents/${PROPS}`, 'PUT', {
-            message,
-            content: Buffer.from(updated, 'utf8').toString('base64'),
-            sha: meta.sha,
-            branch: head,
-            committer: { name: authorName, email: authorEmail },
-            author: { name: authorName, email: authorEmail },
-          });
+          // ── Commit the change ───────────────────────────────────────────────────────────
+          const put = commitFiles(head, changed);
           if (!put.ok) finish('error', `could not commit: ${put.err}`);
 
-          // ── Open the PR ─────────────────────────────────────────────────────────────
+          // ── Open the PR ─────────────────────────────────────────────────────────────────
+          const rootChanged = changed.find(f => f.dir === '.');
+          const moduleChanged = changed.filter(f => f.dir !== '.');
+
           const prBody = [
-            `Updates the Maven wrapper on \`${BRANCH}\` from **${current}** to **${MAVEN}**` +
-              (hadWrapperUrl || hadWrapperVersion ? `, and \`maven-wrapper\` to **${WRAPPER}**` : '') + '.',
+            rootChanged
+              ? `Updates the Maven wrapper on \`${BRANCH}\` from **${rootChanged.current}** to ` +
+                `**${MAVEN}**, and \`maven-wrapper\` to **${WRAPPER}**.`
+              : `Updates the module Maven wrappers on \`${BRANCH}\` to Maven **${MAVEN}** and ` +
+                `\`maven-wrapper\` **${WRAPPER}**.`,
+            '',
+            `Files changed (${changed.length}):`,
+            '',
+            ...changed.map(f => `- \`${f.path}\`` +
+              (f.current ? ` — Maven ${f.current} → ${f.ahead ? f.current : MAVEN}` : '') +
+              (W.dependabotWrapperVersion(f.text) ? '' : ' — **adds the missing `wrapperVersion`**')),
             '',
             'Opened automatically by [update-maven-wrapper.yml](https://github.com/spring-cloud/spring-cloud-github-actions/blob/main/.github/workflows/update-maven-wrapper.yml).',
             '',
             'Keeping the wrapper current stops Dependabot from trying to update it itself, ' +
             'which currently fails - it shells out to `mvn wrapper:wrapper`, which cannot ' +
             'resolve an unpublished SNAPSHOT parent POM, and it cannot parse the older ' +
-            'wrapper formats at all.',
-            '',
-            'Only `.mvn/wrapper/maven-wrapper.properties` is changed; the wrapper JAR and ' +
-            '`mvnw` scripts are untouched. **Merge only once CI is green** - this is a real ' +
-            'Maven upgrade, not a cosmetic bump.',
-          ].join('\n');
+            'wrapper formats.',
+          ];
+          if (moduleChanged.length) {
+            prBody.push('',
+              'Module wrappers are included because Dependabot reads the wrapper in the directory ' +
+              'of *every* pom it fetches, and a single unreadable one aborts the whole ' +
+              'repository\'s update job - not merely the wrapper update.');
+          }
 
           const pr = ghJson(`repos/${REPO}/pulls`, 'POST', {
             title: `Update Maven wrapper to ${MAVEN}`,
-            head, base: BRANCH, body: prBody,
+            head, base: BRANCH, body: prBody.join('\n'),
           });
           if (!pr.ok) finish('error', `could not open PR: ${pr.err}`);
 
           const created = JSON.parse(pr.out);
-          finish('pr-opened', `#${created.number}: ${current} -> ${MAVEN}`,
-            { current, target: MAVEN, prUrl: created.html_url });
+          finish('pr-opened', `#${created.number}: ${versionPhrase(changed)} (${describe(changed)})`,
+            { ...extras, prUrl: created.html_url, prNumber: created.number });
           JSEOF
 
       # ── Regenerate mode ─────────────────────────────────────────────────────────────
@@ -561,14 +665,7 @@ jobs:
       # branch needs work. Regenerating means running maven-wrapper-plugin against a real
       # checkout, which rewrites mvnw, mvnw.cmd and the JAR as well as the properties -
       # more than the contents API can express, hence the checkout, JDK and git push.
-      # Checked out into a subdirectory on purpose: a checkout at the workspace root
-      # would clean the wrapper-*.json the previous step just wrote there.
-      - name: Checkout shared actions
-        if: (github.event_name == 'schedule' || inputs.regenerate == true) && steps.update.outputs.regenerate-head != ''
-        uses: actions/checkout@v4
-        with:
-          path: ci-actions
-
+      # This repository is already checked out into ci-actions by the first step.
       - name: Checkout target branch
         if: (github.event_name == 'schedule' || inputs.regenerate == true) && steps.update.outputs.regenerate-head != ''
         uses: actions/checkout@v4
@@ -613,6 +710,7 @@ jobs:
           MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
           WRAPPER_TYPE: ${{ inputs.wrapper_type || 'bin' }}
+          WRAPPER_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/maven-wrapper-properties.js
           # COMMERCIAL_ARTIFACTORY_USERNAME/PASSWORD deliberately absent: they arrive from
           # $GITHUB_ENV via the step above, and a step-level env: here would override it
           # with the raw secret, losing the read-only fallback. CI_DEPLOY_* is what the
@@ -672,8 +770,13 @@ jobs:
           #
           # -Pspring matters as much as the settings file: the repositories are declared
           # inside a `spring` profile, so without activating it the snapshot repositories
-          # are not in play at all and the parent POM cannot resolve. -N keeps this to the
-          # root project, where the wrapper lives.
+          # are not in play at all and the parent POM cannot resolve.
+          #
+          # -N is not just a speed-up and must not be dropped. wrapper:wrapper is not an
+          # aggregator goal, so on a full reactor it executes once per module and writes a
+          # brand-new mvnw, mvnw.cmd and .mvn/wrapper into every submodule - including the
+          # ~180 across the estate that have never had one. Module wrappers that DO exist
+          # are handled by the textual edit below instead.
           # Piped through tee, not redirected to a file: Maven's output has to reach the job
           # log, otherwise a failure here is undiagnosable and only the one-line summary
           # below survives. pipefail (set above) is what keeps mvn's exit status visible
@@ -707,9 +810,42 @@ jobs:
           cd ..
 
           cd target
+          # Bring up the wrapper of every *module* that has one. The plugin above only
+          # touched the root (-N), but Dependabot reads the wrapper in the directory of
+          # every pom it fetches and raises on any it cannot read a version out of, which
+          # aborts that repository's whole update job. Same shared rules the properties-only
+          # path applies, so the two modes cannot produce different files.
+          echo "Updating module wrapper properties..."
+          if ! git ls-files | node -e '
+            const fs = require("fs");
+            const W = require(process.env.WRAPPER_LIB);
+            const paths = fs.readFileSync(0, "utf8").split("\n").filter(Boolean);
+            const maven = process.env.MAVEN_VERSION;
+            const wrapper = process.env.WRAPPER_VERSION;
+            let n = 0;
+            for (const dir of W.wrapperDirs(paths)) {
+              if (dir === ".") continue;
+              const file = W.propsPath(dir);
+              const before = fs.readFileSync(file, "utf8");
+              const current = W.currentMaven(before);
+              // Never walk a file backwards; the wrapper-key repair still applies.
+              const target = current !== null && W.cmp(current, maven) > 0 ? current : maven;
+              const after = W.rewrite(before, { maven: target, wrapper });
+              if (after === before) continue;
+              fs.writeFileSync(file, after);
+              console.log(`  ${file}: Maven ${current || "?"} -> ${target}`);
+              n++;
+            }
+            console.log(`${n} module wrapper file(s) updated.`);
+          '; then
+            cd ..
+            record "regenerate-failed" "could not update the module wrapper properties"
+            exit 0
+          fi
+
           if [ -z "$(git status --porcelain)" ]; then
             cd ..
-            record "up-to-date" "wrapper plugin produced no changes"
+            record "up-to-date" "wrapper plugin and module properties produced no changes"
             exit 0
           fi
           echo "Changed files:"; git status --porcelain
@@ -901,9 +1037,77 @@ jobs:
           }
 
           const dry = results.some(r => r.dryRun);
+          const check = results.some(r => r.checkOnly);
           const of = s => results.filter(r => r.status === s);
 
-          const md = ['## Update Maven Wrapper', ''];
+          const md = [`## ${check ? 'Check' : 'Update'} Maven Wrapper`, ''];
+
+          // Named rather than merely counted: an omission nobody can see is one nobody can
+          // question, and these are branches a reader would otherwise assume were covered.
+          let excluded = [];
+          try { excluded = JSON.parse(process.env.EXCLUDED || '[]'); } catch (_) { /* absent */ }
+          const renderExcluded = () => {
+            if (!excluded.length) return;
+            md.push('', `### Skipped — \`-internal\` branches (${excluded.length})`, '');
+            md.push('Left alone deliberately: these are the in-flight development line for ' +
+              'the next train, so the wrapper is not changed under active work.', '');
+            for (const e of excluded) md.push(`- \`${e}\``);
+          };
+
+          // A truncated tree listing means module wrappers were never looked at on that branch, so
+          // a clean result there is not evidence of anything. Called out wherever it happens.
+          const renderTruncated = () => {
+            const cut = results.filter(r => r.truncated);
+            if (!cut.length) return;
+            md.push('', `> **${cut.length} branch(es) had a truncated tree listing** — only the root ` +
+              'wrapper was inspected there: ' + cut.map(r => `\`${r.repo}@${r.branch}\``).join(', '), '');
+          };
+
+          const write = failed => {
+            renderTruncated();
+            renderExcluded();
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+            console.log(md.join('\n'));
+            // Always exits: this script runs from stdin, where a top-level `return` is a
+            // syntax error, so every branch below ends by calling write().
+            process.exit(failed ? 1 : 0);
+          };
+
+          // ── Audit mode ────────────────────────────────────────────────────────────────────
+          // A separate report, not a column bolted onto the update one: the question it answers is
+          // not "how far behind is this branch" but "will Dependabot survive it", and the answer has
+          // to be loud. The job fails when anything is broken so the workflow works as a canary -
+          // scheduled from elsewhere, or run by hand before wondering why Dependabot went quiet.
+          if (check) {
+            const broken = results.filter(r => r.status === 'check-broken');
+            const wrappers = results.reduce((n, r) => n + (r.wrappers || 0), 0);
+
+            md.push(`Checked **${wrappers}** \`maven-wrapper.properties\` file(s) across ` +
+              `**${results.length}** repo/branch combination(s).`, '');
+            md.push('A file counts as broken when Dependabot can read no wrapper version from it — ' +
+              'no `wrapperVersion`, no parseable `wrapperUrl`, and no version banner in `mvnw`. ' +
+              'Dependabot raises while *parsing* such a file, which aborts that repository’s entire ' +
+              'update job: no pull requests at all, not merely no wrapper PR.', '');
+
+            if (!broken.length) {
+              md.push('✅ Every wrapper file is readable by Dependabot.');
+              write(false);
+            }
+
+            const files = broken.reduce((n, r) => n + r.broken.length, 0);
+            md.push(`❌ **${files}** file(s) across **${broken.length}** repo/branch combination(s) ` +
+              'would break Dependabot.', '');
+            md.push('| Repo | Branch | File | Why |', '|---|---|---|---|');
+            for (const r of broken) {
+              for (const b of r.broken) {
+                md.push(`| \`${r.repo}\` | \`${r.branch}\` | \`${b.path}\` | ${b.reason} |`);
+              }
+            }
+            md.push('', 'Re-run this workflow with `check_only` unchecked to fix them.');
+            write(true);
+          }
+
+          // ── Update mode ───────────────────────────────────────────────────────────────────
           md.push(`Target Maven **${process.env.MAVEN_VERSION}**, ` +
             `maven-wrapper **${process.env.WRAPPER_VERSION}**.`, '');
           if (dry) {
@@ -920,6 +1124,16 @@ jobs:
             `**${of('pr-open').length}** already current, ` +
             `**${of('up-to-date').length}** up to date, ` +
             `**${of('error').length}** error(s).`, '');
+
+          // Module wrappers are the whole reason this workflow stopped being a one-file edit, so how
+          // many were actually touched is worth stating rather than leaving to be inferred.
+          const changedFiles = results.reduce((n, r) => n + (r.changedPaths || []).length, 0);
+          const moduleFiles = results.reduce((n, r) =>
+            n + (r.changedPaths || []).filter(p => p !== '.mvn/wrapper/maven-wrapper.properties').length, 0);
+          if (changedFiles) {
+            md.push(`**${changedFiles}** wrapper file(s) changed, ` +
+              `**${moduleFiles}** of them in module directories.`, '');
+          }
 
           const merged = withMerge('merged');
           const wouldMerge = withMerge('would-merge');
@@ -941,25 +1155,18 @@ jobs:
           if (!interesting.length) {
             md.push('Every maintained branch is already on the target wrapper.');
           } else {
-            md.push('| Repo | Branch | Status | Merge | Detail |', '|---|---|---|---|---|');
+            md.push('| Repo | Branch | Files | Status | Merge | Detail |', '|---|---|---|---|---|---|');
             for (const r of interesting) {
               const detail = r.prUrl ? `[${r.detail}](${r.prUrl})` : (r.detail || '');
               const merge = r.mergeStatus
                 ? `${r.mergeStatus}${r.mergeDetail ? ` — ${r.mergeDetail}` : ''}`
                 : '';
-              md.push(`| \`${r.repo}\` | \`${r.branch}\` | ${r.status} | ${merge} | ${detail} |`);
+              const files = (r.changedPaths || []).length
+                ? `${r.changedPaths.length}/${r.wrappers || '?'}`
+                : `${r.wrappers || 0}`;
+              md.push(`| \`${r.repo}\` | \`${r.branch}\` | ${files} | ${r.status} | ${merge} | ${detail} |`);
             }
-          }
-
-          // Named rather than merely counted: an omission nobody can see is one nobody can
-          // question, and these are branches a reader would otherwise assume were covered.
-          let excluded = [];
-          try { excluded = JSON.parse(process.env.EXCLUDED || '[]'); } catch (_) { /* absent */ }
-          if (excluded.length) {
-            md.push('', `### Skipped — \`-internal\` branches (${excluded.length})`, '');
-            md.push('Left alone deliberately: these are the in-flight development line for ' +
-              'the next train, so the wrapper is not changed under active work.', '');
-            for (const e of excluded) md.push(`- \`${e}\``);
+            md.push('', '<sub>Files: changed / total wrapper files found in directories with a pom.xml.</sub>');
           }
 
           const quiet = of('up-to-date').length + of('no-wrapper').length;
@@ -968,6 +1175,5 @@ jobs:
               `${of('no-wrapper').length} with no Maven wrapper — omitted above.</sub>`);
           }
 
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
-          console.log(md.join('\n'));
+          write(false);
           JSEOF

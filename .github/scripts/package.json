@@ -1,0 +1,19 @@
+{
+  "name": "spring-cloud-github-actions-scripts",
+  "version": "1.0.0",
+  "description": "Shared helpers required directly by inline node scripts in the workflows. Not a GitHub Action: there is no dist/ because there is nothing to bundle - these files have no dependencies and no action.yml entrypoint.",
+  "private": true,
+  "scripts": {
+    "test": "jest",
+    "test:coverage": "jest --coverage"
+  },
+  "devDependencies": {
+    "jest": "29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ]
+  }
+}
