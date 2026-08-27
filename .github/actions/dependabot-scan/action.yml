@@ -143,6 +143,24 @@ runs:
         // Dependabot's own update runs surface as normal workflow runs with
         // event=dynamic and path=dynamic/dependabot/dependabot-updates. The run name
         // encodes the ecosystem and directory, e.g. "maven in /. - Update #1510829977".
+        // Run names come in two shapes:
+        //   "maven in /. - Update #123"                       recurring, whole ecosystem
+        //   "maven in /. for org.bouncycastle:bcprov - Update #123"   one-off, one dependency
+        // The second is what a security advisory or an @dependabot recreate produces.
+        // Declared out here because the confirmation pass below parses names too.
+        const NAME = /^(\S+) in (\S+?)(?: for (.+?))? - Update #(\d+)$/;
+
+        // Strip the trailing id even when the name does not parse, so an unknown format
+        // degrades to one group per scope rather than one per run.
+        const scopeOf = run => {
+          const m = (run.name || '').match(NAME);
+          return {
+            ecosystem: m ? m[1] : (run.name || 'unknown').replace(/ - Update #\d+$/, ''),
+            directory: m ? m[2] : '?',
+            dependency: m && m[3] ? m[3] : null,
+          };
+        };
+
         const updateJobs = [];
         let updateJobsFailed = false;
         const runsResp = ghRetry(['api',
@@ -152,12 +170,6 @@ runs:
           warnings.push(`could not list Dependabot update runs: ${runsResp.err}`);
         } else {
           const runs = parseJson(runsResp.out, {}).workflow_runs || [];
-
-          // Run names come in two shapes:
-          //   "maven in /. - Update #123"                       recurring, whole ecosystem
-          //   "maven in /. for org.bouncycastle:bcprov - Update #123"   one-off, one dependency
-          // The second is what a security advisory or an @dependabot recreate produces.
-          const NAME = /^(\S+) in (\S+?)(?: for (.+?))? - Update #(\d+)$/;
 
           // Runs come back newest-first, so the first entry seen for a given
           // ecosystem/directory/branch is that scope's current state. Older runs for the
@@ -171,17 +183,12 @@ runs:
           // currently-failing forever, since nothing of that exact name ever runs again.
           const seen = new Set();
           for (const run of runs) {
-            const m = (run.name || '').match(NAME);
-            // Strip the trailing id even when the name does not parse, so an unknown
-            // format degrades to one group per scope rather than one per run.
-            const ecosystem = m ? m[1] : (run.name || 'unknown').replace(/ - Update #\d+$/, '');
-            const directory = m ? m[2] : '?';
+            const { ecosystem, directory, dependency } = scopeOf(run);
             const key = `${ecosystem}|${directory}|${run.head_branch}`;
             if (seen.has(key)) continue;
             seen.add(key);
             updateJobs.push({
-              ecosystem, directory,
-              dependency: m && m[3] ? m[3] : null,
+              ecosystem, directory, dependency,
               branch: run.head_branch,
               status: run.status,
               conclusion: run.conclusion || 'none',
@@ -200,8 +207,77 @@ runs:
         const isStale = j => new Date(j.createdAt).getTime() < staleBefore;
 
         const failed = updateJobs.filter(j => j.conclusion === 'failure');
-        const failingUpdateJobs = failed.filter(j => !isStale(j));
-        const staleUpdateJobs = failed.filter(isStale)
+
+        // ── Confirm every failure before reporting it ───────────────────────────────
+        // The runs list is eventually consistent and intermittently serves a page days
+        // out of date. Observed directly: two identical requests seconds apart returned
+        // 2026-08-17 and 2026-08-27 as the newest run for the same scope, and one report
+        // announced three circuitbreaker-commercial failures from 2026-08-18 when four
+        // later successes - including one seven hours before the report ran - already
+        // existed. Seven of that report's twelve failures were already superseded.
+        //
+        // ghRetry does not help: it retries a *failed* call, and a stale page is a 200.
+        // The fix is a second, independent read per failing scope, filtered by branch so
+        // it cannot be answered by a cached page for the unfiltered query. A failure is
+        // reported only if it is still the newest run for its scope; if a later run
+        // exists, that run's own conclusion is what gets reported.
+        //
+        // Only failures are re-read. Staleness in the other direction - a stale success
+        // hiding a real failure - is possible in principle, but confirming every green
+        // scope would multiply the request count for the case that under-reports rather
+        // than cries wolf. See the note in README-dependabot-report.md.
+        const liveNewest = job => {
+          const resp = ghRetry(['api', `repos/${REPO}/actions/runs` +
+            `?event=dynamic&branch=${encodeURIComponent(job.branch)}&per_page=100`]);
+          if (!resp.ok) return { error: resp.err };
+          const runs = parseJson(resp.out, {}).workflow_runs || [];
+          for (const run of runs) {
+            const { ecosystem, directory } = scopeOf(run);
+            if (ecosystem === job.ecosystem && directory === job.directory
+                && run.head_branch === job.branch) return { run };
+          }
+          // No run at all for this scope in the branch-filtered view contradicts the
+          // first read. Treated as unconfirmable rather than as proof of anything.
+          return { error: 'scope not present in the branch-filtered run list' };
+        };
+
+        const confirmedFailures = [];
+        const supersededUpdateJobs = [];
+        for (const job of failed) {
+          const { run, error } = liveNewest(job);
+          if (error) {
+            // Unconfirmable: keep the failure rather than quietly dropping it, but say so.
+            warnings.push(`could not confirm ${job.ecosystem}|${job.directory}|${job.branch} ` +
+              `is still failing: ${error}`);
+            confirmedFailures.push({ ...job, unconfirmed: true });
+            continue;
+          }
+          const newer = new Date(run.created_at).getTime() > new Date(job.createdAt).getTime();
+          if (!newer) { confirmedFailures.push(job); continue; }
+
+          // A later run exists, so the first read was stale. Report what is actually
+          // current for this scope - which may still be a failure, just a different one.
+          const live = { ...job, status: run.status, conclusion: run.conclusion || 'none',
+                         url: run.html_url, createdAt: run.created_at };
+          // A run still in flight has no conclusion yet. It supersedes the failure all
+          // the same - the old run is no longer this scope's current state - and if the
+          // new one fails, the next report says so. Labelled rather than reported as a
+          // bare "none", which reads like missing data.
+          const outcome = live.status === 'completed' ? live.conclusion : `${live.status} (no result yet)`;
+          if (live.conclusion === 'failure') {
+            confirmedFailures.push(live);
+          } else {
+            supersededUpdateJobs.push({ ...job, supersededBy: live.createdAt,
+                                        supersededConclusion: outcome });
+          }
+          console.log(`  stale read corrected: ${job.ecosystem}|${job.directory}|${job.branch} ` +
+            `${job.createdAt} ${job.conclusion} -> ${live.createdAt} ${outcome}`);
+        }
+
+        // Recomputed from the confirmed timestamps, not the stale ones: a failure whose
+        // real newest run is months old is stale, however fresh the first read claimed.
+        const failingUpdateJobs = confirmedFailures.filter(j => !isStale(j));
+        const staleUpdateJobs = confirmedFailures.filter(isStale)
           .map(j => ({ ...j, ageDays: Math.floor((Date.now() - new Date(j.createdAt).getTime()) / 86400000) }));
 
         // ── Open Dependabot pull requests ───────────────────────────────────────────
@@ -385,6 +461,7 @@ runs:
           updateJobsChecked: updateJobs.length,
           failingUpdateJobs,
           staleUpdateJobs,
+          supersededUpdateJobs,
           prs: scanned,
           warnings,
         };
@@ -398,7 +475,10 @@ runs:
           `${counts.conflicting} conflicting, ${counts.pending} pending, ` +
           `${counts.unknown} unknown, ${counts.unmaintained} unmaintained`);
         console.log(`${REPO}: ${failingUpdateJobs.length} failing update job(s) of ${updateJobs.length} tracked` +
-          (staleUpdateJobs.length ? ` (${staleUpdateJobs.length} stale failure(s) ignored)` : ''));
+          (staleUpdateJobs.length ? ` (${staleUpdateJobs.length} stale failure(s) ignored)` : '') +
+          (supersededUpdateJobs.length
+            ? ` (${supersededUpdateJobs.length} already superseded by a later run - stale read corrected)`
+            : ''));
         for (const w of warnings) console.log(`  warning: ${w}`);
 
         fs.appendFileSync(process.env.GITHUB_OUTPUT, `result-file=${file}\n`);

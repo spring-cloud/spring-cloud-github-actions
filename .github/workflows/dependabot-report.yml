@@ -337,6 +337,16 @@ jobs:
             `**${totals.conflicting}** conflicting, **${totals.pending}** pending.`);
           md.push('');
           md.push(`**${failingJobs.length}** failing Dependabot update job(s).`);
+
+          // The runs API intermittently serves a stale page, so every failure is re-read
+          // against a branch-filtered query before being reported. Saying how many were
+          // dropped keeps that correction visible - a silent one would leave the counts
+          // looking arbitrary from one day to the next.
+          const superseded = results.flatMap(r => r.supersededUpdateJobs || []);
+          if (superseded.length) {
+            md.push('', `<sub>${superseded.length} stale failure(s) discarded: a later run for ` +
+              'the same scope already existed when this report ran.</sub>');
+          }
           if (unscannable.length) {
             md.push('');
             const one = unscannable.length === 1;
