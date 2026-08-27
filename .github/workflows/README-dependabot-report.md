@@ -12,8 +12,9 @@ targeting a branch that is no longer maintained.
    out per branch would fetch the same list several times).
 2. **`releaser-map`** reads the `jenkins-releaser-config` branch of `spring-cloud-release`
    and `spring-cloud-release-commercial` once, building a `{type: {project: {version:
-   train}}}` map, and shares it with the scan jobs as an artifact. This is what resolves
-   which GitHub Project a PR belongs to — see [Project resolution](#project-resolution).
+   train}}}` map, then gap-fills the OSS side from the commercial side, and shares the
+   result with the scan jobs as an artifact. This is what resolves which GitHub Project a
+   PR belongs to — see [Project resolution](#project-resolution).
 3. **`scan`** runs the [`dependabot-scan`](../actions/dependabot-scan/action.yml) action
    per repository and uploads its JSON result.
 4. **`summary`** merges every result into a job-summary table plus detail sections, and
@@ -120,6 +121,22 @@ spring-cloud-build@main = 5.0.3-SNAPSHOT
 This was validated against all 16 OSS maintained branches: 16/16 resolved to exactly one
 train, with no ambiguity. Because the match is on the exact version string, already-released
 trains left behind in the config cause no false positives.
+
+#### Commercial fallback
+
+The OSS map is gap-filled from `spring-cloud-release-commercial`'s copy of
+`jenkins-releaser-config`. Commercial is where a new train's snapshot file lands first: when
+a train is opened and the `.x` branches are bumped, the OSS file can lag by days, and every
+PR against a bumped branch reports "could not resolve project" until it appears. This is
+what happened when 2025.1.4 opened — `main` moved to `5.0.4-SNAPSHOT` while the newest OSS
+file was still `2025_1_3-snapshot.properties` (`5.0.3-SNAPSHOT`), so all 21 `main` PRs went
+unresolved.
+
+The fallback only *adds* versions the OSS files do not already carry, so an authoritative
+OSS mapping is never overwritten. Commercial-only trains are skipped — titles such as
+`2025.1.2.1` and `2025.1.3-INTERNAL` have no OSS board, so only plain `YYYY.N.N` trains are
+adopted. Their version keys (`5.0.2.1-SNAPSHOT`, `5.0.3-INTERNAL-SNAPSHOT`) cannot collide
+with an OSS branch version anyway.
 
 This report only *resolves* the expected board; it does not read board membership, which
 would need the `project` scope the token may not have.
