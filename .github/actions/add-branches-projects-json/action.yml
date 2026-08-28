@@ -1,0 +1,40 @@
+name: 'Add Branches to Projects JSON'
+description: >
+  Registers newly created release line branches in config/projects.json. Takes the whole
+  set of branches for a release train at once so the entire rollout lands as a single
+  commit instead of ~30 racing pushes.
+author: 'Spring Cloud Team'
+
+inputs:
+  additions:
+    description: >
+      JSON array of branches to register, e.g.
+      [{"repo":"spring-cloud/spring-cloud-config","branch":"5.0.x","sourceBranch":"main"}].
+      sourceBranch is the branch the new branch was cut from and is used to copy jdkVersions;
+      it defaults to "main".
+    required: true
+  commit-message:
+    description: 'Commit message for the projects.json commit'
+    required: false
+    default: ''
+  dry-run:
+    description: 'When true the file is written and the patch is captured, but nothing is committed or pushed'
+    required: false
+    default: 'false'
+  token:
+    description: 'GitHub token with contents:write on the spring-cloud-github-actions repository'
+    required: true
+
+outputs:
+  changed:
+    description: 'true when projects.json was modified'
+  patch:
+    description: 'The diff of the staged projects.json change, empty when nothing changed'
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: 'file-text'
+  color: 'blue'

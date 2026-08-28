@@ -1,0 +1,853 @@
+name: Setup Next Release Train
+
+# Names each run for what it targets, so the Actions list distinguishes runs at a glance
+# instead of showing a column of identical "Setup Next Release Train" rows:
+#
+#   Setup Next Release Train - 2026.1.0-SNAPSHOT
+#   Setup Next Release Train - 2026.1.0-SNAPSHOT [spring-cloud-config] - Dry Run
+run-name: "Setup Next Release Train - ${{ inputs.release_train_version }}${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }}${{ inputs.dry_run == true && ' - Dry Run' || '' }}"
+
+# Rolls main forward in every OSS project when a release train branches.
+#
+# For each project in the train:
+#
+#   1. derive     — read the root pom.xml on main and derive the release line branch from its
+#                   version (5.0.4-SNAPSHOT -> 5.0.x)
+#   2. branch     — create that branch from main
+#   3. retarget   — rewrite the branch triggers of the new branch's workflows so they name it
+#                   instead of main
+#   4. dependabot — duplicate main's dependabot entries on main, retargeted at the new branch
+#                   (Dependabot only reads the config on the default branch)
+#   5. versions   — move main onto the next train's versions, from the properties file on
+#                   jenkins-releaser-config
+#   6. milestone  — open the first milestone of the new line in the OSS repo
+#                   (5.1.0-SNAPSHOT -> 5.1.0-M1)
+#
+# Then, once per run rather than once per project:
+#
+#   7. register   — add every new branch to config/projects.json in this repository, as one
+#                   commit. Doing it in the matrix would have ~30 jobs racing to push to main.
+#
+# Every step is idempotent: a re-run against a project that is already set up reports
+# no-changes rather than failing, so a run that half-succeeded can simply be repeated.
+#
+# Nothing here creates the properties file. It must already exist on the jenkins-releaser-config
+# branch of spring-cloud-release-commercial - that repository holds the releaser config for OSS
+# trains too.
+#
+# See README-setup-next-release-train.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_train_version:
+        description: 'The NEXT release train version main should move to (e.g. 2026.1.0-SNAPSHOT). Must have a matching properties file on the jenkins-releaser-config branch.'
+        required: true
+        type: string
+      projects:
+        description: 'Comma-separated list of projects to run against (e.g. spring-cloud-config,spring-cloud-build). When empty, every project in the properties file is processed.'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run, if checked no branch, commit, push or milestone is created, but the summary shows the diffs that would be pushed'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Read the next train's properties file and build the project matrix ──────────────
+  # Deliberately the same parser as update-versions.yml's setup job, including the CDN wait:
+  # update-project-versions resolves versions over raw.githubusercontent.com, and applying a
+  # stale file across every repository is far worse than waiting for it.
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      count: ${{ steps.parse.outputs.count }}
+      release-repo: ${{ steps.parse.outputs.release-repo }}
+      props-file: ${{ steps.parse.outputs.props-file }}
+    steps:
+      - name: Parse releaser config and build matrix
+        id: parse
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          TRAIN_VERSION: ${{ inputs.release_train_version }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const trainVersion = (process.env.TRAIN_VERSION || '').trim();
+          const projectsRaw = (process.env.PROJECTS_FILTER || '').trim();
+
+          const fail = (...msg) => { for (const m of msg) console.error(m); process.exit(1); };
+
+          if (!/^\d+(\.\d+){2,3}(-[A-Za-z][\w.]*)?$/.test(trainVersion)) {
+            fail(`ERROR: release_train_version must be 3 or 4 numeric segments with an optional ` +
+              `qualifier (e.g. 2026.1.0-SNAPSHOT); got '${trainVersion}'.`);
+          }
+
+          // Deliberately identical to releaseTrainVersionToFileName in
+          // update-project-versions/src/index.js: this job must read exactly the file the action
+          // will read, or it would validate one file and apply another.
+          const propsFile = trainVersion
+            .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
+            .replace(/\./g, '_') + '.properties';
+
+          const names = projectsRaw
+            ? projectsRaw.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+
+          // This workflow only ever touches OSS repositories - the commercial side of a train
+          // rollover is create-oss-release-branch.yml - so a -commercial name is a mistake worth
+          // catching here rather than as a 404 halfway through.
+          const suffixed = names.filter(n => n.endsWith('-commercial'));
+          if (suffixed.length) {
+            fail('ERROR: this workflow sets up OSS repositories only.',
+              `  commercial projects given: ${suffixed.join(', ')}`,
+              'Use create-oss-release-branch.yml for the commercial side of a release.');
+          }
+
+          // Always spring-cloud-release-commercial, for OSS trains too: that repository holds the
+          // releaser config for every train now.
+          const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
+          const BRANCH = 'jenkins-releaser-config';
+
+          console.log(`Reading ${propsFile} from ${releaseRepo}@${BRANCH}...`);
+          let content;
+          try {
+            const b64 = execFileSync('gh', ['api',
+              `repos/${releaseRepo}/contents/${propsFile}?ref=${BRANCH}`,
+              '--jq', '.content'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+            content = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+          } catch (err) {
+            fail(`ERROR: could not read ${propsFile} from ${releaseRepo}@${BRANCH}.`,
+              'This workflow applies an existing properties file, it does not create one.',
+              'Check that release_train_version matches a file on that branch, and that the',
+              'token has read access to the repository.');
+          }
+
+          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
+          const entries = [];
+          for (const line of content.split('\n')) {
+            const m = line.match(ENTRY_RE);
+            if (m) entries.push({ key: m[1].trim(), version: m[2].trim() });
+          }
+          if (!entries.length) {
+            fail(`ERROR: ${propsFile} contains no releaser.fixed-versions[...] entries.`);
+          }
+          console.log(`Found ${entries.length} version entries.`);
+
+          // spring-boot is in the properties file so that every project picks up its version, but
+          // it is not a Spring Cloud repository and nothing is pushed to it.
+          const NON_REPO_KEYS = new Set(['spring-boot']);
+
+          let wanted = null;
+          if (names.length) {
+            wanted = new Set(names);
+            const known = new Set(entries.map(e => e.key));
+            const unknown = [...wanted].filter(k => !known.has(k));
+            if (unknown.length) {
+              fail(`ERROR: not found in ${propsFile}: ${unknown.join(', ')}`,
+                `Known projects: ${[...known].sort().join(', ')}`);
+            }
+            const nonRepo = [...wanted].filter(k => NON_REPO_KEYS.has(k));
+            if (nonRepo.length) {
+              fail(`ERROR: ${nonRepo.join(', ')} is not a Spring Cloud project repository ` +
+                'and cannot be targeted directly.');
+            }
+          }
+
+          const matrix = entries
+            .filter(e => !NON_REPO_KEYS.has(e.key))
+            .filter(e => !wanted || wanted.has(e.key))
+            .map(e => ({
+              project: e.key,
+              repo: `spring-cloud/${e.key}`,
+              version: e.version,
+            }))
+            .sort((a, b) => a.project.localeCompare(b.project));
+
+          // ── make sure raw serves this exact file ────────────────────────────────────
+          // The properties file for a new train is normally committed by hand moments before
+          // this workflow runs, and raw.githubusercontent.com is CDN-cached: it can 404, or
+          // keep serving the previous contents, well after the API returns the new file.
+          const url = `https://raw.githubusercontent.com/${releaseRepo}/${BRANCH}/${propsFile}`;
+          console.log(`Waiting for ${url} to serve these contents...`);
+          let available = false;
+          for (let attempt = 1; attempt <= 30; attempt++) {
+            let served = null;
+            try {
+              served = execFileSync('curl', ['-s', '-f',
+                '-H', 'Cache-Control: no-cache',
+                '-H', `Authorization: Bearer ${process.env.GH_TOKEN}`, url],
+                { encoding: 'utf8' });
+            } catch (err) { /* not served yet */ }
+
+            // Contents, not the status code: an updated file returns 200 immediately while the
+            // CDN is still serving the previous version.
+            if (served !== null && served.trim() === content.trim()) {
+              console.log(`Serving the expected contents after ${attempt} attempt(s).`);
+              available = true;
+              break;
+            }
+            console.log(`Attempt ${attempt}: ` +
+              (served === null ? 'not served yet' : 'still serving different contents') +
+              ', waiting 10s...');
+            execFileSync('sleep', ['10']);
+          }
+          if (!available) {
+            fail('', `ERROR: ${url} never served the contents the API returned for ${propsFile}.`,
+              'Nothing was changed. Re-run this workflow once the CDN catches up.');
+          }
+
+          console.log('');
+          console.log(`release repo:    ${releaseRepo}`);
+          console.log(`properties file: ${propsFile}`);
+          console.log('');
+          console.log(`Projects to set up: ${matrix.length}`);
+          for (const e of matrix) console.log(`  ${e.repo} -> ${e.version}`);
+
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `matrix=${JSON.stringify({ include: matrix })}\n`);
+          fs.appendFileSync(out, `count=${matrix.length}\n`);
+          fs.appendFileSync(out, `release-repo=${releaseRepo}\n`);
+          fs.appendFileSync(out, `props-file=${propsFile}\n`);
+          JSEOF
+
+  prepare:
+    name: "Setup — ${{ matrix.project }}"
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Do not persist this repository's GITHUB_TOKEN as a git extraheader; it would
+          # override the credentials baked into the target repos' remote URLs below.
+          persist-credentials: false
+
+      # ── 1. derive the release line branch from main's pom version ────────────────────
+      - name: Derive release line branch
+        id: derive
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          NEXT_VERSION: ${{ matrix.version }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const repo = process.env.REPO;
+          const nextVersion = process.env.NEXT_VERSION;
+
+          const out = process.env.GITHUB_OUTPUT;
+          const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
+          const stop = (status, message) => {
+            console.log(message);
+            emit('status', status);
+            emit('branch', '');
+            emit('milestone', '');
+            process.exit(0);
+          };
+
+          let pom;
+          try {
+            const b64 = execFileSync('gh', ['api',
+              `repos/${repo}/contents/pom.xml?ref=main`, '--jq', '.content'],
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+            pom = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+          } catch (err) {
+            stop('no-main-pom',
+              `ERROR: could not read pom.xml on ${repo}@main - the repository may not exist, ` +
+              'may have no main branch, or may not be a Maven project.');
+          }
+
+          // The root <version> is the project's own; the <parent> block is stripped first so its
+          // version is not mistaken for it. Same derivation as create-oss-release-branch.yml.
+          const noParent = pom.replace(/<parent>[\s\S]*?<\/parent>/g, '');
+          const m = noParent.match(/<version>([^<]+)<\/version>/);
+          if (!m) stop('no-pom-version', `ERROR: no <version> found in ${repo}@main pom.xml.`);
+
+          const currentVersion = m[1].trim().replace(/-SNAPSHOT$/, '');
+          if (!/^\d+\.\d+(\..+)?$/.test(currentVersion)) {
+            stop('bad-pom-version',
+              `ERROR: ${repo}@main is at '${currentVersion}', which is not ` +
+              '<major>.<minor>[.<patch>] - cannot derive a release line branch from it.');
+          }
+
+          // The branch covers the whole minor line, so the patch segment is dropped:
+          // 5.0.4-SNAPSHOT -> 5.0.x.
+          const branch = currentVersion.split('.').slice(0, 2).join('.') + '.x';
+
+          // The next train must actually be a step forward, or this run would branch the line
+          // main is about to move onto and then leave main where it started.
+          const nextPlain = nextVersion.replace(/-SNAPSHOT$/, '');
+          const nextLine = nextPlain.split('.').slice(0, 2).join('.') + '.x';
+          if (nextLine === branch) {
+            stop('same-line',
+              `ERROR: ${repo}@main is at ${currentVersion} and the next train puts it at ` +
+              `${nextVersion} - both on the ${branch} line. There is nothing to branch off.`);
+          }
+
+          // The first milestone of the new line on main.
+          const milestone = `${nextPlain}-M1`;
+          if (!/^\d+\.\d+\.0$/.test(nextPlain)) {
+            console.log(`::warning::${repo}: ${nextVersion} is not a .0 version, so the ` +
+              `milestone comes out as '${milestone}'. Check that this is the intended name.`);
+          }
+
+          console.log(`main version:  ${currentVersion}-SNAPSHOT`);
+          console.log(`branch:        ${branch}`);
+          console.log(`next version:  ${nextVersion}`);
+          console.log(`milestone:     ${milestone}`);
+
+          emit('status', 'ok');
+          emit('branch', branch);
+          emit('current-version', currentVersion);
+          emit('milestone', milestone);
+          JSEOF
+
+      # ── 2. cut the release line branch from main ─────────────────────────────────────
+      - name: Create release line branch
+        id: branch
+        if: steps.derive.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ steps.derive.outputs.branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+
+          if gh api "repos/${REPO}/git/ref/heads/${BRANCH}" --silent 2>/dev/null; then
+            echo "${BRANCH} already exists in ${REPO} - leaving it as it is."
+            echo "status=exists" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha') || {
+            echo "::error::Could not read main's SHA in ${REPO}."
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[dry run] not creating ${BRANCH} in ${REPO} at ${SHA}."
+            echo "status=would-create" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh api "repos/${REPO}/git/refs" --method POST \
+            --field ref="refs/heads/${BRANCH}" --field sha="${SHA}" > /dev/null || {
+            echo "::error::Could not create ${BRANCH} in ${REPO}."
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          echo "Created ${BRANCH} in ${REPO} at ${SHA}."
+          echo "status=created" >> "$GITHUB_OUTPUT"
+
+      # ── 3. point the new branch's workflows at itself ────────────────────────────────
+      # When the branch was only going to be created (a dry run), it does not exist to clone,
+      # so the action is pointed at main instead. The branch is cut from main unchanged, so the
+      # patch it produces is the one the real run would push - just computed from main's tree.
+      # A branch that already exists is cloned normally even on a dry run, so the patch reflects
+      # what is actually on it.
+      - name: Retarget workflow triggers
+        id: retarget
+        if: steps.branch.outputs.status == 'created' || steps.branch.outputs.status == 'exists' || steps.branch.outputs.status == 'would-create'
+        continue-on-error: true
+        uses: ./.github/actions/retarget-branch-triggers
+        with:
+          repository:    ${{ matrix.repo }}
+          branch:        ${{ steps.derive.outputs.branch }}
+          clone-branch:  ${{ steps.branch.outputs.status == 'would-create' && 'main' || '' }}
+          source-branch: main
+          dry-run:       ${{ inputs.dry_run }}
+          token:         ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # ── 4. tell Dependabot about the new branch ──────────────────────────────────────
+      - name: Add Dependabot entries for the new branch
+        id: dependabot
+        if: steps.derive.outputs.status == 'ok'
+        continue-on-error: true
+        uses: ./.github/actions/add-dependabot-branch-entries
+        with:
+          repository:    ${{ matrix.repo }}
+          new-branch:    ${{ steps.derive.outputs.branch }}
+          source-branch: main
+          dry-run:       ${{ inputs.dry_run }}
+          token:         ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # ── 5. move main onto the next train's versions ──────────────────────────────────
+      - name: Clone main
+        id: clone
+        if: steps.derive.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+        run: |
+          set -uo pipefail
+
+          if ! git clone --quiet --single-branch --branch main \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" project; then
+            echo "::error::Could not clone ${REPO}@main."
+            echo "status=clone-failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cd project
+          git config user.name "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+
+          echo "Cloned ${REPO}@main at $(git rev-parse --short HEAD)."
+          echo "status=cloned" >> "$GITHUB_OUTPUT"
+
+      # release-train-version rather than the explicit versions input: only that path applies
+      # project-version-substitutions, which is what maps spring-cloud-dependencies-parent to
+      # spring-cloud-build, verifierVersion to spring-cloud-contract, and so on.
+      - name: Apply next train versions to main
+        id: bump
+        if: steps.clone.outputs.status == 'cloned'
+        continue-on-error: true
+        uses: ./.github/actions/update-project-versions
+        with:
+          release-train-version: ${{ inputs.release_train_version }}
+          # Hardcoded true, not a flavour of this run. This input picks which repository the
+          # releaser config is fetched from, and that config now always lives in
+          # spring-cloud-release-commercial, including for OSS trains.
+          commercial: 'true'
+          token:     ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          directory: project
+
+      - name: Commit and push main
+        id: push
+        if: steps.bump.outcome == 'success'
+        env:
+          REPO: ${{ matrix.repo }}
+          TRAIN_VERSION: ${{ inputs.release_train_version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          cd project
+
+          git add -A
+          if git diff --cached --quiet; then
+            # Re-running against versions that are already applied is the normal way this
+            # happens, and it is not a failure.
+            echo "No version changes to commit - main is already at the ${TRAIN_VERSION} versions."
+            echo "status=no-changes" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git --no-pager diff --cached --stat
+          git --no-pager diff --cached > "${RUNNER_TEMP}/versions.diff"
+          echo "patch-file=${RUNNER_TEMP}/versions.diff" >> "$GITHUB_OUTPUT"
+
+          # Deliberately no [skip actions], the same as post-release's bump: the point of moving
+          # main onto new versions is to have CI build on them.
+          MESSAGE="Updating project versions to ${TRAIN_VERSION}"
+          git commit --quiet -m "$MESSAGE"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[dry run] not pushing \"${MESSAGE}\" to ${REPO}@main."
+            echo "status=would-push" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push --quiet origin HEAD:refs/heads/main
+          echo "Pushed \"${MESSAGE}\" to ${REPO}@main."
+          echo "status=pushed" >> "$GITHUB_OUTPUT"
+
+      # ── 6. open the first milestone of the new line ──────────────────────────────────
+      - name: Create milestone
+        id: milestone
+        if: steps.derive.outputs.status == 'ok' && inputs.dry_run != true
+        continue-on-error: true
+        uses: ./.github/actions/create-milestone
+        with:
+          repo:    ${{ matrix.repo }}
+          version: ${{ steps.derive.outputs.milestone }}
+          token:   ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # ── record ───────────────────────────────────────────────────────────────────────
+      - name: Collect patches
+        if: always()
+        id: patches
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ steps.derive.outputs.branch }}
+          RETARGET_PATCH: ${{ steps.retarget.outputs.patch-file }}
+          DEPENDABOT_PATCH: ${{ steps.dependabot.outputs.patch-file }}
+          VERSIONS_PATCH: ${{ steps.push.outputs.patch-file }}
+        run: |
+          set -uo pipefail
+
+          SAFE="${REPO//\//-}"
+          echo "safe-name=${SAFE}" >> "$GITHUB_OUTPUT"
+          OUT="patch-${SAFE}.diff"
+          : > "$OUT"
+
+          append() {
+            local label="$1" file="$2"
+            [[ -n "$file" && -f "$file" ]] || return 0
+            {
+              echo "### ${label}"
+              cat "$file"
+              echo ""
+            } >> "$OUT"
+          }
+
+          append "${REPO}@${BRANCH} — workflow triggers" "${RETARGET_PATCH:-}"
+          append "${REPO}@main — dependabot"             "${DEPENDABOT_PATCH:-}"
+          append "${REPO}@main — versions"               "${VERSIONS_PATCH:-}"
+
+          if [[ ! -s "$OUT" ]]; then
+            rm -f "$OUT"
+            echo "No patches captured."
+          else
+            wc -l < "$OUT" | xargs echo "Captured patch lines:"
+          fi
+
+      - name: Record result
+        if: always()
+        env:
+          PROJECT: ${{ matrix.project }}
+          REPO: ${{ matrix.repo }}
+          VERSION: ${{ matrix.version }}
+          SAFE: ${{ steps.patches.outputs.safe-name }}
+          BRANCH: ${{ steps.derive.outputs.branch }}
+          DERIVE_STATUS: ${{ steps.derive.outputs.status }}
+          CURRENT_VERSION: ${{ steps.derive.outputs.current-version }}
+          MILESTONE: ${{ steps.derive.outputs.milestone }}
+          BRANCH_STATUS: ${{ steps.branch.outputs.status }}
+          RETARGET_OUTCOME: ${{ steps.retarget.outcome }}
+          RETARGET_CHANGED: ${{ steps.retarget.outputs.changed }}
+          DEPENDABOT_OUTCOME: ${{ steps.dependabot.outcome }}
+          DEPENDABOT_CHANGED: ${{ steps.dependabot.outputs.changed }}
+          CLONE_STATUS: ${{ steps.clone.outputs.status }}
+          BUMP_OUTCOME: ${{ steps.bump.outcome }}
+          PUSH_STATUS: ${{ steps.push.outputs.status }}
+          MILESTONE_OUTCOME: ${{ steps.milestone.outcome }}
+        run: |
+          set -euo pipefail
+
+          jq -n \
+            --arg project "$PROJECT" \
+            --arg repo "$REPO" \
+            --arg version "$VERSION" \
+            --arg currentVersion "${CURRENT_VERSION:-}" \
+            --arg branch "${BRANCH:-}" \
+            --arg milestone "${MILESTONE:-}" \
+            --arg deriveStatus "${DERIVE_STATUS:-skipped}" \
+            --arg branchStatus "${BRANCH_STATUS:-skipped}" \
+            --arg retargetOutcome "${RETARGET_OUTCOME:-skipped}" \
+            --arg retargetChanged "${RETARGET_CHANGED:-false}" \
+            --arg dependabotOutcome "${DEPENDABOT_OUTCOME:-skipped}" \
+            --arg dependabotChanged "${DEPENDABOT_CHANGED:-false}" \
+            --arg cloneStatus "${CLONE_STATUS:-skipped}" \
+            --arg bumpOutcome "${BUMP_OUTCOME:-skipped}" \
+            --arg pushStatus "${PUSH_STATUS:-skipped}" \
+            --arg milestoneOutcome "${MILESTONE_OUTCOME:-skipped}" \
+            '{project: $project, repo: $repo, version: $version, currentVersion: $currentVersion,
+              branch: $branch, milestone: $milestone, deriveStatus: $deriveStatus,
+              branchStatus: $branchStatus, retargetOutcome: $retargetOutcome,
+              retargetChanged: $retargetChanged, dependabotOutcome: $dependabotOutcome,
+              dependabotChanged: $dependabotChanged, cloneStatus: $cloneStatus,
+              bumpOutcome: $bumpOutcome, pushStatus: $pushStatus,
+              milestoneOutcome: $milestoneOutcome}' \
+            > "result-setup-${SAFE}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-setup-${{ steps.patches.outputs.safe-name || matrix.project }}
+          path: |
+            result-setup-*.json
+            patch-*.diff
+          if-no-files-found: ignore
+
+  # ── 7. register every new branch in projects.json, as one commit ────────────────────
+  # Not done in the matrix on purpose: eight parallel legs pushing to this repository's main
+  # would spend most of their time losing races to each other.
+  register-branches:
+    name: Register Branches in projects.json
+    needs: [setup, prepare]
+    if: always() && needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    outputs:
+      patch: ${{ steps.register.outputs.patch }}
+      changed: ${{ steps.register.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      # Only projects whose branch actually exists (or would exist) are registered: a project
+      # whose derive step failed has no branch to schedule builds for.
+      - name: Build additions
+        id: additions
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.startsWith('result-setup-') && f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')));
+          } catch (err) {
+            console.log('No results to read.');
+          }
+
+          const additions = results
+            .filter(r => ['created', 'exists', 'would-create'].includes(r.branchStatus))
+            .map(r => ({ repo: r.repo, branch: r.branch, sourceBranch: 'main' }))
+            .sort((a, b) => a.repo.localeCompare(b.repo));
+
+          console.log(`Branches to register: ${additions.length}`);
+          for (const a of additions) console.log(`  ${a.repo} -> ${a.branch}`);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `additions=${JSON.stringify(additions)}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${additions.length}\n`);
+          JSEOF
+
+      - name: Update projects.json
+        id: register
+        if: steps.additions.outputs.count != '0'
+        uses: ./.github/actions/add-branches-projects-json
+        with:
+          additions:      ${{ steps.additions.outputs.additions }}
+          commit-message: "Update projects.json: add OSS branches for ${{ inputs.release_train_version }}"
+          dry-run:        ${{ inputs.dry_run }}
+          token:          ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+  summary:
+    name: Summary
+    needs: [setup, prepare, register-branches]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        env:
+          TRAIN_VERSION: ${{ inputs.release_train_version }}
+          PROPS_FILE: ${{ needs.setup.outputs.props-file }}
+          RELEASE_REPO: ${{ needs.setup.outputs.release-repo }}
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PROJECTS_JSON_PATCH: ${{ needs.register-branches.outputs.patch }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+          const trainVersion = process.env.TRAIN_VERSION || '';
+          const propsFile = process.env.PROPS_FILE || '';
+          const releaseRepo = process.env.RELEASE_REPO || '';
+          const filter = (process.env.PROJECTS_FILTER || '').trim();
+          const projectsJsonPatch = process.env.PROJECTS_JSON_PATCH || '';
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.startsWith('result-setup-') && f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) => (a.project || '').localeCompare(b.project || ''));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const L = [];
+          L.push(dryRun ? '## Setup next release train (dry run — nothing was changed)'
+                        : '## Setup next release train');
+          L.push('');
+          L.push(`Moving \`main\` to **${trainVersion}**` +
+            (filter ? ` · filtered to \`${filter}\`` : ''));
+          if (propsFile) {
+            L.push('');
+            L.push(`Versions read from \`${propsFile}\` on \`${releaseRepo}\`` +
+              '@`jenkins-releaser-config`.');
+          }
+          L.push('');
+
+          const ICON = {
+            created: '✅', exists: '➖', 'would-create': '🔎',
+            pushed: '✅', success: '✅', cloned: '✅',
+            'would-push': '🔎',
+            'no-changes': '➖', skipped: '⏭️', cancelled: '⚠️',
+            failure: '❌', failed: '❌', 'clone-failed': '❌',
+            'no-main-pom': '❌', 'no-pom-version': '❌', 'bad-pom-version': '❌',
+            'same-line': '❌',
+          };
+          const icon = s => ICON[s] || '❔';
+
+          // A step that ran but changed nothing reads as "already done", not as a success -
+          // otherwise a re-run looks identical to the run that did all the work.
+          const actionCell = (outcome, changed) => {
+            if (outcome === 'success' && changed !== 'true') return '➖ no-changes';
+            if (outcome === 'success') return dryRun ? '🔎 would-push' : '✅ pushed';
+            return `${icon(outcome)} ${outcome}`;
+          };
+
+          if (results.length) {
+            L.push('| Project | main | Branch | Triggers | Dependabot | Versions | Milestone |');
+            L.push('|---|---|---|---|---|---|---|');
+            for (const r of results) {
+              const branch = r.branch
+                ? `\`${r.branch}\` ${icon(r.branchStatus)}`
+                : `${icon(r.deriveStatus)} ${r.deriveStatus}`;
+              const versions = r.cloneStatus === 'clone-failed'
+                ? '❌ clone-failed'
+                : r.bumpOutcome !== 'success'
+                  ? `${icon(r.bumpOutcome)} ${r.bumpOutcome}`
+                  : `${icon(r.pushStatus)} ${r.pushStatus}`;
+              // Milestone creation has no dry-run mode of its own, so it is simply not run on
+              // a dry run - reporting that as "skipped" would read as something going wrong.
+              const milestone = !r.milestone
+                ? `${icon(r.milestoneOutcome)} ${r.milestoneOutcome}`
+                : dryRun && r.milestoneOutcome === 'skipped'
+                  ? `\`${r.milestone}\` 🔎`
+                  : `\`${r.milestone}\` ${icon(r.milestoneOutcome)}`;
+              L.push(`| \`${r.project}\` | ${r.currentVersion || '?'} → ${r.version} | ${branch} | ` +
+                `${actionCell(r.retargetOutcome, r.retargetChanged)} | ` +
+                `${actionCell(r.dependabotOutcome, r.dependabotChanged)} | ${versions} | ${milestone} |`);
+            }
+            L.push('');
+
+            const failed = results.filter(r =>
+              r.deriveStatus !== 'ok' || r.branchStatus === 'failed' ||
+              r.retargetOutcome === 'failure' || r.dependabotOutcome === 'failure' ||
+              r.cloneStatus === 'clone-failed' || r.bumpOutcome === 'failure' ||
+              r.milestoneOutcome === 'failure');
+            const ok = results.length - failed.length;
+
+            L.push(`**${results.length}** project(s) processed — **${ok}** ` +
+              (dryRun ? 'ready to set up' : 'set up') + `, **${failed.length}** failed.`);
+            L.push('');
+
+            if (failed.length) {
+              L.push('### ❌ Not set up');
+              L.push('');
+              L.push('Fix these and re-run with `projects` set to just this list — every step is');
+              L.push('idempotent, so projects that already succeeded report no changes.');
+              L.push('');
+              for (const r of failed) {
+                const why =
+                    r.deriveStatus === 'no-main-pom' ? 'could not read `pom.xml` on `main`'
+                  : r.deriveStatus === 'no-pom-version' ? 'no `<version>` in the root `pom.xml`'
+                  : r.deriveStatus === 'bad-pom-version' ? '`main` is not on a `<major>.<minor>` version'
+                  : r.deriveStatus === 'same-line' ? '`main` is already on the next train\'s line'
+                  : r.branchStatus === 'failed' ? 'the branch could not be created'
+                  : r.retargetOutcome === 'failure' ? 'the workflow triggers could not be retargeted'
+                  : r.dependabotOutcome === 'failure' ? 'the Dependabot entries could not be added'
+                  : r.cloneStatus === 'clone-failed' ? '`main` could not be cloned'
+                  : r.bumpOutcome === 'failure' ? 'the version update failed — see that job\'s log'
+                  : 'the milestone could not be created';
+                L.push(`- \`${r.repo}\` — ${why}`);
+              }
+              L.push('');
+            }
+          } else {
+            L.push('No projects were processed.');
+            L.push('');
+          }
+
+          // ── dry-run diffs ──────────────────────────────────────────────────────────
+          // Only on a dry run: on a real run the table plus the pushed commits are the record,
+          // and ~30 diffs would bury it.
+          if (dryRun) {
+            const MAX_LINES = 200;
+            const MAX_BYTES = 20 * 1024;
+
+            const fence = (patch) => {
+              let text = patch;
+              let truncated = false;
+              const lines = text.split('\n');
+              if (lines.length > MAX_LINES) {
+                text = lines.slice(0, MAX_LINES).join('\n');
+                truncated = true;
+              }
+              if (Buffer.byteLength(text, 'utf8') > MAX_BYTES) {
+                text = text.slice(0, MAX_BYTES);
+                truncated = true;
+              }
+              const out = ['```diff', text.replace(/```/g, "'''"), '```'];
+              if (truncated) {
+                out.push('');
+                out.push('_Truncated — the full patch is in this run\'s `result-setup-*` artifact._');
+              }
+              return out;
+            };
+
+            const patches = [];
+            for (const r of results) {
+              const file = `results/patch-${(r.repo || '').replace(/\//g, '-')}.diff`;
+              if (!fs.existsSync(file)) continue;
+              patches.push({ project: r.project, patch: fs.readFileSync(file, 'utf8') });
+            }
+
+            if (patches.length || projectsJsonPatch) {
+              L.push('### Changes that would be pushed');
+              L.push('');
+            }
+
+            for (const p of patches) {
+              L.push(`<details><summary><code>${p.project}</code></summary>`);
+              L.push('');
+              L.push(...fence(p.patch));
+              L.push('');
+              L.push('</details>');
+              L.push('');
+            }
+
+            if (projectsJsonPatch) {
+              L.push('<details><summary><code>config/projects.json</code></summary>');
+              L.push('');
+              L.push(...fence(projectsJsonPatch));
+              L.push('');
+              L.push('</details>');
+              L.push('');
+            }
+
+            L.push('This was a **dry run**. Re-run with `dry_run` unchecked to apply these changes.');
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
+          console.log(L.join('\n'));
+          JSEOF

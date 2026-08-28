@@ -1,0 +1,173 @@
+name: 'Add Dependabot Branch Entries'
+description: >
+  Duplicates the entries in a repository's dependabot config that target one branch,
+  retargeting the copies at a newly created branch, so Dependabot starts raising PRs
+  against the new release line. The config is edited on the repository's default
+  branch, which is the only place Dependabot reads it from.
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Repository whose dependabot config is updated (format: org/repo-name)'
+    required: true
+  new-branch:
+    description: 'Newly created branch the duplicated entries should target (e.g. 5.0.x)'
+    required: true
+  source-branch:
+    description: >
+      Branch whose entries are duplicated. Defaults to the repository default branch,
+      which is also where the config file lives and is committed.
+    required: false
+    default: ''
+  commit-message:
+    description: 'Commit message for the dependabot config commit'
+    required: false
+    default: ''
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+  dry-run:
+    description: 'When true the changes are staged and the patch is captured, but nothing is committed or pushed'
+    required: false
+    default: 'false'
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+
+outputs:
+  changed:
+    description: 'true when entries were added'
+    value: ${{ steps.add.outputs.changed }}
+  patch-file:
+    description: 'Path to the captured diff of the staged changes, empty when nothing changed'
+    value: ${{ steps.add.outputs.patch-file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Add dependabot entries for the new branch
+      id: add
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -uo pipefail
+
+        REPO="${{ inputs.repository }}"
+        NEW_BRANCH="${{ inputs.new-branch }}"
+        SOURCE_BRANCH="${{ inputs.source-branch }}"
+        DRY_RUN="${{ inputs.dry-run }}"
+        COMMIT_MSG="${{ inputs.commit-message }}"
+
+        echo "changed=false" >> "$GITHUB_OUTPUT"
+        echo "patch-file="   >> "$GITHUB_OUTPUT"
+
+        # Dependabot reads .github/dependabot.yml from the default branch only - entries on
+        # any other branch are inert - which is why retire-branch.yml deletes from the
+        # default branch too.  Both the source entries and the commit therefore live there.
+        DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq '.defaultBranchRef.name')
+        if [[ -z "$SOURCE_BRANCH" ]]; then
+          SOURCE_BRANCH="$DEFAULT_BRANCH"
+        fi
+        if [[ -z "$COMMIT_MSG" ]]; then
+          COMMIT_MSG="Add Dependabot entries for ${NEW_BRANCH}"
+        fi
+
+        echo "=== Add Dependabot Branch Entries ==="
+        echo "Repository:     $REPO"
+        echo "Default branch: $DEFAULT_BRANCH"
+        echo "Source branch:  $SOURCE_BRANCH"
+        echo "New branch:     $NEW_BRANCH"
+        echo "Dry run:        $DRY_RUN"
+        echo ""
+
+        WORKDIR="$(mktemp -d)/_dependabot_repo"
+        git clone --quiet --single-branch --branch "$DEFAULT_BRANCH" \
+          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$WORKDIR" || {
+          echo "::error::Could not clone ${REPO}@${DEFAULT_BRANCH}."
+          exit 1
+        }
+
+        cd "$WORKDIR"
+        git config user.name  "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        DEPENDABOT_FILE=""
+        for CANDIDATE in ".github/dependabot.yml" ".github/dependabot.yaml"; do
+          if [[ -f "$CANDIDATE" ]]; then
+            DEPENDABOT_FILE="$CANDIDATE"
+            break
+          fi
+        done
+
+        if [[ -z "$DEPENDABOT_FILE" ]]; then
+          echo "::warning::add-dependabot-branch-entries: no dependabot.yml or dependabot.yaml on ${REPO}@${DEFAULT_BRANCH} — nothing to duplicate."
+          exit 0
+        fi
+        echo "Using ${DEPENDABOT_FILE}."
+
+        export SRC_BRANCH="$SOURCE_BRANCH"
+        export NEW_TARGET="$NEW_BRANCH"
+
+        ALREADY=$(yq e '[.updates[]? | select(.["target-branch"] == strenv(NEW_TARGET))] | length' "$DEPENDABOT_FILE")
+        if [[ "$ALREADY" != "0" ]]; then
+          echo "${DEPENDABOT_FILE} already has ${ALREADY} entr(y|ies) targeting '${NEW_BRANCH}' — nothing to do."
+          exit 0
+        fi
+
+        # An entry with no target-branch implicitly means the default branch, so when the
+        # source branch *is* the default branch those entries are part of the set to copy.
+        # The copies always carry an explicit target-branch; the originals are untouched.
+        if [[ "$SOURCE_BRANCH" == "$DEFAULT_BRANCH" ]]; then
+          MATCH='(.["target-branch"] == strenv(SRC_BRANCH)) or (has("target-branch") | not)'
+        else
+          MATCH='.["target-branch"] == strenv(SRC_BRANCH)'
+        fi
+
+        COUNT=$(yq e "[.updates[]? | select(${MATCH})] | length" "$DEPENDABOT_FILE")
+        if [[ "$COUNT" == "0" ]]; then
+          echo "::warning::add-dependabot-branch-entries: no dependabot entries target '${SOURCE_BRANCH}' in ${REPO} — nothing was duplicated."
+          {
+            echo "### :warning: No Dependabot entries duplicated"
+            echo "No entry in \`${DEPENDABOT_FILE}\` on \`${REPO}\` targets \`${SOURCE_BRANCH}\`, so nothing was copied for \`${NEW_BRANCH}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        echo "Duplicating ${COUNT} entr(y|ies) from '${SOURCE_BRANCH}' to '${NEW_BRANCH}'..."
+        # Merged with `* {...}` rather than assigned with `.["target-branch"] = ...`:
+        # inside the += argument an assignment to a key the entry does not already have is
+        # silently dropped, so the copies of implicit-default-branch entries would come out
+        # with no target-branch at all and duplicate the originals.
+        yq e ".updates += [.updates[] | select(${MATCH}) | . * {\"target-branch\": strenv(NEW_TARGET)}]" -i "$DEPENDABOT_FILE"
+
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No dependabot changes to commit."
+          exit 0
+        fi
+
+        PATCH_FILE="${RUNNER_TEMP:-/tmp}/dependabot-$(echo "${REPO}" | tr '/' '-').diff"
+        git --no-pager diff --cached > "$PATCH_FILE"
+        git --no-pager diff --cached --stat
+
+        echo "changed=true"             >> "$GITHUB_OUTPUT"
+        echo "patch-file=${PATCH_FILE}" >> "$GITHUB_OUTPUT"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "[dry run] not committing \"${COMMIT_MSG}\" to ${REPO}@${DEFAULT_BRANCH}."
+          exit 0
+        fi
+
+        git commit --quiet -m "$COMMIT_MSG"
+        git push --quiet origin "HEAD:refs/heads/${DEFAULT_BRANCH}"
+        echo "Dependabot entries for '${NEW_BRANCH}' pushed to ${REPO}@${DEFAULT_BRANCH}."
+
+branding:
+  icon: 'shield'
+  color: 'blue'

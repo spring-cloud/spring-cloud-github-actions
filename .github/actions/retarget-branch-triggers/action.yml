@@ -1,0 +1,207 @@
+name: 'Retarget Branch Triggers'
+description: >
+  Rewrites the branch triggers of every GitHub Actions workflow on a branch so they
+  name that branch instead of the branch it was cut from. Used when a new release
+  line branch is created from main and has to start building on its own.
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Repository containing the branch (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'Branch whose workflow files are retargeted. Also the branch that is cloned and committed to.'
+    required: true
+  source-branch:
+    description: 'Branch name the triggers currently point at (the branch this one was cut from)'
+    required: false
+    default: 'main'
+  clone-branch:
+    description: >
+      Branch to clone and compute the patch from, when it is not `branch` itself. Used on a dry
+      run, where `branch` has not been created yet: the new branch is cut from its source
+      unchanged, so retargeting a clone of the source produces the same patch. Setting this
+      forces dry-run behaviour - nothing is ever committed to a branch other than `branch`.
+    required: false
+    default: ''
+  commit-message:
+    description: 'Commit message for the retarget commit'
+    required: false
+    default: ''
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+  dry-run:
+    description: 'When true the changes are staged and the patch is captured, but nothing is committed or pushed'
+    required: false
+    default: 'false'
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+
+outputs:
+  changed:
+    description: 'true when at least one workflow file was rewritten'
+    value: ${{ steps.retarget.outputs.changed }}
+  patch-file:
+    description: 'Path to the captured diff of the staged changes, empty when nothing changed'
+    value: ${{ steps.retarget.outputs.patch-file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Retarget workflow branch triggers
+      id: retarget
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -uo pipefail
+
+        REPO="${{ inputs.repository }}"
+        BRANCH="${{ inputs.branch }}"
+        SOURCE_BRANCH="${{ inputs.source-branch }}"
+        CLONE_BRANCH="${{ inputs.clone-branch }}"
+        DRY_RUN="${{ inputs.dry-run }}"
+
+        # Committing a patch computed from another branch to `branch` would be a silent
+        # cross-branch write, so a clone-branch always implies dry run.
+        if [[ -n "$CLONE_BRANCH" && "$CLONE_BRANCH" != "$BRANCH" ]]; then
+          DRY_RUN="true"
+        fi
+        if [[ -z "$CLONE_BRANCH" ]]; then
+          CLONE_BRANCH="$BRANCH"
+        fi
+        COMMIT_MSG="${{ inputs.commit-message }}"
+        if [[ -z "$COMMIT_MSG" ]]; then
+          COMMIT_MSG="Retarget workflow triggers to ${BRANCH} [skip actions]"
+        fi
+
+        echo "=== Retarget Branch Triggers ==="
+        echo "Repository:    $REPO"
+        echo "Branch:        $BRANCH"
+        echo "Source branch: $SOURCE_BRANCH"
+        echo "Cloned branch: $CLONE_BRANCH"
+        echo "Dry run:       $DRY_RUN"
+        echo ""
+
+        echo "changed=false"   >> "$GITHUB_OUTPUT"
+        echo "patch-file="     >> "$GITHUB_OUTPUT"
+
+        WORKDIR="$(mktemp -d)/_retarget_repo"
+        git clone --quiet --single-branch --branch "$CLONE_BRANCH" \
+          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$WORKDIR" || {
+          echo "::error::Could not clone ${REPO}@${CLONE_BRANCH}."
+          exit 1
+        }
+
+        cd "$WORKDIR"
+        git config user.name  "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        WORKFLOWS_DIR=".github/workflows"
+        if [[ ! -d "$WORKFLOWS_DIR" ]]; then
+          echo "::warning::retarget-branch-triggers: no ${WORKFLOWS_DIR} directory on ${REPO}@${CLONE_BRANCH} — nothing to retarget."
+          exit 0
+        fi
+
+        export SRC="$SOURCE_BRANCH"
+        export DST="$BRANCH"
+        MATCHED=0
+
+        for FILE in "$WORKFLOWS_DIR"/*.yml "$WORKFLOWS_DIR"/*.yaml; do
+          [[ -e "$FILE" ]] || continue
+
+          # workflow_dispatch often carries a free-text 'branches' input whose default is
+          # the branch to build; it is retargeted only when it names the source branch
+          # exactly, so a comma-separated or unrelated default is left alone.
+          WD_DEFAULT=$(yq e '.on.workflow_dispatch.inputs.branches.default // "null"' "$FILE" 2>/dev/null)
+
+          # Decide before touching the file.  yq rewrites a file it parses even when the
+          # expression changes nothing - flow lists come back reflowed ([ a ] -> [a]) - so
+          # a workflow that never names the source branch (deploy-docs.yml on docs-build)
+          # would otherwise land in the commit as pure whitespace churn.
+          HAS_SRC=$(yq e '[.on.push.branches[]?, .on.pull_request.branches[]?, .on.pull_request_target.branches[]?] | any_c(. == strenv(SRC))' "$FILE" 2>/dev/null)
+          if [[ "$HAS_SRC" != "true" && "$WD_DEFAULT" != "$SOURCE_BRANCH" ]]; then
+            continue
+          fi
+
+          # Only the elements that name the source branch are replaced, never the whole
+          # list: a workflow may legitimately also trigger on branches that are not part
+          # of a release line (docs-build is the common one) and those must survive.
+          #
+          # The per-trigger existence probe is load-bearing too.  Assigning through a
+          # trigger the file does not declare does not no-op: yq materialises it, so a CI
+          # workflow with only a push trigger comes back with an empty
+          # `pull_request: branches: []` bolted on.
+          for TRIGGER in push pull_request pull_request_target; do
+            export TRIGGER
+            HAS=$(yq e '.on[strenv(TRIGGER)].branches // "null"' "$FILE" 2>/dev/null)
+            if [[ "$HAS" != "null" ]]; then
+              yq e '(.on[strenv(TRIGGER)].branches[] | select(. == strenv(SRC))) = strenv(DST)' -i "$FILE"
+            fi
+          done
+
+          if [[ "$WD_DEFAULT" == "$SOURCE_BRANCH" ]]; then
+            yq e '.on.workflow_dispatch.inputs.branches.default = strenv(DST)' -i "$FILE"
+          fi
+
+          echo "  ✓ retargeted ${FILE}"
+          MATCHED=$((MATCHED + 1))
+        done
+
+        if [[ "$MATCHED" -eq 0 ]]; then
+          # Re-running against an already-retargeted branch is the normal way this happens and
+          # is not worth a warning; a branch that names neither the source nor the target is.
+          ALREADY=0
+          for FILE in "$WORKFLOWS_DIR"/*.yml "$WORKFLOWS_DIR"/*.yaml; do
+            [[ -e "$FILE" ]] || continue
+            HAS_DST=$(yq e '[.on.push.branches[]?, .on.pull_request.branches[]?, .on.pull_request_target.branches[]?] | any_c(. == strenv(DST))' "$FILE" 2>/dev/null)
+            if [[ "$HAS_DST" == "true" ]]; then
+              ALREADY=$((ALREADY + 1))
+            fi
+          done
+
+          if [[ "$ALREADY" -gt 0 ]]; then
+            echo "${ALREADY} workflow(s) already trigger on '${BRANCH}' — nothing to retarget."
+            exit 0
+          fi
+
+          echo "::warning::retarget-branch-triggers: no workflow on ${REPO}@${CLONE_BRANCH} triggers on '${SOURCE_BRANCH}' or '${BRANCH}' — nothing was retargeted. Check the branch triggers by hand."
+          {
+            echo "### :warning: No workflow triggers retargeted"
+            echo "No workflow in \`.github/workflows\` on \`${REPO}@${CLONE_BRANCH}\` names \`${SOURCE_BRANCH}\` in a branch trigger."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No workflow changes to commit."
+          exit 0
+        fi
+
+        PATCH_FILE="${RUNNER_TEMP:-/tmp}/retarget-$(echo "${REPO}" | tr '/' '-')-${BRANCH//\//-}.diff"
+        git --no-pager diff --cached > "$PATCH_FILE"
+        git --no-pager diff --cached --stat
+
+        echo "changed=true"               >> "$GITHUB_OUTPUT"
+        echo "patch-file=${PATCH_FILE}"   >> "$GITHUB_OUTPUT"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "[dry run] not committing \"${COMMIT_MSG}\" to ${REPO}@${BRANCH}."
+          exit 0
+        fi
+
+        git commit --quiet -m "$COMMIT_MSG"
+        git push --quiet origin "HEAD:refs/heads/${BRANCH}"
+        echo "Workflow trigger updates pushed to ${REPO}@${BRANCH}."
+
+branding:
+  icon: 'git-branch'
+  color: 'blue'
