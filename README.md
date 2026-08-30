@@ -4,6 +4,7 @@ Shared GitHub Actions workflows and composite actions for Spring Cloud projects.
 
 ## Contents
 
+- **[How Spring Cloud releases work](docs/release-automation.md)** — Start here. The end-to-end narrative: OSS and commercial release flows, the branch model, where versions come from, and where this repo's automation stops and the external release train begins.
 - **[Workflows](.github/workflows/)** — Reusable workflows callable from other repositories
 - **[Actions](.github/actions/)** — Composite actions used by those workflows (and optionally by callers)
 - **[Config](config/)** — Centralized configuration (e.g. branches and JDK versions per project)

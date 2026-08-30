@@ -1,5 +1,13 @@
 # Spring Cloud Release Process
 
+> **Deprecated — this is the *old* release process.** It documents the `releaser` task graph
+> (the "jenkins-releaser" flow) that Spring Cloud used before the current release train. It is
+> **not** what `spring-io/release-train` runs today, and nothing in this repository drives it.
+> It is kept for historical reference.
+>
+> For how releases actually work now, see
+> **[How Spring Cloud Releases Work](release-automation.md)**.
+
 ```mermaid
 flowchart TD
     START([Start Release]) --> SINGLE & META
