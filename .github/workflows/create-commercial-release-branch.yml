@@ -63,6 +63,32 @@ jobs:
         with:
           token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
+      - name: Check if commercial repository
+        id: is-commercial
+        uses: ./.github/actions/is-commercial-repo
+        with:
+          repository: spring-cloud/${{ inputs.project }}
+
+      # Every release - commercial, OSS and hotfix alike - is cut from the commercial repo,
+      # so this workflow only ever operates on a -commercial project.  Reject anything else
+      # up front: an OSS name would otherwise be taken for a commercial repo and the release
+      # branch cut in the OSS repository itself.
+      - name: Reject non-commercial project
+        if: steps.is-commercial.outputs.commercial != 'true'
+        env:
+          PROJECT: ${{ inputs.project }}
+        run: |
+          echo "ERROR: '${PROJECT}' is not a commercial repository."
+          echo
+          echo "This workflow releases from spring-cloud/<project>-commercial, where every"
+          echo "release - commercial, OSS and hotfix alike - is cut."
+          echo
+          echo "  - For a commercial release, pass '${PROJECT}-commercial'."
+          echo "  - For an OSS release, use create-oss-release-branch.yml instead, which"
+          echo "    creates the -internal branch and stamps -INTERNAL-SNAPSHOT versions"
+          echo "    before cutting the release branch.  This workflow does neither."
+          exit 1
+
       - name: Determine release version and commercial project
         id: setup
         env:
@@ -84,18 +110,11 @@ jobs:
           echo "release-version=$version" >> $GITHUB_OUTPUT
           echo "Release version: $version"
 
-          project="${{ inputs.project }}"
-          if [[ "$project" == *-commercial ]]; then
-            commercial_project="$project"
-            deployment_destination="Spring Enterprise"
-          else
-            commercial_project="${project}-commercial"
-            deployment_destination="Maven Central"
-          fi
+          # The source is a -commercial project, verified above, so the destination is
+          # always Spring Enterprise.
+          commercial_project="${{ inputs.project }}"
           echo "commercial-project=$commercial_project" >> $GITHUB_OUTPUT
-          echo "deployment-destination=$deployment_destination" >> $GITHUB_OUTPUT
           echo "Commercial project: $commercial_project"
-          echo "Deployment destination: $deployment_destination"
 
       - name: Check tag and release do not already exist
         env:
@@ -104,13 +123,11 @@ jobs:
           version="${{ steps.setup.outputs.release-version }}"
           tag="v${version}"
           commercial_project="${{ steps.setup.outputs.commercial-project }}"
-          project="${{ inputs.project }}"
 
-          if [[ "$project" == *-commercial ]]; then
-            oss_project="${project%-commercial}"
-          else
-            oss_project="$project"
-          fi
+          # The OSS counterpart, checked alongside the commercial repo so a version already
+          # released on either side is caught.  Commercial-only projects have no OSS repo of
+          # this name; the lookups simply come back empty, which reads as "not released".
+          oss_project="${{ steps.is-commercial.outputs.base-repo-name }}"
 
           failed=false
 
@@ -165,30 +182,16 @@ jobs:
         run: |
           commercial_project="${{ steps.setup.outputs.commercial-project }}"
           release_branch="release/${{ steps.setup.outputs.release-version }}"
-          token="${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}"
-          project="${{ inputs.project }}"
 
-          if [[ "$project" == *-commercial ]]; then
-            # Source is already a commercial repo — use its branch SHA via the API
-            echo "Creating ${release_branch} in spring-cloud/${commercial_project} from ${project}@${{ inputs.branch }}..."
-            source_sha=$(gh api "repos/spring-cloud/${commercial_project}/git/ref/heads/${{ inputs.branch }}" \
-              --jq '.object.sha')
-            gh api "repos/spring-cloud/${commercial_project}/git/refs" \
-              --method POST \
-              --field ref="refs/heads/${release_branch}" \
-              --field sha="${source_sha}"
-          else
-            # Source is an OSS repo — clone it and push to the commercial repo
-            echo "Creating ${release_branch} in spring-cloud/${commercial_project} from OSS ${project}@${{ inputs.branch }}..."
-            git clone --depth 1 --branch "${{ inputs.branch }}" \
-              "https://x-access-token:${token}@github.com/spring-cloud/${project}.git" source-repo
-            cd source-repo
-            git remote add commercial \
-              "https://x-access-token:${token}@github.com/spring-cloud/${commercial_project}.git"
-            git push commercial "HEAD:refs/heads/${release_branch}"
-            cd ..
-            rm -rf source-repo
-          fi
+          # Source and destination are the same repo, so the branch is cut from the source
+          # branch's SHA over the API - no clone needed.
+          echo "Creating ${release_branch} in spring-cloud/${commercial_project} from ${{ inputs.branch }}..."
+          source_sha=$(gh api "repos/spring-cloud/${commercial_project}/git/ref/heads/${{ inputs.branch }}" \
+            --jq '.object.sha')
+          gh api "repos/spring-cloud/${commercial_project}/git/refs" \
+            --method POST \
+            --field ref="refs/heads/${release_branch}" \
+            --field sha="${source_sha}"
           echo "Branch ${release_branch} created successfully."
 
       - name: Update CI and PR workflows for release branch
@@ -215,12 +218,11 @@ jobs:
         run: |
           commercial_project="${{ steps.setup.outputs.commercial-project }}"
           release_branch="release/${{ steps.setup.outputs.release-version }}"
-          deployment_destination="${{ steps.setup.outputs.deployment-destination }}"
 
           run_url=$(gh workflow run release-train-join.yml \
             --repo "spring-cloud/${commercial_project}" \
             --ref "${release_branch}" \
-            --field "deployment-destination=${deployment_destination}" \
+            --field "deployment-destination=Spring Enterprise" \
             --field "release-train=${{ inputs.release-train }}" \
             --field "release-train-repository=spring-io/release-train")
           echo "Dispatched workflow run. Waiting for $run_url to complete."
