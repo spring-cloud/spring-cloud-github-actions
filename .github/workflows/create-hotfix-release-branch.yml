@@ -252,25 +252,28 @@ jobs:
     needs: [derive, update-versions]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
       - name: Check for required release train workflows
-        id: check
+        id: check-workflows
+        uses: ./.github/actions/check-release-train-workflows
+        with:
+          repo:   ${{ needs.derive.outputs.commercial_repo }}
+          branch: ${{ needs.derive.outputs.commercial_branch }}
+          token:  ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Determine primary JDK for the generator
+        id: jdk
+        if: steps.check-workflows.outputs.any-missing == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
           commercial_project="${{ needs.derive.outputs.commercial_project }}"
           release_branch="${{ needs.derive.outputs.commercial_branch }}"
-
-          missing=false
-          for workflow in "release-train-join.yml" "release-train-ready.yml"; do
-            if gh api "repos/spring-cloud/${commercial_project}/contents/.github/workflows/${workflow}?ref=${release_branch}" --silent 2>/dev/null; then
-              echo "  ✓ ${workflow} present"
-            else
-              echo "  ✗ ${workflow} missing"
-              missing=true
-            fi
-          done
-          echo "needs-generation=${missing}" >> "$GITHUB_OUTPUT"
 
           # Look up primary JDK from projects.json.
           # initialize-commercial-branch already ran update-projects-json, which added
@@ -312,26 +315,15 @@ jobs:
           JSEOF
           )
           echo "primary-jdk=${primary_jdk}" >> "$GITHUB_OUTPUT"
-
-          if [[ "$missing" == "false" ]]; then
-            echo "All required workflows are present — skipping generator."
-          else
-            echo "One or more required workflows are missing — generator will run (primary JDK: ${primary_jdk})."
-          fi
-
-      - name: Checkout
-        if: steps.check.outputs.needs-generation == 'true'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.sha || github.sha }}
+          echo "Generator will run with primary JDK ${primary_jdk} for the missing workflow(s): ${{ steps.check-workflows.outputs.missing }}"
 
       - name: Run workflow generator for hotfix branch
-        if: steps.check.outputs.needs-generation == 'true'
+        if: steps.check-workflows.outputs.any-missing == 'true'
         uses: ./.github/actions/generate-workflows-for-branch
         with:
           repo:        ${{ needs.derive.outputs.commercial_repo }}
           branch:      ${{ needs.derive.outputs.commercial_branch }}
-          primary-jdk: ${{ steps.check.outputs.primary-jdk }}
+          primary-jdk: ${{ steps.jdk.outputs.primary-jdk }}
           token:       ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
   trigger-release-train-join:
