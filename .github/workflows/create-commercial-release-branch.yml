@@ -139,6 +139,44 @@ jobs:
 
           echo "Check passed: ${tag} does not exist in any repo."
 
+      # The release branch inherits its workflows from the source branch, and the
+      # final step of this job dispatches release-train-join.yml on it.  Verify the
+      # release train workflows are on the source branch now, before anything is
+      # created, so a missing file fails fast instead of leaving a half-created
+      # release branch and a projects.json entry to clean up by hand.
+      - name: Verify release train workflows exist on source branch
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          source_repo="spring-cloud/${{ inputs.project }}"
+          source_branch="${{ inputs.branch }}"
+
+          missing=()
+          for workflow in "release-train-join.yml" "release-train-ready.yml"; do
+            if gh api "repos/${source_repo}/contents/.github/workflows/${workflow}?ref=${source_branch}" --silent 2>/dev/null; then
+              echo "  ✓ ${workflow} present in ${source_repo} at ${source_branch}"
+            else
+              echo "  ✗ ${workflow} missing from ${source_repo} at ${source_branch}"
+              missing+=("${workflow}")
+            fi
+          done
+
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo
+            echo "ERROR: required release train workflow(s) missing from ${source_repo} at ${source_branch}:"
+            for workflow in "${missing[@]}"; do
+              echo "  - .github/workflows/${workflow}"
+            done
+            echo
+            echo "The release branch is cut from ${source_branch} and inherits its workflows, so"
+            echo "release-train-join.yml could not be dispatched on it."
+            echo "Run run-github-actions-workflow-generator.yml for ${source_repo} on ${source_branch}"
+            echo "to generate the missing workflow(s), then re-run this workflow."
+            exit 1
+          fi
+
+          echo "Check passed: release train workflows are present on ${source_branch}."
+
       - name: Create milestone in source repo if missing
         uses: ./.github/actions/create-milestone
         with:
