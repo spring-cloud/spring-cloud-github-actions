@@ -58,32 +58,36 @@ jobs:
     name: Join Release Train - ${{ inputs.project }} (${{ inputs.branch }})
     runs-on: ubuntu-latest
     steps:
-      # Every release - commercial, OSS and hotfix alike - is cut from the commercial repo,
-      # so this workflow only ever operates on a -commercial project.  Reject anything else
-      # up front: an OSS name would otherwise be taken for a commercial repo and the release
-      # branch cut in the OSS repository itself.
-      - name: Verify project is a commercial repository
-        env:
-          PROJECT: ${{ inputs.project }}
-        run: |
-          if [[ "$PROJECT" != *-commercial ]]; then
-            echo "ERROR: '${PROJECT}' is not a commercial repository."
-            echo
-            echo "This workflow releases from spring-cloud/<project>-commercial, where every"
-            echo "release - commercial, OSS and hotfix alike - is cut."
-            echo
-            echo "  - For a commercial release, pass '${PROJECT}-commercial'."
-            echo "  - For an OSS release, use create-oss-release-branch.yml instead, which"
-            echo "    creates the -internal branch and stamps -INTERNAL-SNAPSHOT versions"
-            echo "    before cutting the release branch.  This workflow does neither."
-            exit 1
-          fi
-          echo "Project '${PROJECT}' is a commercial repository."
-
       - name: Checkout spring-cloud-github-actions
         uses: actions/checkout@v4
         with:
           token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Check if commercial repository
+        id: is-commercial
+        uses: ./.github/actions/is-commercial-repo
+        with:
+          repository: spring-cloud/${{ inputs.project }}
+
+      # Every release - commercial, OSS and hotfix alike - is cut from the commercial repo,
+      # so this workflow only ever operates on a -commercial project.  Reject anything else
+      # up front: an OSS name would otherwise be taken for a commercial repo and the release
+      # branch cut in the OSS repository itself.
+      - name: Reject non-commercial project
+        if: steps.is-commercial.outputs.commercial != 'true'
+        env:
+          PROJECT: ${{ inputs.project }}
+        run: |
+          echo "ERROR: '${PROJECT}' is not a commercial repository."
+          echo
+          echo "This workflow releases from spring-cloud/<project>-commercial, where every"
+          echo "release - commercial, OSS and hotfix alike - is cut."
+          echo
+          echo "  - For a commercial release, pass '${PROJECT}-commercial'."
+          echo "  - For an OSS release, use create-oss-release-branch.yml instead, which"
+          echo "    creates the -internal branch and stamps -INTERNAL-SNAPSHOT versions"
+          echo "    before cutting the release branch.  This workflow does neither."
+          exit 1
 
       - name: Determine release version and commercial project
         id: setup
@@ -123,7 +127,7 @@ jobs:
           # The OSS counterpart, checked alongside the commercial repo so a version already
           # released on either side is caught.  Commercial-only projects have no OSS repo of
           # this name; the lookups simply come back empty, which reads as "not released".
-          oss_project="${commercial_project%-commercial}"
+          oss_project="${{ steps.is-commercial.outputs.base-repo-name }}"
 
           failed=false
 
