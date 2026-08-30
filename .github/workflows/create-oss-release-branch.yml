@@ -350,27 +350,25 @@ jobs:
     needs: [derive, update-release-branch]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout spring-cloud-github-actions
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
       - name: Check for required release train workflows in OSS branch
-        id: check
+        id: check-workflows
+        uses: ./.github/actions/check-release-train-workflows
+        with:
+          repo:   spring-cloud/${{ inputs.oss_repo }}
+          branch: ${{ inputs.oss_branch }}
+          token:  ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Determine primary JDK for the generator
+        id: jdk
+        if: steps.check-workflows.outputs.any-missing == 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
-          oss_repo="spring-cloud/${{ inputs.oss_repo }}"
-          oss_branch="${{ inputs.oss_branch }}"
-          commercial_project="${{ needs.derive.outputs.commercial_project }}"
-          commercial_branch="${{ needs.derive.outputs.commercial_branch }}"
-
-          missing=false
-          for workflow in "release-train-join.yml" "release-train-ready.yml"; do
-            if gh api "repos/${oss_repo}/contents/.github/workflows/${workflow}?ref=${oss_branch}" --silent 2>/dev/null; then
-              echo "  ✓ ${workflow} present in OSS repo at ${oss_branch}"
-            else
-              echo "  ✗ ${workflow} missing from OSS repo at ${oss_branch}"
-              missing=true
-            fi
-          done
-          echo "needs-generation=${missing}" >> "$GITHUB_OUTPUT"
-
           # Look up the primary JDK for this OSS branch from projects.json.
           project_key="${{ inputs.oss_repo }}"
           oss_branch="${{ inputs.oss_branch }}"
@@ -408,26 +406,15 @@ jobs:
           JSEOF
           )
           echo "primary-jdk=${primary_jdk}" >> "$GITHUB_OUTPUT"
-
-          if [[ "$missing" == "false" ]]; then
-            echo "All required workflows are present — skipping generator."
-          else
-            echo "One or more required workflows are missing — generator will run (primary JDK: ${primary_jdk})."
-          fi
-
-      - name: Checkout spring-cloud-github-actions
-        if: steps.check.outputs.needs-generation == 'true'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.sha || github.sha }}
+          echo "Generator will run with primary JDK ${primary_jdk} for the missing workflow(s): ${{ steps.check-workflows.outputs.missing }}"
 
       - name: Run workflow generator for commercial release branch
-        if: steps.check.outputs.needs-generation == 'true'
+        if: steps.check-workflows.outputs.any-missing == 'true'
         uses: ./.github/actions/generate-workflows-for-branch
         with:
           repo:        ${{ needs.derive.outputs.commercial_repo }}
           branch:      ${{ needs.derive.outputs.commercial_branch }}
-          primary-jdk: ${{ steps.check.outputs.primary-jdk }}
+          primary-jdk: ${{ steps.jdk.outputs.primary-jdk }}
           token:       ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
   # Dispatch release-train-join.yml in the commercial repo and wait for it to

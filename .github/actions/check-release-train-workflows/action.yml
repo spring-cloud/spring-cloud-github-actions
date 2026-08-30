@@ -1,0 +1,81 @@
+name: 'Check Release Train Workflows'
+description: >
+  Checks a branch for the workflow files a release branch needs in order to join
+  a Spring release train, and reports which are missing.  This is the single
+  definition of that file list - callers that generate the missing files and
+  callers that fail on them both read it from here.
+
+inputs:
+  repo:
+    description: 'Full repository path to check (e.g. spring-cloud/spring-cloud-config-commercial)'
+    required: true
+  branch:
+    description: 'Branch to check the workflow files on'
+    required: true
+  token:
+    description: 'GitHub token with read access to the repository'
+    required: true
+  fail-on-missing:
+    description: >
+      Fail the step when a workflow file is missing, rather than only reporting
+      it through the outputs.  Use this where the caller has no way to generate
+      the missing files and wants to stop before doing any other work.
+    required: false
+    default: 'false'
+
+outputs:
+  any-missing:
+    description: "'true' when at least one required workflow file is missing, otherwise 'false'"
+    value: ${{ steps.check.outputs.any-missing }}
+  missing:
+    description: 'Space-separated list of the missing workflow file names (empty when none are missing)'
+    value: ${{ steps.check.outputs.missing }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check for required release train workflows
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN:        ${{ inputs.token }}
+        REPO:            ${{ inputs.repo }}
+        BRANCH:          ${{ inputs.branch }}
+        FAIL_ON_MISSING: ${{ inputs.fail-on-missing }}
+      run: |
+        # The workflows a release branch must carry to join a release train.
+        required_workflows=("release-train-join.yml" "release-train-ready.yml")
+
+        missing=()
+        for workflow in "${required_workflows[@]}"; do
+          if gh api "repos/${REPO}/contents/.github/workflows/${workflow}?ref=${BRANCH}" --silent 2>/dev/null; then
+            echo "  ✓ ${workflow} present in ${REPO} at ${BRANCH}"
+          else
+            echo "  ✗ ${workflow} missing from ${REPO} at ${BRANCH}"
+            missing+=("${workflow}")
+          fi
+        done
+
+        if [[ ${#missing[@]} -eq 0 ]]; then
+          echo "any-missing=false" >> "$GITHUB_OUTPUT"
+          echo "missing=" >> "$GITHUB_OUTPUT"
+          echo "All required release train workflows are present on ${BRANCH}."
+          exit 0
+        fi
+
+        echo "any-missing=true" >> "$GITHUB_OUTPUT"
+        echo "missing=${missing[*]}" >> "$GITHUB_OUTPUT"
+
+        if [[ "$FAIL_ON_MISSING" != "true" ]]; then
+          exit 0
+        fi
+
+        echo
+        echo "ERROR: required release train workflow(s) missing from ${REPO} at ${BRANCH}:"
+        for workflow in "${missing[@]}"; do
+          echo "  - .github/workflows/${workflow}"
+        done
+        echo
+        echo "Run run-github-actions-workflow-generator.yml for ${REPO} on ${BRANCH}"
+        echo "to generate the missing workflow(s), then re-run this workflow."
+        exit 1

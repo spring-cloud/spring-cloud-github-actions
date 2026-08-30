@@ -139,6 +139,19 @@ jobs:
 
           echo "Check passed: ${tag} does not exist in any repo."
 
+      # The release branch inherits its workflows from the source branch, and the
+      # final step of this job dispatches release-train-join.yml on it.  Verify the
+      # release train workflows are on the source branch now, before anything is
+      # created, so a missing file fails fast instead of leaving a half-created
+      # release branch and a projects.json entry to clean up by hand.
+      - name: Verify release train workflows exist on source branch
+        uses: ./.github/actions/check-release-train-workflows
+        with:
+          repo:            spring-cloud/${{ inputs.project }}
+          branch:          ${{ inputs.branch }}
+          token:           ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          fail-on-missing: 'true'
+
       - name: Create milestone in source repo if missing
         uses: ./.github/actions/create-milestone
         with:
