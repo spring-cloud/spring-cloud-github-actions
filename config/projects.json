@@ -2,11 +2,12 @@
   "spring-cloud-kubernetes": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -25,11 +26,12 @@
   "spring-cloud-circuitbreaker": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -48,11 +50,12 @@
   "spring-cloud-task": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -70,11 +73,12 @@
   "spring-cloud-release": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["2025.1.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "2025.1.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -115,11 +119,12 @@
   "spring-cloud-gateway": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -138,11 +143,12 @@
   "spring-cloud-stream": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -233,11 +239,12 @@
   "spring-cloud-bus": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -256,11 +263,12 @@
   "spring-cloud-config": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -279,11 +287,12 @@
   "spring-cloud-netflix": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -301,11 +310,12 @@
   "spring-cloud-openfeign": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -325,11 +335,12 @@
   "spring-cloud-consul": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -348,11 +359,12 @@
   "spring-cloud-zookeeper": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
@@ -370,11 +382,12 @@
   "spring-cloud-vault": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
