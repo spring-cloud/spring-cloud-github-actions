@@ -209,11 +209,12 @@
   "spring-cloud-commons": {
     "oss": {
       "branches": {
-        "scheduled": ["main"],
+        "scheduled": ["5.0.x", "main"],
         "default": ["main"]
       },
       "jdkVersions": {
-        "main": ["17", "21", "25"]
+        "main": ["17", "21", "25"],
+        "5.0.x": ["17", "21", "25"]
       }
     },
     "commercial": {
