@@ -2685,9 +2685,15 @@ jobs:
           // ── a. find the two boards ───────────────────────────────────────────────────
           // By title, which is how every other workflow here resolves a release board (see
           // dependabot-scan). Paged rather than first:100 - the org is past its hundredth project.
+          //
+          // The page cap is a guard against looping forever, not a limit anybody expects to
+          // reach, so hitting it is reported rather than swallowed: a partial listing cannot
+          // tell "no board with this title" from "did not get that far", and this function is
+          // what stands between a re-run and a second board for the same release.
           const boardsByTitle = () => {
             const map = new Map();
             let after = null;
+            let complete = false;
             for (let page = 0; page < 20; page++) {
               const c = graphql(`query($login:String!,$after:String){
                 organization(login:$login){
@@ -2698,14 +2704,21 @@ jobs:
                 }
               }`, { login: ORG, after }).organization.projectsV2;
               for (const n of c.nodes) if (!map.has(n.title)) map.set(n.title, n);
-              if (!c.pageInfo.hasNextPage) break;
+              if (!c.pageInfo.hasNextPage) { complete = true; break; }
               after = c.pageInfo.endCursor;
             }
+            map.complete = complete;
             return map;
           };
 
           console.log(`Looking for boards '${releaseVersion}' and '${nextVersion}' in ${ORG}...`);
           const boards = boardsByTitle();
+          if (!boards.complete) {
+            finish('board-listing-incomplete',
+              `Only ${boards.size} project(s) could be listed for ${ORG} before the page cap was ` +
+              'reached, so whether a board titled ' + `'${nextVersion}' already exists cannot be ` +
+              'established. Nothing was created or changed - raise the cap and re-run.');
+          }
           const oldBoard = boards.get(releaseVersion);
           if (!oldBoard) {
             finish('no-old-board',
@@ -2724,6 +2737,23 @@ jobs:
           } else if (dryRun) {
             console.log(`[dry run] would copy #${oldBoard.number} to a new board titled '${nextVersion}'.`);
           } else {
+            // Listed again immediately before the mutation. The listing above happens before the
+            // teams, fields and items work, which takes minutes on a full train - long enough for
+            // a concurrent run, or someone reading the same release notes, to have made the board
+            // in between. copyProjectV2 will happily create a second one with the same title.
+            const fresh = boardsByTitle();
+            if (!fresh.complete) {
+              finish('board-listing-incomplete',
+                'The project listing could not be completed on the re-check before creating ' +
+                `'${nextVersion}'. Nothing was created.`);
+            }
+            const raced = fresh.get(nextVersion);
+            if (raced) {
+              finish('board-created-elsewhere',
+                `A board titled '${nextVersion}' appeared while this job was running ` +
+                `(#${raced.number} ${raced.url}). Nothing was created - re-run to fill it.`);
+            }
+
             // A copy rather than a fresh project: GitHub carries the views, custom fields,
             // configured workflows and insights across, which is the whole of "modelled after the
             // old one". It does not carry items, collaborators or team links - hence the rest.
@@ -3069,6 +3099,7 @@ jobs:
             // release-board
             done: '✅', 'would-run': '🔎', partial: '⚠️',
             'no-old-board': '❔', 'no-status-field': '❌', 'unknown-columns': '❌',
+            'board-listing-incomplete': '❌', 'board-created-elsewhere': '⚠️',
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
             skipped: '⏭️', 'skipped-by-request': '⏭️',
             'merge-conflict': '❌', 'branch-not-found': '❌',
@@ -3463,6 +3494,8 @@ jobs:
             done: 'rolled over', 'would-run': 'would roll over (dry run)',
             partial: 'PARTLY rolled over', 'no-old-board': 'no board found',
             'no-status-field': 'no column field found', 'unknown-columns': 'columns not found',
+            'board-listing-incomplete': 'COULD NOT LIST the org projects - nothing created',
+            'board-created-elsewhere': 'board appeared while running - nothing created',
             'file-not-found': 'application.yml has moved', 'bom-not-found': 'could not find the bom',
             'no-tag': 'NO TAG - not published',
             'merge-incomplete': 'HELD BACK - the merge back did not land',

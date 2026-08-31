@@ -467,6 +467,13 @@ It runs **after step 4**, because carrying an item over re-milestones it and the
 
 If a board titled with the next version already exists — a re-run, or one made by hand — it is used as-is rather than duplicated.
 
+That check is by **exact title**, deliberately: a train ships `2026.0.0-M1`, then `-M2`, then `-RC1`, then GA, and each of those is its own board, so a board for one is not a board for the next. (Matching a train to a board it merely *belongs* to is a different question, and the [triage](README-dependabot-triage.md) side answers it with `.github/scripts/prerelease-rank.js`.)
+
+Two things guard the check itself, because the only way this job can produce a second board is by creating one while it cannot see the first:
+
+- **A listing that did not finish is fatal.** The org is past its hundredth project, so the boards are paged. If the page cap is reached with more still to come, the job stops with `board-listing-incomplete` and creates nothing — a partial listing cannot tell "no board with this title" from "did not get that far".
+- **The listing is repeated immediately before the copy.** Minutes of teams, fields and items work sit between the first listing and the mutation — long enough for a concurrent run to have made the board. If it appeared in the meantime the job stops with `board-created-elsewhere`; re-run to fill it.
+
 ### Access, and what the API cannot tell us
 
 **`ProjectV2Collaborator` exists in the GraphQL schema only as a mutation input.** Nothing in the API returns a board's collaborators, so the old board's permissions cannot be read back. What *is* readable is `ProjectV2.teams`, the teams a board is linked to — but not what role any of them holds.

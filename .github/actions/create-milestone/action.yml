@@ -22,6 +22,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
       run: |
+        set -uo pipefail
+
         repo="${{ inputs.repo }}"
         version="${{ inputs.version }}"
 
@@ -31,15 +33,46 @@ runs:
         # a single unpaginated page misses two different ways: a closed milestone with this
         # title, and, in the repositories past a hundred milestones, anything after page
         # one. The list comes back sorted by due date ascending, so the newest go last.
-        milestone_number=$(gh api --paginate "repos/${repo}/milestones?state=all&per_page=100" \
-          | jq -r -s --arg title "$version" 'add | .[] | select(.title == $title) | .number')
+        #
+        # The listing is captured and its exit status checked before anything is created.
+        # Piping it straight into jq made a failed lookup - a rate limit, a 5xx, a token
+        # that cannot read the repository - indistinguishable from "no such milestone",
+        # and the only way this action can produce a duplicate is by creating one while
+        # blind. A lookup that did not succeed fails the step instead.
+        if ! listing=$(gh api --paginate "repos/${repo}/milestones?state=all&per_page=100"); then
+          echo "::error::create-milestone: could not list the milestones of ${repo}, so it is not"
+          echo "::error::possible to tell whether '${version}' already exists. Nothing was created."
+          exit 1
+        fi
+
+        # Titles are compared trimmed: a title that differs from the requested version only
+        # by surrounding whitespace is the same milestone to a human, and creating a second
+        # one is not what anybody wants.
+        if ! matches=$(printf '%s' "$listing" \
+          | jq -r -s --arg title "$version" \
+              'add // [] | .[] | select((.title | gsub("^\\s+|\\s+$"; "")) == ($title | gsub("^\\s+|\\s+$"; ""))) | .number'); then
+          echo "::error::create-milestone: could not parse the milestone listing for ${repo}."
+          echo "::error::Nothing was created."
+          exit 1
+        fi
+
+        milestone_number=$(printf '%s' "$matches" | head -n 1)
 
         if [[ -n "$milestone_number" ]]; then
+          count=$(printf '%s' "$matches" | grep -c . || true)
+          if [[ "$count" -gt 1 ]]; then
+            # Nothing here can safely merge them, but silently picking one hides a problem
+            # that only ever gets worse as issues are filed against both.
+            echo "::warning::create-milestone: ${repo} already has ${count} milestones titled '${version}' (#$(printf '%s' "$matches" | tr '\n' ' ')). Nothing was created; merge them by hand."
+          fi
           echo "Milestone '${version}' already exists (#${milestone_number})."
         else
           echo "Milestone '${version}' not found — creating..."
-          gh api "repos/${repo}/milestones" \
+          if ! gh api "repos/${repo}/milestones" \
             --method POST \
-            --field title="$version"
+            --field title="$version"; then
+            echo "::error::create-milestone: could not create milestone '${version}' in ${repo}."
+            exit 1
+          fi
           echo "Milestone '${version}' created in ${repo}."
         fi

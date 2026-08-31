@@ -39,4 +39,7 @@ Or from a reusable action reference:
 
 - The `version` input is used as the milestone **title** exactly as supplied — no `v` prefix is added.
 - Milestones are read with `--paginate` and `state=all`. Both matter: titles are not unique, the default `state=open` hides an already-closed milestone with the same title, and repositories past a hundred milestones return the newest ones on a later page.
+- **A lookup that fails, fails the step.** The listing is captured and its exit status checked before anything is created: a rate limit, a 5xx, or a token that cannot read the repository would otherwise be indistinguishable from "no such milestone", and creating while blind is the only way this action can produce a duplicate.
+- Titles are compared with surrounding whitespace trimmed, so a milestone titled `2026.0.0-M1 ` counts as the existing `2026.0.0-M1` rather than being duplicated.
+- A repository that already has more than one milestone with the requested title gets a warning naming every number. Nothing is created, and nothing here tries to merge them.
 - The token must have write access to the target repository's issues (the `repo` scope on a classic PAT, or `issues: write` on a fine-grained PAT).
