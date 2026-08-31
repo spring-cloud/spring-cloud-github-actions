@@ -120,9 +120,14 @@ spring-cloud-build@main = 5.0.3-SNAPSHOT
   → board "2025.1.3"
 ```
 
-This was validated against all 16 OSS maintained branches: 16/16 resolved to exactly one
-train, with no ambiguity. Because the match is on the exact version string, already-released
-trains left behind in the config cause no false positives.
+This was validated against all 32 OSS maintained branches: 32/32 resolve to a train.
+Because the match is on the exact version string, already-released trains left behind in the
+config cause no false positives. A version claimed by more than one train is resolved to the
+highest of them — see [When two trains claim one version](#when-two-trains-claim-one-version).
+
+Read the project version the way the scan action does — strip the `<parent>` block first,
+then take the first `<version>`. The first `<version>` in a Spring Cloud `pom.xml` is
+normally the `spring-cloud-build` parent, not the project's own version.
 
 #### Commercial fallback
 
@@ -146,10 +151,31 @@ action rather than inline in this workflow. It was inline at first, and
 report and not triage, and triage kept reporting "no train resolved" for a week. Both
 workflows now call the one action.
 
-It cannot cover a branch whose version is in *neither* config. When 2026.0.0 opened,
-`spring-cloud-task` and `spring-cloud-vault` on `5.0.x` were at `5.0.4-SNAPSHOT` while both
-configs recorded `5.0.3-SNAPSHOT` for them, so those two stayed unresolved. That is a
-missing properties entry, not something the report can infer.
+#### When two trains claim one version
+
+The map is keyed by version string, which assumes a version belongs to exactly one train.
+That holds only while every project is re-released in every train. A project that is *not*
+re-released carries the same snapshot version into the next train, and both trains' files
+then claim it:
+
+```
+spring-cloud-task = 5.0.3-SNAPSHOT     (v5.0.3 was never tagged)
+  → 2025_1_3-snapshot.properties (OSS)         claims it for 2025.1.3
+  → 2025_1_4-snapshot.properties (commercial)  claims it for 2025.1.4
+```
+
+**The highest train wins.** A project that missed a release is being developed toward the
+current train, not the one that shipped without it — and the older board is usually closed
+by then, which is the worse place to file a PR. Without the tie-break the first file read
+won, which put `spring-cloud-task`, `spring-cloud-vault`, `spring-cloud-netflix` and
+`spring-cloud-zookeeper` on `5.0.x` (all still `5.0.3-SNAPSHOT`) on the **closed 2025.1.3
+board**.
+
+Trains compare as dotted numbers, so `2025.1.3 < 2025.1.4 < 2026.0.0`. A commercial patch
+train (`2025.1.2.1`) outranks its base on the extra segment, and a suffixed train
+(`2025.1.3-INTERNAL`) loses to the plain train it qualifies. The same rule merges the OSS
+and commercial maps, so a commercial entry displaces an OSS one only when it names a
+strictly newer train for that exact version.
 
 This report only *resolves* the expected board; it does not read board membership, which
 would need the `project` scope the token may not have.
