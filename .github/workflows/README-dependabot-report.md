@@ -177,6 +177,10 @@ train (`2025.1.2.1`) outranks its base on the extra segment, and a suffixed trai
 and commercial maps, so a commercial entry displaces an OSS one only when it names a
 strictly newer train for that exact version.
 
+The resolved train is the board's **base** title, not necessarily its full title: before GA
+the open board is `2026.0.0-M1` or `-RC1`, which triage matches against this base — see
+[Picking the board](README-dependabot-triage.md#picking-the-board).
+
 This report only *resolves* the expected board; it does not read board membership, which
 would need the `project` scope the token may not have.
 

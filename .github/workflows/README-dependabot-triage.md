@@ -35,7 +35,7 @@ For each open Dependabot PR, in order:
 | Action | When | Behaviour |
 |---|---|---|
 | **Milestone** | `milestoneState == unset` | Sets the milestone matching the base branch's version |
-| **Project** | `projectState == resolved` and the PR is not already on the board | Adds it via GraphQL `addProjectV2ItemById` |
+| **Project** | `projectState == resolved` and the PR is not already on the board | Adds it via GraphQL `addProjectV2ItemById` — see [Picking the board](#picking-the-board) |
 | **Rebase** | `state == conflicting` | Comments `@dependabot rebase` — see [Rebase idempotency](#rebase-idempotency) |
 | **Close** | `state == unmaintained` | Comments why, then closes — see [Closing PRs on unmaintained branches](#closing-prs-on-unmaintained-branches) |
 | **Merge** | a green `npm` / `github_actions` PR — see [Merging green dependency PRs](#merging-green-dependency-prs) | Merges with `merge_method` |
@@ -51,6 +51,33 @@ For each open Dependabot PR, in order:
   matters (that branch carries a placeholder `0.0.1-SNAPSHOT` version).
 - **Maven PRs are never merged.** Those change what the projects ship. Only `npm` and
   `github_actions` updates — build and docs tooling — are merged automatically.
+
+## Picking the board
+
+The releaser config names a train by its **GA version** (`2026.0.0`), but a train is not born
+at GA. It ships milestones and release candidates first, so for most of its life the board
+that actually exists is titled `2026.0.0-M1`, then `-M2`, then `-RC1`. Matching the GA title
+literally means every PR against a freshly branched train is skipped with *"no board titled
+2026.0.0"* right up until GA.
+
+So the resolved train is treated as a **base**, and any board titled `<base>`,
+`<base>-M<n>` or `<base>-RC<n>` is a candidate. The match is anchored at both ends —
+`2026.0.0-SNAPSHOT`, `2026.0.01` and `2026.0.0-M1-extra` are not candidates for `2026.0.0`.
+
+Candidates are ranked:
+
+1. **Open before closed.** A milestone's board is closed once it ships, and filing into a
+   closed board hides the PR — worse than not filing at all.
+2. **Later before earlier**: GA > `RC<n>` > `M<n>`, then higher `<n>` first. `M10` beats `M9`;
+   the comparison is numeric, not lexical.
+
+The top candidate wins, so the PR lands on the board the train is currently working toward.
+If every candidate is closed the PR is skipped with `only board for 2026.0.0 is 2026.0.0-M2,
+which is closed` — that needs a human to open the next milestone's board, and silently
+filing into a closed one would hide the PR.
+
+The membership check uses the board actually picked, so a PR already sitting on
+`2026.0.0-M1` is left alone rather than re-added.
 
 ## Merging green dependency PRs
 
@@ -97,6 +124,8 @@ this one not in the list?" rather than leaving it out:
 | `all checks pass but GitHub reports BLOCKED` | Branch protection, usually a required review |
 | `GitHub has not resolved mergeability yet` | Transient; resolves on a later run |
 | `not filed yet - waiting on milestone and project` | Triage has not finished filing it |
+| `no board titled 2026.0.0 or 2026.0.0-M*/-RC*` | The train has no board at all yet |
+| `only board for 2026.0.0 is 2026.0.0-M2, which is closed` | The next milestone's board has not been opened — see [Picking the board](#picking-the-board) |
 | `maven is never auto-merged` | Policy — **dry runs only** |
 
 The last one is deliberately dry-run-only. It can never change for that PR, so it belongs in

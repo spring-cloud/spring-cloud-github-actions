@@ -275,24 +275,58 @@ jobs:
             return milestoneIndex.get(title);
           };
 
-          // ── Project board ids, looked up lazily and cached ──────────────────────────
-          let boardIndex = null;
-          const boardId = title => {
-            if (boardIndex === null) {
-              boardIndex = new Map();
+          // ── Project boards, listed once and cached ──────────────────────────────────
+          let boards = null;
+          const allBoards = () => {
+            if (boards === null) {
+              boards = [];
               const q = `{ organization(login: "${ORG}") { projectsV2(first: 100) ` +
-                `{ nodes { id title } } } }`;
+                `{ nodes { id title closed } } } }`;
               const r = graphql(q);
               if (r.ok) {
-                for (const n of r.body?.data?.organization?.projectsV2?.nodes || []) {
-                  boardIndex.set(n.title, n.id);
-                }
+                boards = (r.body?.data?.organization?.projectsV2?.nodes || [])
+                  .map(n => ({ id: n.id, title: n.title, closed: !!n.closed }));
               } else {
                 errors.push('could not list Projects v2: ' +
                   (r.errors[0]?.message || r.err || 'unknown error'));
               }
             }
-            return boardIndex.get(title);
+            return boards;
+          };
+
+          // The releaser config names a train by its GA version (2026.0.0), but a train is
+          // not born at GA: it ships milestones and release candidates first, and the board
+          // that is actually open is titled 2026.0.0-M1, then -M2, then -RC1. Asking only
+          // for the exact title means every PR against a freshly branched train is skipped
+          // with "no board titled 2026.0.0" until GA, which is most of the train's life.
+          //
+          // So the GA title is a base to match against, not a literal: any board titled
+          // <base> or <base>-M<n> / <base>-RC<n> is a candidate.
+          //
+          // Ranked open-first, because a milestone's board is closed once it ships and
+          // adding to a closed board is worse than adding to none. Within that, later
+          // wins - GA over RC over M, and a higher number over a lower one - so the board
+          // picked is the one the train is currently working toward.
+          const PRERELEASE = /^-(M|RC)(\d+)$/;
+          const boardRank = (title, base) => {
+            if (title === base) return [2, 0];
+            const m = title.startsWith(base) && title.slice(base.length).match(PRERELEASE);
+            if (!m) return null;
+            return [m[1] === 'RC' ? 1 : 0, Number(m[2])];
+          };
+
+          const resolveBoard = base => {
+            const candidates = [];
+            for (const b of allBoards()) {
+              const rank = boardRank(b.title, base);
+              if (rank) candidates.push({ ...b, rank });
+            }
+            if (!candidates.length) return null;
+            candidates.sort((x, y) =>
+              (x.closed - y.closed) ||
+              (y.rank[0] - x.rank[0]) ||
+              (y.rank[1] - x.rank[1]));
+            return candidates[0];
           };
 
           const PR_QUERY = `query($owner:String!,$name:String!,$number:Int!){
@@ -395,30 +429,35 @@ jobs:
                 errors.push(`#${pr.number} project lookup: ${pq.err || 'GraphQL error'}`);
               } else {
                 const node = pq.body?.data?.repository?.pullRequest;
-                const already = (node?.projectItems?.nodes || [])
-                  .some(i => i.project?.title === pr.expectedProject);
+                const board = resolveBoard(pr.expectedProject);
+                // Membership is checked against the board actually picked, not the GA
+                // title, so a PR already sitting on 2026.0.0-M1 is left alone.
+                const already = board && (node?.projectItems?.nodes || [])
+                  .some(i => i.project?.title === board.title);
                 if (already) {
                   projectOk = true;
-                  record(pr, 'project', 'already', pr.expectedProject);
+                  record(pr, 'project', 'already', board.title);
+                } else if (!board) {
+                  record(pr, 'project', 'skipped',
+                    `no board titled ${pr.expectedProject} or ${pr.expectedProject}-M*/-RC*`);
+                } else if (board.closed) {
+                  // Every candidate was closed. Filing into one hides the PR, so this needs
+                  // a human to open the next milestone's board.
+                  record(pr, 'project', 'skipped',
+                    `only board for ${pr.expectedProject} is ${board.title}, which is closed`);
+                } else if (DRY) {
+                  projectOk = true;
+                  record(pr, 'project', 'would', `add to ${board.title}`);
                 } else {
-                  const id = boardId(pr.expectedProject);
-                  if (!id) {
-                    record(pr, 'project', 'skipped',
-                      `no board titled ${pr.expectedProject}`);
-                  } else if (DRY) {
-                    projectOk = true;
-                    record(pr, 'project', 'would', `add to ${pr.expectedProject}`);
-                  } else {
-                    const m = graphql(
-                      `mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,` +
-                      `contentId:$c}){ item { id } } }`,
-                      '-f', `p=${id}`, '-f', `c=${node.id}`);
-                    if (m.ok) { projectOk = true; record(pr, 'project', 'added', pr.expectedProject); }
-                    else {
-                      const msg = m.errors[0]?.message || m.err || 'mutation failed';
-                      record(pr, 'project', 'error', msg);
-                      errors.push(`#${pr.number} project add: ${msg}`);
-                    }
+                  const m = graphql(
+                    `mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,` +
+                    `contentId:$c}){ item { id } } }`,
+                    '-f', `p=${board.id}`, '-f', `c=${node.id}`);
+                  if (m.ok) { projectOk = true; record(pr, 'project', 'added', board.title); }
+                  else {
+                    const msg = m.errors[0]?.message || m.err || 'mutation failed';
+                    record(pr, 'project', 'error', msg);
+                    errors.push(`#${pr.number} project add: ${msg}`);
                   }
                 }
               }
