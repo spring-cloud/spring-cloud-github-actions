@@ -70,7 +70,14 @@ runs:
       run: |
         node - << 'JSEOF'
         const fs = require('fs');
+        const path = require('path');
         const { execFileSync } = require('child_process');
+
+        // The milestone/board pre-release rule, shared with dependabot-triage.yml.
+        // GITHUB_ACTION_PATH is this action's own directory, so the relative path holds
+        // wherever the caller checked the repository out.
+        const { best } = require(
+          path.join(process.env.GITHUB_ACTION_PATH, '..', '..', 'scripts', 'prerelease-rank.js'));
 
         const REPO = process.env.REPO;
         const PROJECT = process.env.PROJECT;
@@ -341,9 +348,9 @@ runs:
           return version;
         };
 
-        // Existing milestone titles, fetched once and reused for every PR in this repo.
+        // Open milestone titles, fetched once and reused for every PR in this repo.
         let milestoneTitles = null;
-        const milestoneExists = title => {
+        const openMilestones = () => {
           if (milestoneTitles === null) {
             // --paginate, with --slurp instead of --jq because gh refuses both together:
             // a repository past a hundred open milestones would otherwise lose the newest
@@ -351,12 +358,22 @@ runs:
             const r = gh(['api', '--paginate', '--slurp',
               `repos/${REPO}/milestones?state=open&per_page=100`]);
             milestoneTitles = r.ok
-              ? new Set(parseJson(r.out, []).flat().map(m => m.title))
-              : new Set();
+              ? parseJson(r.out, []).flat().map(m => m.title)
+              : [];
             if (!r.ok) warnings.push(`could not list milestones: ${r.err}`);
           }
-          return milestoneTitles.has(title);
+          return milestoneTitles;
         };
+
+        // The branch version gives the train's GA number (5.1.0), but a train ships
+        // milestones first, so the milestone that actually exists is 5.1.0-M1, then -M2,
+        // then -RC1. Matching the GA title literally means every PR against a freshly
+        // branched train is reported as "milestone 5.1.0 does not exist" until GA - which
+        // is most of the train's life, and is exactly what happened when 2026.0.0 opened.
+        //
+        // Only open milestones are considered, so a shipped milestone is never chosen; of
+        // what remains the furthest along wins, which is the one being worked toward.
+        const resolveMilestone = base => best(openMilestones(), base);
 
         const scanned = prs.map(pr => {
           const checks = (pr.statusCheckRollup || []).map(normalizeCheck);
@@ -398,11 +415,15 @@ runs:
               milestoneState = 'unresolved';
               projectState = 'unresolved';
             } else {
-              expectedMilestone = version.replace(/-SNAPSHOT$/, '');
+              // Fall back to the bare GA title when nothing matches, so a 'missing'
+              // verdict still names the version it was looking for.
+              const milestoneBase = version.replace(/-SNAPSHOT$/, '');
+              const resolved = resolveMilestone(milestoneBase);
+              expectedMilestone = resolved || milestoneBase;
               const current = pr.milestone?.title || null;
               if (current === expectedMilestone) milestoneState = 'set';
               else if (current) milestoneState = 'mismatch';
-              else if (!milestoneExists(expectedMilestone)) milestoneState = 'missing';
+              else if (!resolved) milestoneState = 'missing';
               else milestoneState = 'unset';
 
               // Boards are OSS-only by design; commercial PRs get a milestone alone.

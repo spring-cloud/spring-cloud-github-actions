@@ -64,6 +64,12 @@ So the resolved train is treated as a **base**, and any board titled `<base>`,
 `<base>-M<n>` or `<base>-RC<n>` is a candidate. The match is anchored at both ends —
 `2026.0.0-SNAPSHOT`, `2026.0.01` and `2026.0.0-M1-extra` are not candidates for `2026.0.0`.
 
+The rule lives in [`.github/scripts/prerelease-rank.js`](../scripts/prerelease-rank.js)
+rather than inline here, because the scan action needs the identical rule for **milestones**
+— `5.1.0-M1` exists while `5.1.0` does not, in the same way and for the same reason. Two
+inline copies of one script is what left triage broken for a week when only the report's
+copy was fixed.
+
 Candidates are ranked:
 
 1. **Open before closed.** A milestone's board is closed once it ships, and filing into a
@@ -123,7 +129,9 @@ this one not in the list?" rather than leaving it out:
 | `conflicts with the base branch` | Needs a rebase — see [Rebase idempotency](#rebase-idempotency) |
 | `all checks pass but GitHub reports BLOCKED` | Branch protection, usually a required review |
 | `GitHub has not resolved mergeability yet` | Transient; resolves on a later run |
-| `not filed yet - waiting on milestone and project` | Triage has not finished filing it |
+| `not filed yet - waiting on milestone 5.0.4, expected 5.1.0-M1 …` | The PR carries the **previous** train's milestone. Triage never overwrites a mismatched milestone, so this needs a human — the reason names both so the row does not read as "has no milestone" |
+| `not filed yet - waiting on milestone 5.1.0-M1 not set` | No milestone yet; triage sets it on this run or the next |
+| `not filed yet - waiting on project` | Triage has not finished filing it |
 | `no board titled 2026.0.0 or 2026.0.0-M*/-RC*` | The train has no board at all yet |
 | `only board for 2026.0.0 is 2026.0.0-M2, which is closed` | The next milestone's board has not been opened — see [Picking the board](#picking-the-board) |
 | `maven is never auto-merged` | Policy — **dry runs only** |

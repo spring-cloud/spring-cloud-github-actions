@@ -100,10 +100,20 @@ workflow has something to act on and the report can flag gaps. PRs on
 they belong to no release train and need neither a milestone nor a board:
 
 - **Milestone** — the base branch's project version with `-SNAPSHOT` stripped (the same
-  string [`post-release.yml`](post-release.yml) creates milestones with). Reported as
-  `set`, `unset` (exists but not applied), `mismatch` (a different one is applied — never
+  string [`post-release.yml`](post-release.yml) creates milestones with), resolved against
+  the repository's **open** milestones by the pre-release rule below. Reported as `set`,
+  `unset` (exists but not applied), `mismatch` (a different one is applied — never
   overwritten, only reported), or `missing` (no such milestone exists, which is the warning
   the design calls for).
+
+  A train ships milestones before GA, so the milestone that exists while `main` is at
+  `5.1.0-SNAPSHOT` is `5.1.0-M1`, not `5.1.0`. Matching `5.1.0` literally reported *every*
+  PR on a freshly branched train as `missing`; the base is now matched against `5.1.0-M1`,
+  `-M2`, `-RC1` and finally `5.1.0` itself, furthest-along first. Only open milestones are
+  candidates, so a shipped one is never chosen. The shared rule lives in
+  [`.github/scripts/prerelease-rank.js`](../scripts/prerelease-rank.js) — triage applies
+  the same rule to project boards, see
+  [Picking the board](README-dependabot-triage.md#picking-the-board).
 - **Project** — OSS only, resolved as below. Commercial PRs get a milestone and no board.
 
 ### Project resolution

@@ -204,7 +204,14 @@ jobs:
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const path = require('path');
           const { execFileSync } = require('child_process');
+
+          // The milestone/board pre-release rule, shared with the dependabot-scan action,
+          // which applies it to milestones. This job checks the repository out, so the
+          // module sits under the workspace.
+          const prerelease = require(path.join(process.env.GITHUB_WORKSPACE,
+            '.github', 'scripts', 'prerelease-rank.js'));
 
           const DRY = process.env.DRY_RUN !== 'false';
           const CLOSE_UNMAINTAINED = process.env.CLOSE_UNMAINTAINED === 'true';
@@ -307,25 +314,16 @@ jobs:
           // adding to a closed board is worse than adding to none. Within that, later
           // wins - GA over RC over M, and a higher number over a lower one - so the board
           // picked is the one the train is currently working toward.
-          const PRERELEASE = /^-(M|RC)(\d+)$/;
-          const boardRank = (title, base) => {
-            if (title === base) return [2, 0];
-            const m = title.startsWith(base) && title.slice(base.length).match(PRERELEASE);
-            if (!m) return null;
-            return [m[1] === 'RC' ? 1 : 0, Number(m[2])];
-          };
-
           const resolveBoard = base => {
             const candidates = [];
             for (const b of allBoards()) {
-              const rank = boardRank(b.title, base);
+              const rank = prerelease.rank(b.title, base);
               if (rank) candidates.push({ ...b, rank });
             }
             if (!candidates.length) return null;
-            candidates.sort((x, y) =>
-              (x.closed - y.closed) ||
-              (y.rank[0] - x.rank[0]) ||
-              (y.rank[1] - x.rank[1]));
+            // Open before closed, then furthest along. The scan applies the same rule to
+            // milestones, minus the closed test - it only ever lists open ones.
+            candidates.sort((x, y) => (x.closed - y.closed) || prerelease.byRankDesc(x, y));
             return candidates[0];
           };
 
@@ -552,7 +550,14 @@ jobs:
             if (pr.isReleaseBranch) {
               const needsProject = pr.projectState !== 'n/a';
               if (!milestoneOk || (needsProject && !projectOk)) {
-                const missing = [!milestoneOk && 'milestone',
+                // Say which milestone is in the way, not just that one is. "waiting on
+                // milestone" reads as "has none" when the usual cause is the opposite - a
+                // PR carrying the previous train's milestone, which triage will not
+                // overwrite, so the row otherwise contradicts the visible PR.
+                const milestoneReason = pr.currentMilestone
+                  ? `milestone is ${pr.currentMilestone}, expected ${pr.expectedMilestone}`
+                  : `milestone ${pr.expectedMilestone} not set`;
+                const missing = [!milestoneOk && milestoneReason,
                   needsProject && !projectOk && 'project'].filter(Boolean).join(' and ');
                 record(pr, 'merge', 'skipped', `not filed yet - waiting on ${missing}`);
                 continue;
