@@ -821,6 +821,11 @@ Google Chat report on failing update jobs and PR states) and
 adds OSS PRs to the release train's Project board, comments `@dependabot rebase` on conflicts,
 closes PRs on retired branches, merges green `npm`/`github_actions` PRs — never Maven).
 
+Both also share [`releaser-map`](../.github/actions/releaser-map/), which resolves a PR's base
+branch to its release train. It is a shared action for a reason: the two workflows each carried
+their own copy of the script, and a fix to the report's copy left triage reporting "no train
+resolved" for a week.
+
 See [DESIGN-dependabot-automation.md](../DESIGN-dependabot-automation.md) for the reasoning.
 
 ### Fleet maintenance

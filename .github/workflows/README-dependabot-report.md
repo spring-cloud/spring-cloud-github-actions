@@ -10,11 +10,13 @@ targeting a branch that is no longer maintained.
 1. **`setup`** expands [`config/projects.json`](../../config/projects.json) into one matrix
    entry per repository (not per branch — Dependabot PRs are listed repo-wide, so fanning
    out per branch would fetch the same list several times).
-2. **`releaser-map`** reads the `jenkins-releaser-config` branch of `spring-cloud-release`
-   and `spring-cloud-release-commercial` once, building a `{type: {project: {version:
-   train}}}` map, then gap-fills the OSS side from the commercial side, and shares the
-   result with the scan jobs as an artifact. This is what resolves which GitHub Project a
-   PR belongs to — see [Project resolution](#project-resolution).
+2. **`releaser-map`** runs the shared
+   [`releaser-map`](../actions/releaser-map/action.yml) action, which reads the
+   `jenkins-releaser-config` branch of `spring-cloud-release` and
+   `spring-cloud-release-commercial` once, builds a `{type: {project: {version: train}}}`
+   map, and gap-fills the OSS side from the commercial side. The job shares the result
+   with the scan jobs as an artifact. This is what resolves which GitHub Project a PR
+   belongs to — see [Project resolution](#project-resolution).
 3. **`scan`** runs the [`dependabot-scan`](../actions/dependabot-scan/action.yml) action
    per repository and uploads its JSON result.
 4. **`summary`** merges every result into a job-summary table plus detail sections, and
@@ -137,6 +139,17 @@ OSS mapping is never overwritten. Commercial-only trains are skipped — titles 
 `2025.1.2.1` and `2025.1.3-INTERNAL` have no OSS board, so only plain `YYYY.N.N` trains are
 adopted. Their version keys (`5.0.2.1-SNAPSHOT`, `5.0.3-INTERNAL-SNAPSHOT`) cannot collide
 with an OSS branch version anyway.
+
+The fallback lives in the shared [`releaser-map`](../actions/releaser-map/action.yml)
+action rather than inline in this workflow. It was inline at first, and
+`dependabot-triage.yml` carried its own copy of the same script — so the fix reached the
+report and not triage, and triage kept reporting "no train resolved" for a week. Both
+workflows now call the one action.
+
+It cannot cover a branch whose version is in *neither* config. When 2026.0.0 opened,
+`spring-cloud-task` and `spring-cloud-vault` on `5.0.x` were at `5.0.4-SNAPSHOT` while both
+configs recorded `5.0.3-SNAPSHOT` for them, so those two stayed unresolved. That is a
+missing properties entry, not something the report can infer.
 
 This report only *resolves* the expected board; it does not read board membership, which
 would need the `project` scope the token may not have.

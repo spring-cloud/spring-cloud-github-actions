@@ -126,107 +126,13 @@ jobs:
     name: Build Releaser Map
     runs-on: ubuntu-latest
     steps:
-      # Resolving a PR's GitHub Project means mapping its base-branch version to a
-      # release train via the *-snapshot.properties files on the jenkins-releaser-config
-      # branch of spring-cloud-release. That branch is the same for every repository, so
-      # it is read once here and shared with the scan jobs as an artifact rather than
-      # re-fetched ~35 times.
-      #
-      # The OSS map is then gap-filled from spring-cloud-release-commercial's copy of the
-      # same branch. Commercial is where a train's snapshot file lands.
-      - name: Read jenkins-releaser-config
-        env:
-          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-        run: |
-          node - << 'JSEOF'
-          const fs = require('fs');
-          const { execFileSync } = require('child_process');
+      - name: Checkout
+        uses: actions/checkout@v4
 
-          const gh = args => {
-            try {
-              return execFileSync('gh', args,
-                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 });
-            } catch (err) {
-              console.log(`  gh failed: ${(err.stderr || err.message || '').split('\n')[0]}`);
-              return null;
-            }
-          };
-
-          const SOURCES = {
-            oss: 'spring-cloud/spring-cloud-release',
-            commercial: 'spring-cloud/spring-cloud-release-commercial',
-          };
-
-          // Reads one repository's jenkins-releaser-config branch into
-          // {project: {version: train}}. Returns null if the branch cannot be listed at
-          // all, so a missing fallback source is distinguishable from an empty one.
-          const readMap = (label, repo) => {
-            const listing = gh(['api', `repos/${repo}/contents/?ref=jenkins-releaser-config`]);
-            if (!listing) {
-              console.log(`${label}: could not list jenkins-releaser-config on ${repo}`);
-              return null;
-            }
-            const files = JSON.parse(listing)
-              .map(f => f.name)
-              .filter(n => n.endsWith('-snapshot.properties'));
-
-            const map = {};
-            for (const name of files) {
-              const raw = gh(['api',
-                `repos/${repo}/contents/${name}?ref=jenkins-releaser-config`, '--jq', '.content']);
-              if (!raw) continue;
-              const body = Buffer.from(raw.trim(), 'base64').toString('utf8');
-
-              const versions = {};
-              for (const line of body.split('\n')) {
-                const m = line.match(/^releaser\.fixed-versions\[(.+?)\]=(.+)$/);
-                if (m) versions[m[1]] = m[2].trim();
-              }
-
-              // The train is this file's spring-cloud-release version, which is also the
-              // title of the org-level GitHub Project board.
-              const train = (versions['spring-cloud-release'] || '').replace(/-SNAPSHOT$/, '');
-              if (!train) continue;
-
-              for (const [project, version] of Object.entries(versions)) {
-                map[project] = map[project] || {};
-                map[project][version] = train;
-              }
-            }
-            console.log(`${label}: ${files.length} snapshot file(s), ` +
-              `${Object.keys(map).length} project(s) mapped`);
-            return map;
-          };
-
-          const out = {};
-          for (const [type, repo] of Object.entries(SOURCES)) {
-            out[type] = readMap(type, repo) || {};
-          }
-
-          // Gap-fill the OSS map from the commercial one. Only versions the OSS files do
-          // not already carry are taken, so an authoritative OSS mapping is never
-          // overwritten by the fallback.
-          //
-          // Commercial-only trains are skipped: their titles (2025.1.2.1,
-          // 2025.1.3-INTERNAL) have no OSS project board, so adopting one would turn
-          // "could not resolve project" into a confident pointer at a board that does not
-          // exist. Only plain YYYY.N.N trains are boards on the OSS side.
-          const OSS_TRAIN = /^\d{4}\.\d+\.\d+$/;
-          let filled = 0;
-          for (const [project, versions] of Object.entries(out.commercial || {})) {
-            for (const [version, train] of Object.entries(versions)) {
-              if (!OSS_TRAIN.test(train)) continue;
-              out.oss[project] = out.oss[project] || {};
-              if (out.oss[project][version]) continue;
-              out.oss[project][version] = train;
-              filled++;
-              console.log(`  oss gap-filled from commercial: ${project} ${version} -> ${train}`);
-            }
-          }
-          console.log(`oss: ${filled} version(s) gap-filled from commercial`);
-
-          fs.writeFileSync('releaser-maps.json', JSON.stringify(out, null, 2));
-          JSEOF
+      - name: Build releaser map
+        uses: ./.github/actions/releaser-map
+        with:
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Upload releaser map
         uses: actions/upload-artifact@v4

@@ -16,8 +16,11 @@ re-run with `dry_run` unchecked.
 
 1. **`setup`** expands [`config/projects.json`](../../config/projects.json) into one matrix
    entry per repository.
-2. **`releaser-map`** reads the `jenkins-releaser-config` branch once and shares it as an
-   artifact — same as the report.
+2. **`releaser-map`** runs the shared
+   [`releaser-map`](../actions/releaser-map/action.yml) action and shares its output as an
+   artifact — the identical job the report runs, calling the identical action, so a PR can
+   never resolve to one train in the report and another here. See
+   [Project resolution](README-dependabot-report.md#project-resolution).
 3. **`triage`** runs the shared [`dependabot-scan`](../actions/dependabot-scan/action.yml)
    action per repository, then applies the three actions below.
 4. **`summary`** merges the per-repo results into one job-summary table.
