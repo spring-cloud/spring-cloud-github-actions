@@ -17,6 +17,7 @@ the seams are.
 - [The OSS release, end to end](#the-oss-release-end-to-end)
 - [The commercial release, and how it differs](#the-commercial-release-and-how-it-differs)
 - [Hotfixes](#hotfixes)
+- [Which actions each workflow uses](#which-actions-each-workflow-uses)
 - [Everything else this repo runs](#everything-else-this-repo-runs)
 - [This repository's own versioning](#this-repositorys-own-versioning)
 - [Conventions](#conventions)
@@ -341,9 +342,9 @@ uses. They do not interfere.
 4. **`new-milestones`** — open the next milestone per project
 5. **`merge-back-and-update`** — merge the commercial `release/<version>` back into the OSS `.x`
    branch, bump to next-snapshot versions, push, comment `@dependabot recreate` on superseded PRs
-6. **`milestones-and-releases`** — close the release milestone
-   ([`close-milestone`](../.github/actions/close-milestone/), which moves any still-open issues
-   forward so they are not stranded), publish the GitHub Release with generated notes
+6. **`milestones-and-releases`** — close the release milestone (inline, via a `gh api ... --method
+   PATCH --field state=closed` call rather than the `close-milestone` action) and publish the
+   GitHub Release with generated notes
 7. **`website-pr`** — PR against `spring-io/spring-website-content`: blog post and
    `documentation.json`
 8. **`start-site-pr`** — PR against `spring-io/start.spring.io` bumping the Initializr's Spring
@@ -656,6 +657,114 @@ to control what it stamps:
 Step 6 is gated on `!cancelled()` rather than on the merge-back job specifically
 ([`post-release.yml:1187-1190`](../.github/workflows/post-release.yml)) — a plain `needs:`
 would make it skip along with the merge-back, leaving a hotfix run doing nothing at all.
+
+---
+
+## Which actions each workflow uses
+
+The release workflows are thin: almost everything they do is a composite action from
+[`.github/actions/`](../.github/actions/). This is the map of which workflow calls what, and why.
+
+### `create-oss-release-branch.yml`
+
+| Job | Action | What it does here |
+|---|---|---|
+| `init-internal-branch` | [`add-commercial-release-files`](../.github/actions/add-commercial-release-files/) | Writes `ci-release.yml` and `release-ci-settings.xml` onto the `-internal` branch |
+| `init-internal-branch` | [`update-projects-json`](../.github/actions/update-projects-json/) | Registers the `-internal` branch, with `remove-oss-branch: false` |
+| `init-internal-branch` | [`update-project-versions`](../.github/actions/update-project-versions/) | Stamps `-INTERNAL-SNAPSHOT` from the train's internal properties file |
+| `update-release-branch` | [`add-commercial-release-files`](../.github/actions/add-commercial-release-files/) | Re-targets `ci-release.yml` at `release/<version>` |
+| `create-milestone` | [`create-milestone`](../.github/actions/create-milestone/) | Opens the milestone — in the **OSS** repo |
+| `ensure-workflows` | [`check-release-train-workflows`](../.github/actions/check-release-train-workflows/) | Reports which release-train workflows are missing |
+| `ensure-workflows` | [`generate-workflows-for-branch`](../.github/actions/generate-workflows-for-branch/) | Runs the external generator when any are |
+
+### `create-commercial-release-branch.yml`
+
+| Job | Action | What it does here |
+|---|---|---|
+| `join-release-train` | [`is-commercial-repo`](../.github/actions/is-commercial-repo/) | Gates the whole run, and yields `base-repo-name` for the OSS tag check |
+| `join-release-train` | [`check-release-train-workflows`](../.github/actions/check-release-train-workflows/) | `fail-on-missing: 'true'`, before anything is created |
+| `join-release-train` | [`create-milestone`](../.github/actions/create-milestone/) | Opens the milestone — in the **commercial** repo |
+| `join-release-train` | [`update-oss-workflows-to-commercial`](../.github/actions/update-oss-workflows-to-commercial/) | Rewrites `ci.yml` / `pr.yml` on the release branch |
+| `join-release-train` | [`update-projects-json`](../.github/actions/update-projects-json/) | Registers `release/<version>` |
+
+Note what is absent: no `update-project-versions`. This path stamps nothing — versions stay as
+they are until readiness.
+
+### `create-hotfix-release-branch.yml`
+
+| Job | Action | What it does here |
+|---|---|---|
+| `initialize` | *calls* [`initialize-commercial-branch.yml`](../.github/workflows/initialize-commercial-branch.yml) | The whole commercial-setup chain — see below |
+| `update-versions` | [`update-project-versions`](../.github/actions/update-project-versions/) | First pass: dependency versions from a release train, when `release_train_version` is given |
+| `update-versions` | [`update-project-versions`](../.github/actions/update-project-versions/) | Second pass: stamps the hotfix project version, always |
+| `create-milestone` | [`create-milestone`](../.github/actions/create-milestone/) | Opens the milestone — in the **commercial** repo |
+| `ensure-workflows` | [`check-release-train-workflows`](../.github/actions/check-release-train-workflows/) | Reports which release-train workflows are missing |
+| `ensure-workflows` | [`generate-workflows-for-branch`](../.github/actions/generate-workflows-for-branch/) | Runs the external generator when any are |
+
+The `initialize` job pulls in a second workflow, which runs nine actions of its own in order —
+[`create-commercial-branch`](../.github/actions/create-commercial-branch/) (orphan branch),
+[`copy-settings-xml`](../.github/actions/copy-settings-xml/),
+[`update-oss-workflows-to-commercial`](../.github/actions/update-oss-workflows-to-commercial/),
+[`update-license-headers`](../.github/actions/update-license-headers/),
+[`update-commercial-repositories`](../.github/actions/update-commercial-repositories/),
+[`update-distribution-management`](../.github/actions/update-distribution-management/),
+[`update-antora-playbook`](../.github/actions/update-antora-playbook/),
+[`copy-dependabot-config`](../.github/actions/copy-dependabot-config/) and
+[`update-projects-json`](../.github/actions/update-projects-json/). That chain is why a hotfix branch arrives
+fully converted to commercial form despite being cut from an OSS tag.
+
+### `release-train-ready.yml`
+
+One action does everything:
+[`spring-release-train-project-ready`](../.github/actions/spring-release-train-project-ready/), which is itself a
+composite calling three more — [`update-project-versions`](../.github/actions/update-project-versions/) to stamp
+the final numbers, [`verify-no-snapshot-versions`](../.github/actions/verify-no-snapshot-versions/) as the gate,
+and [`update-antora-playbook`](../.github/actions/update-antora-playbook/) to drop the release branch from the
+playbook.
+
+### `post-release.yml`
+
+| Job | Action | What it does here |
+|---|---|---|
+| `new-milestones` | [`create-milestone`](../.github/actions/create-milestone/) | Opens the next snapshot version's milestone |
+| `merge-back-and-update` | [`update-project-versions`](../.github/actions/update-project-versions/) | Bumps `.x` to the next snapshots after the merge |
+
+Everything else in `post-release` — tag verification, closing milestones, publishing releases,
+the website and start.spring.io PRs, the project board — is inline `gh` and `github-script`, not
+composite actions. Note in particular that it closes milestones with a direct
+`gh api ... --method PATCH --field state=closed`; the
+[`close-milestone`](../.github/actions/close-milestone/) action, which migrates still-open issues forward, is
+used only by this repository's own release workflow.
+
+### Supporting release workflows
+
+| Workflow | Job | Actions |
+|---|---|---|
+| [`setup-next-release-train.yml`](../.github/workflows/README-setup-next-release-train.md) | `prepare` | [`retarget-branch-triggers`](../.github/actions/retarget-branch-triggers/), [`add-dependabot-branch-entries`](../.github/actions/add-dependabot-branch-entries/), [`update-project-versions`](../.github/actions/update-project-versions/), [`create-milestone`](../.github/actions/create-milestone/) |
+| | `register-branches` | [`add-branches-projects-json`](../.github/actions/add-branches-projects-json/) |
+| [`update-versions.yml`](../.github/workflows/README-update-versions.md) | `update` | [`update-project-versions`](../.github/actions/update-project-versions/) |
+| [`lock-unlock-branches.yml`](../.github/workflows/README-lock-branches.md) | — | None — pure `gh api` ruleset calls |
+
+### The load-bearing few
+
+Two actions carry most of the release:
+
+- **[`update-project-versions`](../.github/actions/update-project-versions/)** is called directly by five
+  workflows — `create-oss-release-branch`, `create-hotfix-release-branch` (twice),
+  `setup-next-release-train`, `update-versions` and `post-release` — and a sixth time indirectly,
+  inside `spring-release-train-project-ready`. Every version this automation writes goes through
+  it.
+- **[`create-milestone`](../.github/actions/create-milestone/)** is called by all five release-path workflows
+  (plus this repo's own release workflow), and is the one action whose *target repository*
+  differs by release type: the OSS repo for an OSS release, the commercial repo for a commercial
+  release or a hotfix.
+
+Two more are worth knowing because they are shared in a way that is easy to miss:
+[`add-commercial-release-files`](../.github/actions/add-commercial-release-files/) internally calls
+[`resolve-actions-ref`](../.github/actions/resolve-actions-ref/) so the `ci-release.yml` it writes is pinned to a
+released SHA rather than `main`, and
+[`check-release-train-workflows`](../.github/actions/check-release-train-workflows/) is the single definition of
+which release-train workflow files a branch needs, shared by all three branch-creation paths.
 
 ---
 
