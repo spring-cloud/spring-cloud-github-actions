@@ -1,0 +1,79 @@
+Subject: [PATCH] Emit the Broadcom copyright symbol and fix -present stripping
+
+Two changes to LicenseMigration:
+
+1. Emit "Copyright (c) <year> Broadcom Inc." rather than "Copyright <year> Broadcom Inc.".
+   spring-cloud's deployed commercial checkstyle-header.txt requires the symbol:
+
+     ^\Q * Copyright (c) \E20\d\d\Q Broadcom Inc. and/or its subsidiaries. ...\E$
+
+   Without it, RegexpHeaderCheck fails for every migrated .java and .groovy file in
+   every spring-cloud project, because the header is inherited from the
+   spring-cloud-build-commercial dependency rather than living in the project repo.
+
+2. Strip "\-present" before "-present" in yearExpressionWithoutPresentSuffix. The
+   spring-cloud header token is "\E20\d\d\-present\Q"; removing the bare string
+   "-present" leaves "\E20\d\d\\Q", a dangling backslash that makes the generated
+   Broadcom line unmatchable. This only bites repositories that actually contain a
+   checkstyle-header.txt (for spring-cloud, that is spring-cloud-build itself).
+
+Verified: with this patch, running `spd migrate-license` over spring-cloud-build's OSS
+checkstyle-header.txt reproduces the deployed spring-cloud-build-commercial file
+byte-for-byte, and migrated spring-cloud-commons sources pass RegexpHeaderCheck against
+the live commercial header.
+
+(The literal symbol is used in the code; it is spelled "(c)" in this message only to keep
+the patch header ASCII.)
+---
+diff --git a/spring-devkit-cli/src/main/java/io/spring/devkit/cli/step/LicenseMigration.java b/spring-devkit-cli/src/main/java/io/spring/devkit/cli/step/LicenseMigration.java
+index 7aa3f24..04b6441 100644
+--- a/spring-devkit-cli/src/main/java/io/spring/devkit/cli/step/LicenseMigration.java
++++ b/spring-devkit-cli/src/main/java/io/spring/devkit/cli/step/LicenseMigration.java
+@@ -104,7 +104,7 @@ public class LicenseMigration {
+ 			Matcher matcher = LicensePatterns.IDEA_COPYRIGHT_APACHE_HEADER.matcher(content);
+ 			if (matcher.find()) {
+ 				String year = matcher.group(1);
+-				String replacement = "Copyright " + year
++				String replacement = "Copyright © " + year
+ 						+ " Broadcom Inc. and/or its subsidiaries. All Rights Reserved.&#10;" + "Copyright " + year
+ 						+ "-present the original author or authors.";
+ 				String newContent = matcher.replaceFirst(Matcher.quoteReplacement(replacement));
+@@ -284,7 +284,7 @@ public class LicenseMigration {
+ 				return null;
+ 			}
+ 			String year = headerMatcher.group(1);
+-			String replacement = "/*\n" + " * Copyright " + year
++			String replacement = "/*\n" + " * Copyright © " + year
+ 					+ " Broadcom Inc. and/or its subsidiaries. All Rights Reserved.\n" + " * Copyright " + year
+ 					+ "-present the original author or authors.\n" + " */\n";
+ 			return replaceFirst(blockMatcher, content, replacement);
+@@ -325,7 +325,7 @@ public class LicenseMigration {
+ 				return null;
+ 			}
+ 			String year = matcher.group(1);
+-			String replacement = "# Copyright " + year
++			String replacement = "# Copyright © " + year
+ 					+ " Broadcom Inc. and/or its subsidiaries. All Rights Reserved.\n" + "# Copyright " + year
+ 					+ "-present the original author or authors.\n";
+ 			return replaceFirst(matcher, content, replacement);
+@@ -402,17 +402,17 @@ public class LicenseMigration {
+ 		}
+ 
+ 		private static String yearExpressionWithoutPresentSuffix(String token) {
+-			return token.replace("-present", "");
++			return token.replace("\\-present", "").replace("-present", "");
+ 		}
+ 
+ 		private static String plainHeader(String token) {
+-			return "/*\n" + " * Copyright " + yearExpressionWithoutPresentSuffix(token)
++			return "/*\n" + " * Copyright © " + yearExpressionWithoutPresentSuffix(token)
+ 					+ " Broadcom Inc. and/or its subsidiaries. All Rights Reserved.\n" + " * Copyright " + token
+ 					+ " the original author or authors.\n" + " */\n";
+ 		}
+ 
+ 		private static String escapedHeader(String token) {
+-			return "^\\Q/*\\E$\n" + "^\\Q * Copyright " + yearExpressionWithoutPresentSuffix(token)
++			return "^\\Q/*\\E$\n" + "^\\Q * Copyright © " + yearExpressionWithoutPresentSuffix(token)
+ 					+ " Broadcom Inc. and/or its subsidiaries. All Rights Reserved.\\E$\n" + "^\\Q * Copyright " + token
+ 					+ " the original author or authors.\\E$\n" + "^\\Q */\\E$";
+ 		}

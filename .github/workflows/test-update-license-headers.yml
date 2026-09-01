@@ -1,0 +1,190 @@
+name: Test - Update License Headers
+
+# Unit tests for the action, plus an integration test of the two-step license
+# conversion: `spd migrate-license` first, then update-license-headers for the
+# residue. The integration test's main job is to prove the two tools partition the
+# tree with no overlap and no gaps.
+
+on:
+  push:
+    paths:
+      - '.github/actions/update-license-headers/**'
+      - '.github/workflows/test-update-license-headers.yml'
+  pull_request:
+    paths:
+      - '.github/actions/update-license-headers/**'
+      - '.github/workflows/test-update-license-headers.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/update-license-headers
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/actions/update-license-headers/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run unit tests
+        run: npm test
+
+  integration-test:
+    name: Integration Test (devkit + residue)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create test repository
+        run: |
+          repo="${RUNNER_TEMP}/license-fixture"
+          mkdir -p "$repo/src/main/java" "$repo/src/main/resources" "$repo/scripts"
+
+          apache_block() {
+            cat <<'EOF'
+          /*
+           * Copyright 2019-2023 the original author or authors.
+           *
+           * Licensed under the Apache License, Version 2.0 (the "License");
+           * you may not use this file except in compliance with the License.
+           * You may obtain a copy of the License at
+           *
+           *      https://www.apache.org/licenses/LICENSE-2.0
+           *
+           * Unless required by applicable law or agreed to in writing, software
+           * distributed under the License is distributed on an "AS IS" BASIS,
+           * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+           * See the License for the specific language governing permissions and
+           * limitations under the License.
+           */
+          EOF
+          }
+
+          # devkit-owned
+          { apache_block; echo 'public class Foo {}'; } > "$repo/src/main/java/Foo.java"
+          cat > "$repo/src/main/resources/app.properties" <<'EOF'
+          # Copyright 2019-2023 the original author or authors.
+          #
+          # Licensed under the Apache License, Version 2.0 (the "License");
+          # you may not use this file except in compliance with the License.
+          # You may obtain a copy of the License at
+          #
+          #      https://www.apache.org/licenses/LICENSE-2.0
+          #
+          # Unless required by applicable law or agreed to in writing, software
+          # distributed under the License is distributed on an "AS IS" BASIS,
+          # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+          # See the License for the specific language governing permissions and
+          # limitations under the License.
+          foo=bar
+          EOF
+
+          # residue, owned by update-license-headers
+          { apache_block; echo 'module.exports = {};'; } > "$repo/scripts/tool.js"
+          cat > "$repo/src/main/resources/app.yml" <<'EOF'
+          # Copyright 2019-2023 the original author or authors.
+          # Licensed under the Apache License, Version 2.0 (the "License");
+          spring:
+            application:
+              name: demo
+          EOF
+          cat > "$repo/pom.xml" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!--
+            Copyright 2019-2023 the original author or authors.
+
+            Licensed under the Apache License, Version 2.0 (the "License");
+            you may not use this file except in compliance with the License.
+          -->
+          <project>
+          	<artifactId>demo</artifactId>
+          	<licenses>
+          		<license>
+          			<name>Apache License, Version 2.0</name>
+          			<comments>Licensed under the Apache License, Version 2.0</comments>
+          		</license>
+          	</licenses>
+          </project>
+          EOF
+
+          git -C "$repo" init -q
+          git -C "$repo" config user.email test@example.com
+          git -C "$repo" config user.name Test
+          git -C "$repo" config commit.gpgsign false
+          git -C "$repo" add -A
+          git -C "$repo" commit -qm init
+
+      - name: Build devkit CLI
+        id: devkit
+        uses: ./.github/actions/devkit-cli
+        with:
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          patches: config/devkit-patches
+
+      # The fixture always has files devkit owns, so this must succeed outright.
+      # Anything else — including the ambiguous exit 1 — is a real failure here.
+      - name: Run spd migrate-license
+        env:
+          SPD_JAR: ${{ steps.devkit.outputs.cli-jar }}
+        run: java -jar "$SPD_JAR" migrate-license "${RUNNER_TEMP}/license-fixture"
+
+      - name: Snapshot what devkit changed
+        run: |
+          cd "${RUNNER_TEMP}/license-fixture"
+          git diff --name-only > "${RUNNER_TEMP}/devkit-touched.txt"
+          echo "devkit touched:"; cat "${RUNNER_TEMP}/devkit-touched.txt"
+
+      - name: Run update-license-headers on the residue
+        uses: ./.github/actions/update-license-headers
+        with:
+          directory: ${{ runner.temp }}/license-fixture
+
+      - name: Assert the split is clean
+        run: |
+          cd "${RUNNER_TEMP}/license-fixture"
+
+          fail() { echo "ASSERTION FAILED: $*"; exit 1; }
+
+          # 1. Nothing Apache-licensed survives anywhere.
+          if grep -rq "Licensed under the Apache License" . --exclude-dir=.git; then
+            echo "Files still carrying an Apache header:"
+            grep -rl "Licensed under the Apache License" . --exclude-dir=.git
+            fail "Apache headers remain"
+          fi
+
+          # 2. devkit owns Java and .properties, and preserves the original year.
+          grep -q '^ \* Copyright © 2019 Broadcom Inc\.' src/main/java/Foo.java \
+            || fail "Foo.java not migrated by devkit with preserved year (got: $(sed -n 2p src/main/java/Foo.java))"
+          grep -q '^# Copyright © 2019 Broadcom Inc\.' src/main/resources/app.properties \
+            || fail "app.properties not migrated by devkit"
+
+          # 3. The residue is ours.
+          grep -q 'Broadcom Inc\.' pom.xml        || fail "pom.xml not migrated"
+          grep -q 'Broadcom Inc\.' scripts/tool.js || fail "tool.js not migrated"
+          grep -q 'Broadcom Inc\.' src/main/resources/app.yml || fail "app.yml not migrated"
+          grep -q '<comments>' pom.xml            || fail "pom <licenses> block not rewritten"
+
+          # 4. No double-processing: our action must not have rewritten devkit's files,
+          #    which would replace the preserved year with the hardcoded 2012.
+          # `cmd && fail` would abort under `bash -e` when cmd exits non-zero, which is
+          # the PASSING case here, so these must be written as explicit ifs.
+          if grep -q '2012' src/main/java/Foo.java; then
+            fail "update-license-headers clobbered a devkit-owned .java"
+          fi
+          if grep -q '2012' src/main/resources/app.properties; then
+            fail "update-license-headers clobbered a devkit-owned .properties"
+          fi
+
+          echo "License split verified: devkit and update-license-headers partitioned the tree cleanly."

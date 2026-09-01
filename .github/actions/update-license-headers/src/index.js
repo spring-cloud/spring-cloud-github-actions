@@ -6,15 +6,21 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// ── Constants ───────────────────────────────────────────────────────────────
+// ── Scope ────────────────────────────────────────────────────────────────────
+//
+// This action handles the part of the Apache 2.0 -> Broadcom license conversion
+// that `spd migrate-license` (spring-io/spring-devkit) does NOT cover:
+//
+//   * XML-family comment headers (.xml, .html, .svg, ...) and the Maven
+//     <licenses> block
+//   * hash-style headers (.yml, .sh, .py, ...)
+//   * block-comment headers in languages devkit ignores (.js, .ts, .c, .go, ...)
+//
+// Java/Kotlin/Groovy/Gradle sources, .properties files, LICENSE files,
+// checkstyle-header.txt and .idea/copyright profiles are owned by devkit and are
+// deliberately NOT touched here. See ./README.md.
 
-const CHECKSTYLE_HEADER =
-  '^\\Q/*\\E$\n' +
-  '^\\Q * Copyright © \\E20\\d\\d\\Q Broadcom Inc. and/or its subsidiaries. All Rights Reserved.\\E$\n' +
-  '^\\Q * Copyright \\E20\\d\\d\\-present\\Q the original author or authors.\\E$\n' +
-  '^\\Q */\\E$\n' +
-  '^$\n' +
-  '^.*$\n';
+// ── Constants ───────────────────────────────────────────────────────────────
 
 const COPYRIGHT_LINES = [
   'Copyright © 2012 Broadcom Inc. and/or its subsidiaries. All Rights Reserved.',
@@ -25,18 +31,21 @@ const BLOCK_HEADER = '/*\n' + COPYRIGHT_LINES.map(l => ` * ${l}\n`).join('') + '
 const XML_HEADER   = '<!--\n' + COPYRIGHT_LINES.map(l => `  ${l}\n`).join('') + '-->';
 const HASH_HEADER  = COPYRIGHT_LINES.map(l => `# ${l}`).join('\n');
 
+// .java/.kt/.kts/.groovy are intentionally absent — devkit owns those, and .kts
+// covers .gradle.kts.
 const BLOCK_EXTS = new Set([
-  '.java', '.js', '.mjs', '.ts', '.tsx', '.jsx',
-  '.groovy', '.kt', '.kts', '.scala',
+  '.js', '.mjs', '.ts', '.tsx', '.jsx',
+  '.scala',
   '.c', '.cpp', '.cc', '.h', '.hpp', '.cs', '.go', '.swift',
 ]);
 const XML_EXTS = new Set([
   '.xml', '.html', '.htm', '.xsl', '.xsd', '.wsdl',
   '.fxml', '.xhtml', '.svg', '.pom',
 ]);
+// .properties is intentionally absent — devkit owns it.
 const HASH_EXTS = new Set([
   '.py', '.sh', '.bash', '.zsh',
-  '.yaml', '.yml', '.properties',
+  '.yaml', '.yml',
   '.rb', '.pl', '.tf', '.toml',
 ]);
 
@@ -46,33 +55,6 @@ const SKIP_DIRS = new Set([
 ]);
 
 const APACHE_MARKER = 'Licensed under the Apache License';
-
-// ── Checkstyle header update ─────────────────────────────────────────────────
-
-/**
- * Updates every checkstyle-header.txt found under root with the Broadcom pattern.
- * Returns the number of files changed.
- */
-function updateCheckstyleHeaders(root) {
-  let changed = 0;
-  walkDir(root, (filePath, fname) => {
-    if (fname !== 'checkstyle-header.txt') return;
-    try {
-      const current = fs.readFileSync(filePath, 'utf-8');
-      if (current === CHECKSTYLE_HEADER) {
-        core.info(`  Already up to date: ${filePath}`);
-        return;
-      }
-      fs.writeFileSync(filePath, CHECKSTYLE_HEADER, 'utf-8');
-      core.info(`  Updated: ${filePath}`);
-      changed++;
-    } catch (e) {
-      core.warning(`  Cannot process ${filePath}: ${e.message}`);
-    }
-  });
-  core.info(`\nUpdated checkstyle headers in ${changed} file(s).`);
-  return changed;
-}
 
 // ── License header replacement ───────────────────────────────────────────────
 
@@ -227,94 +209,103 @@ function escapeRegex(str) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/**
+ * In-place mode: the caller has already checked out the tree and takes care of
+ * committing and pushing. Used by initialize-commercial-branch.yml, which runs
+ * `spd migrate-license` over the same clone first.
+ */
+async function runInDirectory(directory) {
+  core.info('=== Update License Headers ===');
+  core.info(`Directory: ${directory}`);
+  core.info('');
+
+  if (!fs.existsSync(directory)) {
+    throw new Error(`Directory '${directory}' does not exist.`);
+  }
+
+  core.info('Scanning for Apache License headers...');
+  const changed = updateLicenseHeaders(directory);
+  core.setOutput('files-changed', String(changed));
+  core.info(`Left the working tree in place — the caller is responsible for committing.`);
+}
+
+/**
+ * Standalone mode: clone the branch, rewrite headers, commit and push.
+ */
+async function runOnBranch({ repository, branch, token, commitMsg, gitName, gitEmail }) {
+  core.info('=== Update License Headers ===');
+  core.info(`Repository: ${repository}`);
+  core.info(`Branch:     ${branch}`);
+  core.info('');
+
+  const repoDir = path.join(os.tmpdir(), '_license_repo');
+  if (fs.existsSync(repoDir)) {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+
+  await exec.exec('git', [
+    'clone', '--single-branch', '--branch', branch,
+    `https://x-access-token:${token}@github.com/${repository}.git`,
+    repoDir,
+  ]);
+
+  await exec.exec('git', ['-C', repoDir, 'config', 'user.name', gitName]);
+  await exec.exec('git', ['-C', repoDir, 'config', 'user.email', gitEmail]);
+
+  core.info('Scanning for Apache License headers...');
+  const changed = updateLicenseHeaders(repoDir);
+  core.setOutput('files-changed', String(changed));
+
+  await exec.exec('git', ['-C', repoDir, 'add', '.']);
+
+  const licenseDiff = await exec.exec(
+    'git', ['-C', repoDir, 'diff', '--cached', '--quiet'],
+    { ignoreReturnCode: true }
+  );
+  if (licenseDiff === 0) {
+    core.info('No license changes to commit.');
+    return;
+  }
+
+  await exec.exec('git', ['-C', repoDir, 'commit', '-m', commitMsg]);
+  await exec.exec('git', ['-C', repoDir, 'push', 'origin', branch]);
+
+  core.info('');
+  core.info(`License updates committed to '${branch}'.`);
+}
+
 async function run() {
   try {
-    const repository = core.getInput('repository', { required: true });
-    const branch     = core.getInput('branch', { required: true });
-    const token      = core.getInput('token', { required: true });
-    const commitMsg  = core.getInput('commit-message') || 'Updating license headers';
-    const gitName    = core.getInput('git-user-name')  || 'Spring Builds';
-    const gitEmail   = core.getInput('git-user-email') || 'svc.spring-builds@broadcom.com';
-    core.setSecret(token);
-
-    core.info('=== Update License Headers ===');
-    core.info(`Repository: ${repository}`);
-    core.info(`Branch:     ${branch}`);
-    core.info('');
-
-    const repoDir = path.join(os.tmpdir(), '_license_repo');
-    if (fs.existsSync(repoDir)) {
-      fs.rmSync(repoDir, { recursive: true, force: true });
-    }
-
-    await exec.exec('git', [
-      'clone', '--single-branch', '--branch', branch,
-      `https://x-access-token:${token}@github.com/${repository}.git`,
-      repoDir,
-    ]);
-
-    await exec.exec('git', ['-C', repoDir, 'config', 'user.name', gitName]);
-    await exec.exec('git', ['-C', repoDir, 'config', 'user.email', gitEmail]);
-
-    // Step 1: Update checkstyle-header.txt files — committed separately
-    core.info('Scanning for checkstyle-header.txt files...');
-    updateCheckstyleHeaders(repoDir);
-
-    await exec.exec('git', ['-C', repoDir, 'add', '.']);
-    const checkstyleDiff = await exec.exec(
-      'git', ['-C', repoDir, 'diff', '--cached', '--quiet'],
-      { ignoreReturnCode: true }
-    );
-    if (checkstyleDiff !== 0) {
-      await exec.exec('git', ['-C', repoDir, 'commit', '-m', 'Updating checkstyle header']);
-      core.info('Checkstyle header committed.');
-    } else {
-      core.info('No checkstyle header changes to commit.');
-    }
-
-    // Step 2: Replace Apache License 2.0 headers across all source files
-    core.info('Scanning for Apache License headers...');
-    updateLicenseHeaders(repoDir);
-
-    // Step 3: Replace LICENSE / LICENSE.txt with the Broadcom license file
-    const licenseSrc = path.join(__dirname, '..', 'LICENSE.txt');
-    for (const licenseFile of ['LICENSE', 'LICENSE.txt']) {
-      const dest = path.join(repoDir, licenseFile);
-      if (fs.existsSync(dest)) {
-        core.info(`Replacing ${licenseFile} with Broadcom license...`);
-        fs.copyFileSync(licenseSrc, dest);
-      }
-    }
-
-    await exec.exec('git', ['-C', repoDir, 'add', '.']);
-
-    const licenseDiff = await exec.exec(
-      'git', ['-C', repoDir, 'diff', '--cached', '--quiet'],
-      { ignoreReturnCode: true }
-    );
-    if (licenseDiff === 0) {
-      core.info('No license changes to commit.');
+    const directory = core.getInput('directory');
+    if (directory) {
+      await runInDirectory(directory);
       return;
     }
 
-    await exec.exec('git', ['-C', repoDir, 'commit', '-m', commitMsg]);
-    await exec.exec('git', ['-C', repoDir, 'push', 'origin', branch]);
+    const repository = core.getInput('repository', { required: true });
+    const branch     = core.getInput('branch', { required: true });
+    const token      = core.getInput('token', { required: true });
+    core.setSecret(token);
 
-    core.info('');
-    core.info(`License updates committed to '${branch}'.`);
+    await runOnBranch({
+      repository,
+      branch,
+      token,
+      commitMsg: core.getInput('commit-message') || 'Updating license headers',
+      gitName:   core.getInput('git-user-name')  || 'Spring Builds',
+      gitEmail:  core.getInput('git-user-email') || 'svc.spring-builds@broadcom.com',
+    });
   } catch (err) {
     core.setFailed(`Action failed: ${err.message}`);
   }
 }
 
 module.exports = {
-  updateCheckstyleHeaders,
   processLicenseFile,
   updateLicenseHeaders,
   replacePomLicenses,
   replaceXmlHeader,
   replaceHashHeader,
-  CHECKSTYLE_HEADER,
   BLOCK_HEADER,
   XML_HEADER,
   HASH_HEADER,

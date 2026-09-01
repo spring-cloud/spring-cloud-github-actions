@@ -1,0 +1,213 @@
+name: 'Spring Devkit CLI'
+description: >
+  Builds the spring-devkit CLI (spd) from source and makes the resulting JAR available to
+  the caller. Optionally runs a single spd command. The built JAR is cached per commit so
+  repeat runs skip Gradle entirely.
+
+inputs:
+  repository:
+    description: >
+      Repository to build the CLI from. Override to point at a fork when trying out a
+      change to devkit before it is merged upstream.
+    required: false
+    default: 'spring-io/spring-devkit'
+  ref:
+    description: 'Git ref of the devkit repository to build (branch, tag or SHA)'
+    required: false
+    default: 'main'
+  token:
+    description: >
+      GitHub token with read access to the devkit repository. spring-io/spring-devkit is
+      internal, so the default GITHUB_TOKEN is not sufficient — pass GH_ACTIONS_REPO_TOKEN.
+    required: true
+  patches:
+    description: >
+      Path, relative to the calling repository's workspace, to a directory of *.patch
+      files (or a single patch file) to apply to the devkit checkout before building.
+      Use this to try a change that is on its way upstream without maintaining a fork.
+      The build fails if a patch no longer applies.
+    required: false
+    default: ''
+  args:
+    description: >
+      Arguments to pass to spd (e.g. "migrate-license /path/to/repo"). When empty the
+      action only builds the CLI and reports its location via the cli-jar output.
+    required: false
+    default: ''
+  working-directory:
+    description: 'Directory to run spd from. Only used when args is supplied.'
+    required: false
+    default: ''
+
+outputs:
+  cli-jar:
+    description: 'Absolute path to the built spring-devkit-cli.jar'
+    value: ${{ steps.build.outputs.cli-jar }}
+  sha:
+    description: 'Commit SHA of the devkit repository that was built'
+    value: ${{ steps.checkout.outputs.commit }}
+  patched:
+    description: "'true' if local patches were applied to the devkit sources"
+    value: ${{ steps.patch-id.outputs.patched }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check out devkit sources
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        path: _devkit_src
+
+    # Inputs are read through env rather than interpolated into the script: `${{ }}`
+    # is substituted textually before bash sees it, so a caller-supplied value could
+    # otherwise inject shell commands.
+    - name: Resolve devkit commit
+      id: checkout
+      shell: bash
+      env:
+        DEVKIT_REPOSITORY: ${{ inputs.repository }}
+        DEVKIT_REF: ${{ inputs.ref }}
+      run: |
+        commit="$(git -C _devkit_src rev-parse HEAD)"
+        echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+        echo "${DEVKIT_REPOSITORY} ref '${DEVKIT_REF}' resolves to ${commit}"
+        {
+          echo "### Spring Devkit CLI"
+          echo ""
+          echo "Built from \`${DEVKIT_REPOSITORY}@${commit}\` (ref \`${DEVKIT_REF}\`)."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # Fingerprint the patches BEFORE the cache lookup, so that editing, adding or
+    # removing a patch produces a different key and cannot reuse a stale JAR.
+    - name: Fingerprint patches
+      id: patch-id
+      shell: bash
+      env:
+        DEVKIT_PATCHES: ${{ inputs.patches }}
+      run: |
+        if [[ -z "${DEVKIT_PATCHES}" ]]; then
+          echo "patched=false" >> "$GITHUB_OUTPUT"
+          echo "fingerprint=none" >> "$GITHUB_OUTPUT"
+          echo "No patches requested; building devkit as-is."
+          exit 0
+        fi
+        target="${GITHUB_WORKSPACE}/${DEVKIT_PATCHES}"
+        if [[ -d "$target" ]]; then
+          mapfile -t files < <(find "$target" -maxdepth 1 -name '*.patch' -type f | sort)
+        elif [[ -f "$target" ]]; then
+          files=("$target")
+        else
+          echo "ERROR: patches path '${DEVKIT_PATCHES}' not found at ${target}."
+          exit 1
+        fi
+        if [[ ${#files[@]} -eq 0 ]]; then
+          echo "ERROR: no *.patch files found in ${target}."
+          exit 1
+        fi
+        fingerprint="$(cat "${files[@]}" | sha256sum | cut -c1-16)"
+        {
+          echo "patched=true"
+          echo "fingerprint=${fingerprint}"
+        } >> "$GITHUB_OUTPUT"
+        printf 'Will apply %d patch(es), fingerprint %s:\n' "${#files[@]}" "$fingerprint"
+        printf '  %s\n' "${files[@]##*/}"
+
+    # The JAR is a pure function of the devkit commit plus any patches applied.
+    - name: Restore cached CLI
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: _devkit_src/spring-devkit-cli/build/libs
+        key: spring-devkit-cli-${{ steps.checkout.outputs.commit }}-${{ steps.patch-id.outputs.fingerprint }}
+
+    # Only needed on a cache miss: a cache hit already contains the patched build.
+    - name: Apply patches
+      if: steps.cache.outputs.cache-hit != 'true' && steps.patch-id.outputs.patched == 'true'
+      shell: bash
+      working-directory: _devkit_src
+      env:
+        DEVKIT_PATCHES: ${{ inputs.patches }}
+      run: |
+        target="${GITHUB_WORKSPACE}/${DEVKIT_PATCHES}"
+        if [[ -d "$target" ]]; then
+          mapfile -t files < <(find "$target" -maxdepth 1 -name '*.patch' -type f | sort)
+        else
+          files=("$target")
+        fi
+        for f in "${files[@]}"; do
+          echo "Applying ${f##*/}..."
+          # --3way gives a useful conflict report when upstream has moved; failing here
+          # is the intended signal that the patch needs rebasing or dropping.
+          if ! git apply --3way --verbose "$f"; then
+            echo "::error::Patch ${f##*/} does not apply to this devkit checkout. Rebase or remove it."
+            exit 1
+          fi
+        done
+        echo "Applied ${#files[@]} patch(es)."
+        {
+          echo "> Built with ${#files[@]} local patch(es) applied: ${files[*]##*/}"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # spring-devkit's .sdkmanrc pins Java 25 and its wrapper pins Gradle 9.x.
+    - name: Set up Java 25
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/setup-java@v4
+      with:
+        distribution: liberica
+        java-version: '25'
+
+    - name: Set up Gradle
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: gradle/actions/setup-gradle@v4
+
+    - name: Build CLI
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: _devkit_src
+      run: ./gradlew --no-daemon :spring-devkit-cli:bootJar
+
+    # Java is needed to *run* spd even when the build was skipped by a cache hit.
+    - name: Set up Java 25 for running spd
+      if: steps.cache.outputs.cache-hit == 'true'
+      uses: actions/setup-java@v4
+      with:
+        distribution: liberica
+        java-version: '25'
+
+    - name: Locate CLI
+      id: build
+      shell: bash
+      run: |
+        # bootJar pins the name via archiveFileName in spring-devkit-cli/build.gradle.
+        jar="${GITHUB_WORKSPACE}/_devkit_src/spring-devkit-cli/build/libs/spring-devkit-cli.jar"
+        if [[ ! -f "$jar" ]]; then
+          echo "ERROR: expected CLI JAR at ${jar} but it was not produced."
+          ls -la "$(dirname "$jar")" || true
+          exit 1
+        fi
+        echo "cli-jar=${jar}" >> "$GITHUB_OUTPUT"
+        echo "Spring Devkit CLI available at ${jar}"
+        java -jar "$jar" --version
+
+    - name: Run spd
+      if: ${{ inputs.args != '' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory || github.workspace }}
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        SPD_JAR: ${{ steps.build.outputs.cli-jar }}
+        SPD_ARGS: ${{ inputs.args }}
+      run: |
+        # SPD_ARGS is deliberately word-split into separate arguments; it is read from
+        # env so the Actions templating engine cannot introduce new shell tokens.
+        # Callers needing an argument with spaces should invoke the jar themselves
+        # using the cli-jar output.
+        # shellcheck disable=SC2086
+        java -jar "$SPD_JAR" $SPD_ARGS
+
+branding:
+  icon: 'terminal'
+  color: 'green'

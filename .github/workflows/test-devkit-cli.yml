@@ -1,0 +1,134 @@
+name: Test - Devkit CLI
+
+# Exercises the devkit-cli action end to end: checking out the internal
+# spring-io/spring-devkit repo, applying the patches in config/devkit-patches,
+# building the CLI and running it. This is the workflow that catches patch drift
+# — if a patch stops applying because devkit main moved, this fails.
+
+on:
+  push:
+    paths:
+      - '.github/actions/devkit-cli/**'
+      - '.github/workflows/test-devkit-cli.yml'
+      - 'config/devkit-patches/**'
+  pull_request:
+    paths:
+      - '.github/actions/devkit-cli/**'
+      - '.github/workflows/test-devkit-cli.yml'
+      - 'config/devkit-patches/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-unpatched:
+    name: Build (no patches)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build devkit CLI
+        id: devkit
+        uses: ./.github/actions/devkit-cli
+        with:
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Assert CLI runs and is unpatched
+        env:
+          SPD_JAR: ${{ steps.devkit.outputs.cli-jar }}
+          PATCHED: ${{ steps.devkit.outputs.patched }}
+        run: |
+          java -jar "$SPD_JAR" --version
+          java -jar "$SPD_JAR" help migrate-license > /dev/null
+          [[ "$PATCHED" == "false" ]] || { echo "expected patched=false, got '$PATCHED'"; exit 1; }
+          echo "Unpatched build OK (devkit @ ${{ steps.devkit.outputs.sha }})"
+
+  build-patched:
+    name: Build (config/devkit-patches applied)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build devkit CLI with patches
+        id: devkit
+        uses: ./.github/actions/devkit-cli
+        with:
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          patches: config/devkit-patches
+
+      - name: Assert patches were applied
+        env:
+          PATCHED: ${{ steps.devkit.outputs.patched }}
+        run: |
+          [[ "$PATCHED" == "true" ]] || { echo "expected patched=true, got '$PATCHED'"; exit 1; }
+          echo "Patched build OK (devkit @ ${{ steps.devkit.outputs.sha }})"
+
+      # The whole point of 0001-broadcom-copyright-symbol.patch: migrated sources must
+      # carry the © that spring-cloud-build-commercial's checkstyle-header.txt requires.
+      - name: Assert the copyright symbol reaches migrated source
+        env:
+          SPD_JAR: ${{ steps.devkit.outputs.cli-jar }}
+        run: |
+          repo="${RUNNER_TEMP}/patch-check"
+          mkdir -p "$repo"
+          cat > "$repo/A.java" <<'EOF'
+          /*
+           * Copyright 2012-present the original author or authors.
+           *
+           * Licensed under the Apache License, Version 2.0 (the "License");
+           * you may not use this file except in compliance with the License.
+           * You may obtain a copy of the License at
+           *
+           *      https://www.apache.org/licenses/LICENSE-2.0
+           *
+           * Unless required by applicable law or agreed to in writing, software
+           * distributed under the License is distributed on an "AS IS" BASIS,
+           * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+           * See the License for the specific language governing permissions and
+           * limitations under the License.
+           */
+          public class A {}
+          EOF
+          git -C "$repo" init -q
+          git -C "$repo" config user.email test@example.com
+          git -C "$repo" config user.name Test
+          git -C "$repo" config commit.gpgsign false
+          git -C "$repo" add -A
+          git -C "$repo" commit -qm init
+          java -jar "$SPD_JAR" migrate-license "$repo" || true
+
+          expected=' * Copyright © 2012 Broadcom Inc. and/or its subsidiaries. All Rights Reserved.'
+          actual="$(sed -n '2p' "$repo/A.java")"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Patch did not take effect."
+            echo "  expected: $expected"
+            echo "  actual:   $actual"
+            exit 1
+          fi
+          echo "Copyright symbol present in migrated source."
+
+      # Mirrors spring-cloud-build-commercial's checkstyle-header.txt. If devkit's
+      # output stops satisfying this, every migrated project fails Checkstyle.
+      - name: Assert migrated source satisfies the commercial checkstyle header
+        run: |
+          cat > "${RUNNER_TEMP}/checkstyle-header.txt" <<'EOF'
+          ^\Q/*\E$
+          ^\Q * Copyright © \E20\d\d\Q Broadcom Inc. and/or its subsidiaries. All Rights Reserved.\E$
+          ^\Q * Copyright \E20\d\d\-present\Q the original author or authors.\E$
+          ^\Q */\E$
+          EOF
+          python3 - "${RUNNER_TEMP}/checkstyle-header.txt" "${RUNNER_TEMP}/patch-check/A.java" <<'PY'
+          import re, sys, pathlib
+          hdr = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          src = pathlib.Path(sys.argv[2]).read_text().splitlines()
+          failed = False
+          for i, h in enumerate(hdr):
+              pattern = re.sub(r'\\Q(.*?)\\E', lambda m: re.escape(m.group(1)), h)
+              if not re.search(pattern, src[i]):
+                  failed = True
+                  print(f"line {i+1} FAIL\n  header: {h}\n  source: {src[i]}")
+          if failed:
+              raise SystemExit("RegexpHeaderCheck would fail on migrated sources")
+          print("All header lines match — Checkstyle would pass")
+          PY

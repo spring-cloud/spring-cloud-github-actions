@@ -1,29 +1,47 @@
 name: 'Update License Headers'
-description: 'Replaces Apache License 2.0 headers with the Broadcom license header and replaces the LICENSE / LICENSE.txt file'
+description: >
+  Replaces Apache License 2.0 headers with the Broadcom license header in the file types
+  that `spd migrate-license` (spring-io/spring-devkit) does not cover — XML-family
+  comments, the Maven <licenses> block, hash-style headers, and block comments in
+  languages devkit ignores.
 author: 'Spring Cloud Team'
 
 inputs:
+  directory:
+    description: >
+      Path to an already checked-out working tree to update in place. When set, the
+      action does not clone, commit or push — the caller owns those. Takes precedence
+      over repository/branch/token.
+    required: false
+    default: ''
   repository:
-    description: 'Commercial repository to update (format: org/repo-name)'
-    required: true
+    description: 'Commercial repository to update (format: org/repo-name). Required unless directory is set.'
+    required: false
+    default: ''
   branch:
-    description: 'Branch to update'
-    required: true
+    description: 'Branch to update. Required unless directory is set.'
+    required: false
+    default: ''
   token:
-    description: 'GitHub token with contents: write permission on the repository'
-    required: true
+    description: 'GitHub token with contents: write permission on the repository. Required unless directory is set.'
+    required: false
+    default: ''
   commit-message:
-    description: 'Commit message for the license updates'
+    description: 'Commit message for the license updates. Unused when directory is set.'
     required: false
     default: 'Updating license headers [skip actions]'
   git-user-name:
-    description: 'Git author name for the commit'
+    description: 'Git author name for the commit. Unused when directory is set.'
     required: false
     default: 'Spring Builds'
   git-user-email:
-    description: 'Git author email for the commit'
+    description: 'Git author email for the commit. Unused when directory is set.'
     required: false
     default: 'svc.spring-builds@broadcom.com'
+
+outputs:
+  files-changed:
+    description: 'Number of files whose license header was rewritten'
 
 runs:
   using: node20

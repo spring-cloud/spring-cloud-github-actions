@@ -108,12 +108,84 @@ jobs:
           branch: ${{ steps.create-branch.outputs.commercial-branch }}
           token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
-      - name: Update license headers
+      # License conversion is split in two. `spd migrate-license` owns the source
+      # types it understands (Java/Kotlin/Groovy/Gradle, .properties, LICENSE files,
+      # checkstyle-header.txt, .idea/copyright) and preserves each file's original
+      # copyright year. update-license-headers then handles the residue devkit does
+      # not cover (XML, the Maven <licenses> block, YAML/shell/etc.). Both operate on
+      # the same clone, which is committed and pushed once at the end.
+      - name: Clone commercial branch for license migration
+        shell: bash
+        env:
+          TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          COMMERCIAL_REPO: ${{ inputs.commercial_repo }}
+          COMMERCIAL_BRANCH: ${{ steps.create-branch.outputs.commercial-branch }}
+        run: |
+          rm -rf "${RUNNER_TEMP}/_license_repo"
+          git clone --single-branch --branch "${COMMERCIAL_BRANCH}" \
+            "https://x-access-token:${TOKEN}@github.com/${COMMERCIAL_REPO}.git" \
+            "${RUNNER_TEMP}/_license_repo"
+          git -C "${RUNNER_TEMP}/_license_repo" config user.name  "Spring Builds"
+          git -C "${RUNNER_TEMP}/_license_repo" config user.email "svc.spring-builds@broadcom.com"
+
+      # config/devkit-patches carries changes on their way upstream — currently the
+      # Broadcom copyright symbol that spring-cloud's commercial checkstyle-header.txt
+      # requires. Remove the input once those land in a devkit release.
+      - name: Build Spring Devkit CLI
+        id: devkit
+        uses: ./.github/actions/devkit-cli
+        with:
+          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          patches: config/devkit-patches
+
+      # `spd migrate-license` makes its own "Migrate to Broadcom license" commit.
+      # It exits 1 both when it matched nothing (benign — a branch may legitimately
+      # have no Apache-licensed files devkit owns) AND on a genuine failure such as a
+      # git error, so the exit code alone cannot distinguish them. Match on the
+      # message instead, and fail on anything else.
+      - name: Migrate license with spring-devkit
+        shell: bash
+        env:
+          SPD_JAR: ${{ steps.devkit.outputs.cli-jar }}
+        run: |
+          set +e
+          output="$(java -jar "${SPD_JAR}" migrate-license "${RUNNER_TEMP}/_license_repo" 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          if [[ $status -eq 0 ]]; then
+            exit 0
+          fi
+          if [[ $status -eq 1 ]] && grep -qF 'No file with Apache 2.0 license found' <<<"$output"; then
+            echo "::warning::spd migrate-license found no Apache 2.0 licensed files it owns; continuing."
+            exit 0
+          fi
+          echo "::error::spd migrate-license failed with exit code ${status}."
+          exit $status
+
+      - name: Update license headers devkit does not cover
         uses: ./.github/actions/update-license-headers
         with:
-          repository: ${{ inputs.commercial_repo }}
-          branch: ${{ steps.create-branch.outputs.commercial-branch }}
-          token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          directory: ${{ runner.temp }}/_license_repo
+
+      - name: Commit and push license changes
+        shell: bash
+        working-directory: ${{ runner.temp }}/_license_repo
+        env:
+          COMMERCIAL_BRANCH: ${{ steps.create-branch.outputs.commercial-branch }}
+        run: |
+          git add .
+          if ! git diff --cached --quiet; then
+            git commit -m "Updating license headers [skip actions]"
+          fi
+          # spd migrate-license may already have committed on its own, so push
+          # whenever the branch is ahead of its remote.
+          if [[ -n "$(git log '@{u}..HEAD' --oneline)" ]]; then
+            git push origin "${COMMERCIAL_BRANCH}"
+            echo "License updates pushed."
+          else
+            echo "No license changes to push."
+          fi
 
       - name: Update repositories to commercial Broadcom repositories
         uses: ./.github/actions/update-commercial-repositories

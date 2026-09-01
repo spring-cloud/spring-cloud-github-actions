@@ -5,7 +5,6 @@ jest.mock('@actions/exec');
 
 const core = require('@actions/core');
 const {
-  CHECKSTYLE_HEADER,
   BLOCK_HEADER,
   XML_HEADER,
   HASH_HEADER,
@@ -31,11 +30,6 @@ beforeEach(() => {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 describe('constants', () => {
-  test('CHECKSTYLE_HEADER contains Broadcom copyright pattern', () => {
-    expect(CHECKSTYLE_HEADER).toContain('Broadcom');
-    expect(CHECKSTYLE_HEADER).toMatch(/\\Q \* Copyright/);
-  });
-
   test('BLOCK_HEADER contains both copyright lines', () => {
     expect(BLOCK_HEADER).toContain('Broadcom Inc.');
     expect(BLOCK_HEADER).toContain('original author or authors');
@@ -165,16 +159,16 @@ describe('processLicenseFile', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('updates a .java file with Apache block comment', () => {
+  test('updates a .js file with Apache block comment', () => {
     const content = `/*
  * Copyright 2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  */
-package com.example;
+module.exports = {};
 `;
-    const filePath = path.join(tmpDir, 'Foo.java');
+    const filePath = path.join(tmpDir, 'foo.js');
     fs.writeFileSync(filePath, content);
     expect(processLicenseFile(filePath)).toBe(true);
     const updated = fs.readFileSync(filePath, 'utf-8');
@@ -196,8 +190,8 @@ spring:
   });
 
   test('skips files without Apache marker', () => {
-    const content = `/*\n * No license here.\n */\npublic class Foo {}\n`;
-    const filePath = path.join(tmpDir, 'Foo.java');
+    const content = `/*\n * No license here.\n */\nmodule.exports = {};\n`;
+    const filePath = path.join(tmpDir, 'foo.js');
     fs.writeFileSync(filePath, content);
     expect(processLicenseFile(filePath)).toBe(false);
   });
@@ -206,5 +200,49 @@ spring:
     const filePath = path.join(tmpDir, 'config.conf');
     fs.writeFileSync(filePath, 'Licensed under the Apache License');
     expect(processLicenseFile(filePath)).toBe(false);
+  });
+});
+
+// ── devkit-owned file types ──────────────────────────────────────────────────
+//
+// These are migrated by `spd migrate-license`, so this action must leave them
+// alone rather than rewriting them with a hardcoded copyright year.
+
+describe('files owned by spd migrate-license', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-devkit-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const APACHE_BLOCK = `/*
+ * Copyright 2020 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ */
+`;
+
+  test.each([
+    ['Foo.java', APACHE_BLOCK],
+    ['Foo.kt', APACHE_BLOCK],
+    ['build.gradle.kts', APACHE_BLOCK],
+    ['Foo.groovy', APACHE_BLOCK],
+  ])('leaves %s untouched', (name, content) => {
+    const filePath = path.join(tmpDir, name);
+    fs.writeFileSync(filePath, content);
+    expect(processLicenseFile(filePath)).toBe(false);
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(content);
+  });
+
+  test('leaves .properties untouched', () => {
+    const content = '# Licensed under the Apache License, Version 2.0\nfoo=bar\n';
+    const filePath = path.join(tmpDir, 'app.properties');
+    fs.writeFileSync(filePath, content);
+    expect(processLicenseFile(filePath)).toBe(false);
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(content);
   });
 });
