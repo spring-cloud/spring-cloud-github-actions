@@ -264,103 +264,19 @@ jobs:
           persist-credentials: false
 
       # ── resolve the branch to work on ────────────────────────────────────────────────
+      # The branch is always derived from the version in the properties file - there is no
+      # input to override it. Between the .x derivation and the main fallback the action
+      # makes, every branch this workflow targets is covered: the only names in projects.json
+      # that are not <major>.<minor>.x are main, and the -internal branches, which are rebased
+      # from the OSS branches this updates and so are never targeted here.
       - name: Resolve target branch
         id: branch
-        env:
-          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-          REPO: ${{ matrix.repo }}
-          VERSION: ${{ matrix.version }}
-          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
-        run: |
-          node - << 'JSEOF'
-          const fs = require('fs');
-          const { execFileSync } = require('child_process');
-
-          const repo = process.env.REPO;
-          const version = process.env.VERSION;
-          const commercial = process.env.COMMERCIAL === 'true';
-
-          const out = process.env.GITHUB_OUTPUT;
-          const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
-          const stop = (status, message) => {
-            console.log(message);
-            emit('status', status);
-            emit('branch', '');
-            process.exit(0);
-          };
-
-          const branchExists = branch => {
-            try {
-              execFileSync('gh', ['api', `repos/${repo}/branches/${branch}`, '--jq', '.name'],
-                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-              return true;
-            } catch (err) { return false; }
-          };
-
-          // The branch is always derived from the version in the properties file - there is no
-          // input to override it. Between the .x derivation and the main fallback below, every
-          // branch this workflow targets is covered: the only names in projects.json that are
-          // not <major>.<minor>.x are main, and the -internal branches, which are rebased from
-          // the OSS branches this updates and so are never targeted here.
-          //
-          // Drop the last segment and append .x. Works for both lines: OSS 5.0.4-SNAPSHOT ->
-          // 5.0.x, and 3-part commercial 4.2.9-SNAPSHOT -> 4.2.x.
-          const plain = version.replace(/-SNAPSHOT$/, '');
-          const parts = plain.split('.');
-          const target = parts.slice(0, -1).join('.') + '.x';
-
-          if (branchExists(target)) {
-            console.log(`Target branch: ${target}`);
-            emit('status', 'ok');
-            emit('branch', target);
-            process.exit(0);
-          }
-
-          // Commercial repos have no main branch at all - spring-cloud-config-commercial's
-          // default is 4.3.x - so there is no sane fallback to make.
-          if (commercial) {
-            stop('branch-not-found',
-              `ERROR: ${repo} has no ${target} branch, and commercial repos have no main to ` +
-              'fall back to. Skipping this project.');
-          }
-
-          if (!branchExists('main')) {
-            stop('branch-not-found', `ERROR: ${repo} has neither ${target} nor main.`);
-          }
-
-          // Falling back to main is only safe if main really is the line this version belongs
-          // to - otherwise we would bump an unrelated major.minor to these versions.
-          const expected = parts.slice(0, 2).join('.');
-          let pom;
-          try {
-            const b64 = execFileSync('gh', ['api',
-              `repos/${repo}/contents/pom.xml?ref=main`, '--jq', '.content'],
-              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-            pom = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
-          } catch (err) {
-            stop('branch-not-found', `ERROR: no ${target} branch and could not read pom.xml on main.`);
-          }
-
-          // The root <version> is the project's own; fall back to <parent><version> when the
-          // root pom inherits it.
-          const withoutParent = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
-          let m = withoutParent.match(/<version>([^<]+)<\/version>/);
-          if (!m) {
-            const parent = pom.match(/<parent>[\s\S]*?<\/parent>/);
-            if (parent) m = parent[0].match(/<version>([^<]+)<\/version>/);
-          }
-          const pomVersion = m ? m[1].trim() : '';
-
-          if (!pomVersion.startsWith(`${expected}.`)) {
-            stop('version-mismatch',
-              `ERROR: ${repo} has no ${target} branch, and main is at '${pomVersion}', which is ` +
-              `not on the ${expected} line. Refusing to bump main to ${version}.`);
-          }
-
-          console.log(`No ${target} branch; main is at ${pomVersion} - using main.`);
-          emit('status', 'ok');
-          emit('branch', 'main');
-          JSEOF
+        uses: ./.github/actions/resolve-release-branch
+        with:
+          repo: ${{ matrix.repo }}
+          version: ${{ matrix.version }}
+          commercial: ${{ needs.setup.outputs.commercial }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Clone project
         id: clone

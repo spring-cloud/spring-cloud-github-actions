@@ -832,104 +832,55 @@ jobs:
           persist-credentials: false
 
       # ── 5a. resolve the branch to work on ─────────────────────────────────────────────
-      - name: Resolve target branch
-        id: branch
+      # Two steps and a normalizer rather than one script: the .x-then-main resolution is
+      # shared with update-versions.yml and create-oss-release-branch.yml and lives in the
+      # resolve-release-branch action. What stays here is only what is specific to this
+      # workflow - reading this project's version out of the versions map, and reporting a
+      # project that is not in the map at all as no-version rather than as a bad version.
+      - name: Read this project's next version
+        id: version
         env:
-          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           PROJECT: ${{ matrix.project }}
-          REPO: ${{ matrix.repo }}
-          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
           VERSIONS: ${{ needs.setup.outputs.prerelease == 'true'
             && needs.setup.outputs.next-versions
             || needs.next-snapshot-config.outputs.versions }}
         run: |
-          node - << 'JSEOF'
-          const fs = require('fs');
-          const { execFileSync } = require('child_process');
+          set -euo pipefail
+          VERSION=$(echo "$VERSIONS" | jq -r --arg k "$PROJECT" '.[$k] // ""')
+          if [[ -z "$VERSION" ]]; then
+            echo "No version for ${PROJECT}."
+          else
+            echo "Version for ${PROJECT}: ${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          const project = process.env.PROJECT;
-          const repo = process.env.REPO;
-          const commercial = process.env.COMMERCIAL === 'true';
-          const versions = JSON.parse(process.env.VERSIONS);
+      - name: Resolve target branch
+        id: resolve
+        if: steps.version.outputs.version != ''
+        uses: ./.github/actions/resolve-release-branch
+        with:
+          repo: ${{ matrix.repo }}
+          version: ${{ steps.version.outputs.version }}
+          commercial: ${{ needs.setup.outputs.commercial }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
-          const out = process.env.GITHUB_OUTPUT;
-          const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
-          const stop = (status, message) => {
-            console.log(message);
-            emit('status', status);
-            emit('branch', '');
-            process.exit(0);
-          };
-
-          const snapshot = versions[project];
-          if (!snapshot) stop('no-version', `No snapshot version for ${project}.`);
-
-          // Drop the last segment and append .x. Works for both lines: OSS 5.0.3 -> 5.0.x, and
-          // 3-part commercial 4.2.8 -> 4.2.x.
-          const plain = snapshot.replace(/-SNAPSHOT$/, '');
-          const parts = plain.split('.');
-          const target = parts.slice(0, -1).join('.') + '.x';
-
-          const branchExists = branch => {
-            try {
-              execFileSync('gh', ['api', `repos/${repo}/branches/${branch}`, '--jq', '.name'],
-                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-              return true;
-            } catch (err) { return false; }
-          };
-
-          if (branchExists(target)) {
-            console.log(`Target branch: ${target}`);
-            emit('status', 'ok');
-            emit('branch', target);
-            process.exit(0);
-          }
-
-          // Commercial repos have no main branch at all - spring-cloud-config-commercial's
-          // default is 4.3.x - so there is no sane fallback to make.
-          if (commercial) {
-            stop('branch-not-found',
-              `ERROR: ${repo} has no ${target} branch, and commercial repos have no main to ` +
-              'fall back to. Skipping this project.');
-          }
-
-          if (!branchExists('main')) {
-            stop('branch-not-found', `ERROR: ${repo} has neither ${target} nor main.`);
-          }
-
-          // Falling back to main is only safe if main really is the line this version belongs
-          // to - otherwise we would bump an unrelated major.minor to these versions.
-          const expected = parts.slice(0, 2).join('.');
-          let pom;
-          try {
-            const b64 = execFileSync('gh', ['api',
-              `repos/${repo}/contents/pom.xml?ref=main`, '--jq', '.content'],
-              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-            pom = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
-          } catch (err) {
-            stop('branch-not-found', `ERROR: no ${target} branch and could not read pom.xml on main.`);
-          }
-
-          // The root <version> is the project's own; fall back to <parent><version> when the
-          // root pom inherits it.
-          const withoutParent = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
-          let m = withoutParent.match(/<version>([^<]+)<\/version>/);
-          if (!m) {
-            const parent = pom.match(/<parent>[\s\S]*?<\/parent>/);
-            if (parent) m = parent[0].match(/<version>([^<]+)<\/version>/);
-          }
-          const pomVersion = m ? m[1].trim() : '';
-
-          if (!pomVersion.startsWith(`${expected}.`)) {
-            stop('version-mismatch',
-              `ERROR: ${repo} has no ${target} branch, and main is at '${pomVersion}', which is ` +
-              `not on the ${expected} line. Refusing to bump main to ${snapshot}.`);
-          }
-
-          console.log(`No ${target} branch; main is at ${pomVersion} - using main.`);
-          emit('status', 'ok');
-          emit('branch', 'main');
-          JSEOF
+      # Keeps the id every later step already reads, so the resolution moving into an action
+      # is invisible to the rest of the job.
+      - name: Branch resolution result
+        id: branch
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RESOLVED: ${{ steps.resolve.outputs.branch }}
+          STATUS: ${{ steps.resolve.outputs.status }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$VERSION" ]]; then
+            echo "status=no-version" >> "$GITHUB_OUTPUT"
+            echo "branch=" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+            echo "branch=${RESOLVED}" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── 5b. merge release/<version> back into the .x branch ──────────────────────────
       - name: Merge release branch back

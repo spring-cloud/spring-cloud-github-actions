@@ -1,0 +1,148 @@
+name: 'Resolve Release Branch'
+description: >
+  Resolves the maintenance branch a given project version belongs to: <major>.<minor>.x
+  when it exists, otherwise main for OSS repositories whose main is on that same line.
+
+inputs:
+  repo:
+    description: 'Full repository path (e.g. spring-cloud/spring-cloud-config)'
+    required: true
+  version:
+    description: >
+      The version whose line is wanted. A qualifier is stripped before the line is taken,
+      so 5.0.4-SNAPSHOT, 5.1.0-INTERNAL-SNAPSHOT, 5.1.0-M1 and 5.0.3 all resolve to the
+      same branch.
+    required: true
+  commercial:
+    description: >
+      When true the repository is a commercial one, which has no main branch to fall back
+      on - spring-cloud-config-commercial's default is 4.3.x - so a missing .x branch is
+      reported rather than guessed at.
+    required: false
+    default: 'false'
+  token:
+    description: 'GitHub token with read access to the repository'
+    required: true
+
+outputs:
+  branch:
+    description: 'The resolved branch, or empty when status is not ok'
+    value: ${{ steps.resolve.outputs.branch }}
+  status:
+    description: >
+      ok | branch-not-found | version-mismatch. Callers report these rather than failing,
+      so one project that cannot be resolved does not take a whole matrix down.
+    value: ${{ steps.resolve.outputs.status }}
+  message:
+    description: 'Why, when status is not ok. Empty otherwise.'
+    value: ${{ steps.resolve.outputs.message }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the branch
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        VERSION: ${{ inputs.version }}
+        COMMERCIAL: ${{ inputs.commercial }}
+      run: |
+        node - << 'JSEOF'
+        const fs = require('fs');
+        const { execFileSync } = require('child_process');
+
+        const repo = process.env.REPO;
+        const version = process.env.VERSION;
+        const commercial = process.env.COMMERCIAL === 'true';
+
+        const out = process.env.GITHUB_OUTPUT;
+        const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
+        // Never a hard failure: a caller running this across a matrix wants the one project
+        // that cannot be resolved reported in its summary, not the whole run red.
+        const stop = (status, message) => {
+          console.log(message);
+          emit('status', status);
+          emit('branch', '');
+          emit('message', message);
+          process.exit(0);
+        };
+
+        // Drop the qualifier, then the last segment, and append .x. Works for every shape
+        // these repositories use: OSS 5.0.3 and 5.0.4-SNAPSHOT -> 5.0.x, 3-part commercial
+        // 4.2.8 -> 4.2.x, 5.1.0-INTERNAL-SNAPSHOT -> 5.1.x, 5.1.0-M1 -> 5.1.x.
+        const plain = version.replace(/-[A-Za-z].*$/, '');
+        const parts = plain.split('.');
+        if (parts.length < 2 || !parts.every(p => /^\d+$/.test(p))) {
+          stop('version-mismatch',
+            `ERROR: '${version}' is not a numeric version, so no branch can be derived from it.`);
+        }
+        const target = parts.slice(0, -1).join('.') + '.x';
+
+        const branchExists = branch => {
+          try {
+            execFileSync('gh', ['api', `repos/${repo}/branches/${branch}`, '--jq', '.name'],
+              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+            return true;
+          } catch (err) { return false; }
+        };
+
+        if (branchExists(target)) {
+          console.log(`Target branch: ${target}`);
+          emit('status', 'ok');
+          emit('branch', target);
+          emit('message', '');
+          process.exit(0);
+        }
+
+        // Commercial repos have no main branch at all - spring-cloud-config-commercial's
+        // default is 4.3.x - so there is no sane fallback to make.
+        if (commercial) {
+          stop('branch-not-found',
+            `ERROR: ${repo} has no ${target} branch, and commercial repos have no main to ` +
+            'fall back to. Skipping this project.');
+        }
+
+        if (!branchExists('main')) {
+          stop('branch-not-found', `ERROR: ${repo} has neither ${target} nor main.`);
+        }
+
+        // Falling back to main is only safe if main really is the line this version belongs
+        // to - otherwise we would act on an unrelated major.minor.
+        const expected = parts.slice(0, 2).join('.');
+        let pom;
+        try {
+          const b64 = execFileSync('gh', ['api',
+            `repos/${repo}/contents/pom.xml?ref=main`, '--jq', '.content'],
+            { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          pom = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+        } catch (err) {
+          stop('branch-not-found', `ERROR: no ${target} branch and could not read pom.xml on main.`);
+        }
+
+        // The root <version> is the project's own; fall back to <parent><version> when the
+        // root pom inherits it.
+        const withoutParent = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
+        let m = withoutParent.match(/<version>([^<]+)<\/version>/);
+        if (!m) {
+          const parent = pom.match(/<parent>[\s\S]*?<\/parent>/);
+          if (parent) m = parent[0].match(/<version>([^<]+)<\/version>/);
+        }
+        const pomVersion = m ? m[1].trim() : '';
+
+        if (!pomVersion.startsWith(`${expected}.`)) {
+          stop('version-mismatch',
+            `ERROR: ${repo} has no ${target} branch, and main is at '${pomVersion}', which is ` +
+            `not on the ${expected} line. Refusing to act on main for ${version}.`);
+        }
+
+        console.log(`No ${target} branch; main is at ${pomVersion} - using main.`);
+        emit('status', 'ok');
+        emit('branch', 'main');
+        emit('message', '');
+        JSEOF
+
+branding:
+  icon: 'git-branch'
+  color: 'green'

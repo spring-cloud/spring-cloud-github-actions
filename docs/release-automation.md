@@ -46,7 +46,7 @@ this document:
 | | **OSS** | **Commercial** | **Hotfix** |
 |---|---|---|---|
 | **Entry point** | [`create-oss-release-branch.yml`](../.github/workflows/create-oss-release-branch.yml) | [`create-commercial-release-branch.yml`](../.github/workflows/create-commercial-release-branch.yml) | [`create-hotfix-release-branch.yml`](../.github/workflows/README-create-hotfix-branch.md) |
-| **Cut from** | an OSS branch (`main`, `5.0.x`) | a commercial branch (`3.3.x`) | an OSS **tag** (`v5.0.1`) |
+| **Cut from** | an OSS branch (`main`, `5.0.x`), derived from the train | a commercial branch (`3.3.x`) | an OSS **tag** (`v5.0.1`) |
 | **Via** | a long-lived `<major>.<minor>.x-internal` branch, full OSS history | nothing — same repo already | an orphan branch, no history |
 | **Release branch** | `release/5.0.0` | `release/3.3.1` | `release/5.0.1.1` — always a `.1` suffix |
 | **Published to** | Maven Central | Spring Enterprise | Spring Enterprise |
