@@ -13,6 +13,7 @@ the seams are.
 - [What this repository is](#what-this-repository-is)
 - [The boundary: what this repo does *not* do](#the-boundary-what-this-repo-does-not-do)
 - [Repository and branch model](#repository-and-branch-model)
+  - [Merging a release line forward](#merging-a-release-line-forward)
 - [Where version numbers come from](#where-version-numbers-come-from)
 - [The OSS release, end to end](#the-oss-release-end-to-end)
 - [The commercial release, and how it differs](#the-commercial-release-and-how-it-differs)
@@ -267,14 +268,18 @@ rolls `main` forward across every OSS project, in one run:
 1. Derive the `.x` release-line branch name from `main`'s pom version and cut it
 2. [`retarget-branch-triggers`](../.github/actions/retarget-branch-triggers/) — rewrite the new
    branch's workflow triggers so they name it instead of `main`
-3. [`add-dependabot-branch-entries`](../.github/actions/add-dependabot-branch-entries/) — add
+3. [`mark-branch-merged`](../.github/actions/mark-branch-merged/) — record that retarget
+   commit as merged into `main` with an `ours` merge, so merging the line forward later does
+   not repoint `main`'s own workflows (see
+   [Merging a release line forward](#merging-a-release-line-forward))
+4. [`add-dependabot-branch-entries`](../.github/actions/add-dependabot-branch-entries/) — add
    Dependabot entries for it, editing the config on the default branch (the only place
    Dependabot reads it)
-4. [`update-project-versions`](../.github/actions/update-project-versions/) — move `main` onto
+5. [`update-project-versions`](../.github/actions/update-project-versions/) — move `main` onto
    the next train's `-SNAPSHOT` versions
-5. [`create-milestone`](../.github/actions/create-milestone/) — open the new line's first
+6. [`create-milestone`](../.github/actions/create-milestone/) — open the new line's first
    milestone (`<next>.0-M1`)
-6. [`add-branches-projects-json`](../.github/actions/add-branches-projects-json/) — register
+7. [`add-branches-projects-json`](../.github/actions/add-branches-projects-json/) — register
    every new branch in `projects.json` as a single commit
 
 Defaults to a dry run that shows the diffs it would push.
@@ -740,7 +745,7 @@ used only by this repository's own release workflow.
 
 | Workflow | Job | Actions |
 |---|---|---|
-| [`setup-next-release-train.yml`](../.github/workflows/README-setup-next-release-train.md) | `prepare` | [`retarget-branch-triggers`](../.github/actions/retarget-branch-triggers/), [`add-dependabot-branch-entries`](../.github/actions/add-dependabot-branch-entries/), [`update-project-versions`](../.github/actions/update-project-versions/), [`create-milestone`](../.github/actions/create-milestone/) |
+| [`setup-next-release-train.yml`](../.github/workflows/README-setup-next-release-train.md) | `prepare` | [`retarget-branch-triggers`](../.github/actions/retarget-branch-triggers/), [`mark-branch-merged`](../.github/actions/mark-branch-merged/), [`add-dependabot-branch-entries`](../.github/actions/add-dependabot-branch-entries/), [`update-project-versions`](../.github/actions/update-project-versions/), [`create-milestone`](../.github/actions/create-milestone/) |
 | | `register-branches` | [`add-branches-projects-json`](../.github/actions/add-branches-projects-json/) |
 | [`update-versions.yml`](../.github/workflows/README-update-versions.md) | `update` | [`update-project-versions`](../.github/actions/update-project-versions/) |
 | [`lock-unlock-branches.yml`](../.github/workflows/README-lock-branches.md) | — | None — pure `gh api` ruleset calls |

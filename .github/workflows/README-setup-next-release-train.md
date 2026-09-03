@@ -2,7 +2,7 @@
 
 Rolls `main` forward in every OSS project when a release train branches.
 
-At a train rollover each OSS repository needs the same six changes: the line that
+At a train rollover each OSS repository needs the same set of changes: the line that
 just closed gets its own branch, that branch has to start building, Dependabot has
 to start watching it, `main` has to move onto the next train's versions, and the new
 line needs a first milestone. Doing that by hand across ~30 repositories is the chore
@@ -21,6 +21,7 @@ Per project, in one matrix leg:
 | 1 | **derive** | Reads the root `pom.xml` on `main` and derives the release line branch from its version: `5.0.4-SNAPSHOT` → `5.0.x`. Also derives the milestone title from the next train's version for the project: `5.1.0-SNAPSHOT` → `5.1.0-M1`. |
 | 2 | **branch** | Creates that branch from `main`'s tip. An existing branch is left as it is. |
 | 3 | **retarget** | [`retarget-branch-triggers`](../actions/retarget-branch-triggers/README.md) rewrites the new branch's workflow branch triggers so they name it instead of `main`. |
+| 3b | **mark merged** | [`mark-branch-merged`](../actions/mark-branch-merged/README.md) records that retarget commit as merged into `main` with an `ours` merge, leaving `main`'s tree untouched. Without it the next merge forward would carry the retarget along and repoint `main`'s own workflows at the new branch — see [Why the `ours` merge](#why-the-ours-merge). |
 | 4 | **dependabot** | [`add-dependabot-branch-entries`](../actions/add-dependabot-branch-entries/README.md) duplicates `main`'s Dependabot entries, retargeted at the new branch. The edit lands **on `main`** — Dependabot only reads the config on the default branch. |
 | 5 | **versions** | [`update-project-versions`](../actions/update-project-versions/README.md) moves `main` onto the next train's versions, then commits and pushes. Deliberately no `[skip actions]`: the point of the bump is to have CI build on the new snapshots. |
 | 6 | **milestone** | [`create-milestone`](../actions/create-milestone/README.md) opens the first milestone of the new line in the OSS repository. |
@@ -76,6 +77,20 @@ work is already done:
 So the fix for a partial run is to re-run it, ideally with `projects` narrowed to the
 list under **❌ Not set up** in the summary.
 
+## Why the `ours` merge
+
+Step 3 is the only commit this workflow makes on the new branch — the Dependabot
+entries and the version bump both go to `main`. Release lines are then merged
+**forward** into `main`, and at that merge the base is the branch point: the new
+branch changed the trigger lines and `main` did not, so git takes the new branch's
+side without a conflict. `main`'s own workflows end up triggering on `5.0.x`.
+
+Step 3b prevents it: `git merge -s ours --no-ff` puts the retarget commit into
+`main`'s history while leaving `main`'s tree byte-identical, so every later
+`git merge 5.0.x` starts from there, finds nothing to re-apply, and brings the
+line's real work across cleanly. The step verifies the tree really is unchanged
+before it pushes.
+
 ## Failure modes
 
 | Reported as | Meaning |
@@ -85,6 +100,7 @@ list under **❌ Not set up** in the summary.
 | `bad-pom-version` | `main`'s version is not `<major>.<minor>[.<patch>]`, so no branch name can be derived. |
 | `same-line` | `main` and the next train are on the same minor line — there is nothing to branch off. Usually the wrong `release_train_version`. |
 | `clone-failed` / branch `failed` | A token permission problem, or a protected-branch rule on `main`. |
+| `failed` in **Merged to main** | The `ours` merge could not be pushed to `main`, most likely a ruleset requiring linear history there. `main` will pick up the retarget commit on the next merge forward unless it is fixed by hand. |
 
 A leg that fails one step does not abort the others (`fail-fast: false`), and a
 failing project does not stop the rest of the train.

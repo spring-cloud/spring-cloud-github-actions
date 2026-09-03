@@ -16,6 +16,8 @@ run-name: "Setup Next Release Train - ${{ inputs.release_train_version }}${{ inp
 #   2. branch     — create that branch from main
 #   3. retarget   — rewrite the branch triggers of the new branch's workflows so they name it
 #                   instead of main
+#  3b. mark       — record that retarget commit as merged into main with an `ours` merge, so
+#                   merging the line forward later does not repoint main's own workflows
 #   4. dependabot — duplicate main's dependabot entries on main, retargeted at the new branch
 #                   (Dependabot only reads the config on the default branch)
 #   5. versions   — move main onto the next train's versions, from the properties file on
@@ -383,6 +385,27 @@ jobs:
           dry-run:       ${{ inputs.dry_run }}
           token:         ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
+      # ── 3b. record the retarget commit as merged into main ───────────────────────────
+      # Release lines are merged forward into main, and the retarget commit above is the only
+      # commit this workflow makes on the new branch. At that merge the base is the branch
+      # point: the new branch changed the trigger lines and main did not, so git takes the new
+      # branch's side and main's own workflows end up triggering on it. An `ours` merge puts
+      # the retarget commit into main's history without changing main's tree, so the merge
+      # forward has nothing to re-apply.
+      #
+      # Runs before "Clone main" on purpose - that step clones main fresh and must see it.
+      - name: Record the retarget commit as merged into main
+        id: mark-merged
+        if: steps.retarget.outputs.changed == 'true' && (steps.branch.outputs.status == 'created' || steps.branch.outputs.status == 'exists')
+        continue-on-error: true
+        uses: ./.github/actions/mark-branch-merged
+        with:
+          repository:  ${{ matrix.repo }}
+          branch:      ${{ steps.derive.outputs.branch }}
+          into-branch: main
+          dry-run:     ${{ inputs.dry_run }}
+          token:       ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
       # ── 4. tell Dependabot about the new branch ──────────────────────────────────────
       - name: Add Dependabot entries for the new branch
         id: dependabot
@@ -540,6 +563,8 @@ jobs:
           BRANCH_STATUS: ${{ steps.branch.outputs.status }}
           RETARGET_OUTCOME: ${{ steps.retarget.outcome }}
           RETARGET_CHANGED: ${{ steps.retarget.outputs.changed }}
+          MARK_MERGED_OUTCOME: ${{ steps.mark-merged.outcome }}
+          MARK_MERGED_STATUS: ${{ steps.mark-merged.outputs.status }}
           DEPENDABOT_OUTCOME: ${{ steps.dependabot.outcome }}
           DEPENDABOT_CHANGED: ${{ steps.dependabot.outputs.changed }}
           CLONE_STATUS: ${{ steps.clone.outputs.status }}
@@ -560,6 +585,8 @@ jobs:
             --arg branchStatus "${BRANCH_STATUS:-skipped}" \
             --arg retargetOutcome "${RETARGET_OUTCOME:-skipped}" \
             --arg retargetChanged "${RETARGET_CHANGED:-false}" \
+            --arg markMergedOutcome "${MARK_MERGED_OUTCOME:-skipped}" \
+            --arg markMergedStatus "${MARK_MERGED_STATUS:-skipped}" \
             --arg dependabotOutcome "${DEPENDABOT_OUTCOME:-skipped}" \
             --arg dependabotChanged "${DEPENDABOT_CHANGED:-false}" \
             --arg cloneStatus "${CLONE_STATUS:-skipped}" \
@@ -569,7 +596,9 @@ jobs:
             '{project: $project, repo: $repo, version: $version, currentVersion: $currentVersion,
               branch: $branch, milestone: $milestone, deriveStatus: $deriveStatus,
               branchStatus: $branchStatus, retargetOutcome: $retargetOutcome,
-              retargetChanged: $retargetChanged, dependabotOutcome: $dependabotOutcome,
+              retargetChanged: $retargetChanged,
+              markMergedOutcome: $markMergedOutcome, markMergedStatus: $markMergedStatus,
+              dependabotOutcome: $dependabotOutcome,
               dependabotChanged: $dependabotChanged, cloneStatus: $cloneStatus,
               bumpOutcome: $bumpOutcome, pushStatus: $pushStatus,
               milestoneOutcome: $milestoneOutcome}' \
@@ -709,6 +738,7 @@ jobs:
           const ICON = {
             created: '✅', exists: '➖', 'would-create': '🔎',
             pushed: '✅', success: '✅', cloned: '✅',
+            merged: '✅', 'already-merged': '➖', 'would-merge': '🔎',
             'would-push': '🔎',
             'no-changes': '➖', skipped: '⏭️', cancelled: '⚠️',
             failure: '❌', failed: '❌', 'clone-failed': '❌',
@@ -726,12 +756,22 @@ jobs:
           };
 
           if (results.length) {
-            L.push('| Project | main | Branch | Triggers | Dependabot | Versions | Milestone |');
-            L.push('|---|---|---|---|---|---|---|');
+            L.push('| Project | main | Branch | Triggers | Merged to main | Dependabot | Versions | Milestone |');
+            L.push('|---|---|---|---|---|---|---|---|');
             for (const r of results) {
               const branch = r.branch
                 ? `\`${r.branch}\` ${icon(r.branchStatus)}`
                 : `${icon(r.deriveStatus)} ${r.deriveStatus}`;
+              // The `ours` merge that keeps the retarget commit from repointing main's own
+              // workflows. It needs the branch to exist, so on a dry run before it is created
+              // there is nothing to run - report what would happen rather than "skipped".
+              const markMerged = r.markMergedOutcome === 'skipped'
+                ? (dryRun && r.branchStatus === 'would-create' ? '🔎 would-merge'
+                  : r.retargetChanged === 'true' ? '⏭️ skipped'
+                  : '➖ not-needed')
+                : r.markMergedOutcome !== 'success'
+                  ? `${icon(r.markMergedOutcome)} ${r.markMergedOutcome}`
+                  : `${icon(r.markMergedStatus)} ${r.markMergedStatus}`;
               const versions = r.cloneStatus === 'clone-failed'
                 ? '❌ clone-failed'
                 : r.bumpOutcome !== 'success'
@@ -745,14 +785,15 @@ jobs:
                   ? `\`${r.milestone}\` 🔎`
                   : `\`${r.milestone}\` ${icon(r.milestoneOutcome)}`;
               L.push(`| \`${r.project}\` | ${r.currentVersion || '?'} → ${r.version} | ${branch} | ` +
-                `${actionCell(r.retargetOutcome, r.retargetChanged)} | ` +
+                `${actionCell(r.retargetOutcome, r.retargetChanged)} | ${markMerged} | ` +
                 `${actionCell(r.dependabotOutcome, r.dependabotChanged)} | ${versions} | ${milestone} |`);
             }
             L.push('');
 
             const failed = results.filter(r =>
               r.deriveStatus !== 'ok' || r.branchStatus === 'failed' ||
-              r.retargetOutcome === 'failure' || r.dependabotOutcome === 'failure' ||
+              r.retargetOutcome === 'failure' || r.markMergedOutcome === 'failure' ||
+              r.markMergedStatus === 'failed' || r.dependabotOutcome === 'failure' ||
               r.cloneStatus === 'clone-failed' || r.bumpOutcome === 'failure' ||
               r.milestoneOutcome === 'failure');
             const ok = results.length - failed.length;
@@ -775,6 +816,8 @@ jobs:
                   : r.deriveStatus === 'same-line' ? '`main` is already on the next train\'s line'
                   : r.branchStatus === 'failed' ? 'the branch could not be created'
                   : r.retargetOutcome === 'failure' ? 'the workflow triggers could not be retargeted'
+                  : (r.markMergedOutcome === 'failure' || r.markMergedStatus === 'failed')
+                      ? 'the retarget commit could not be recorded as merged into `main` — `main` will pick it up on the next merge forward'
                   : r.dependabotOutcome === 'failure' ? 'the Dependabot entries could not be added'
                   : r.cloneStatus === 'clone-failed' ? '`main` could not be cloned'
                   : r.bumpOutcome === 'failure' ? 'the version update failed — see that job\'s log'

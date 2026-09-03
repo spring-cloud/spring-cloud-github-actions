@@ -1,0 +1,141 @@
+name: 'Mark Branch Merged'
+description: >
+  Records a branch as already merged into another branch without taking any of its content,
+  using an `ours` merge. Used after a new release line branch has been retargeted, so the
+  retarget commit does not travel to main the next time the line is merged forward.
+author: 'Spring Cloud Team'
+
+inputs:
+  repository:
+    description: 'Repository containing both branches (format: org/repo-name)'
+    required: true
+  branch:
+    description: 'Branch to record as merged (e.g. 5.0.x)'
+    required: true
+  into-branch:
+    description: 'Branch the merge is recorded on. This is the branch that is cloned and pushed to.'
+    required: false
+    default: 'main'
+  commit-message:
+    description: 'Commit message for the merge commit'
+    required: false
+    default: ''
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+  dry-run:
+    description: 'When true the merge is made locally and verified, but nothing is pushed'
+    required: false
+    default: 'false'
+  token:
+    description: 'GitHub token with contents: write permission on the repository'
+    required: true
+
+outputs:
+  status:
+    description: 'merged | already-merged | would-merge | failed'
+    value: ${{ steps.mark.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Record the branch as merged
+      id: mark
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -uo pipefail
+
+        REPO="${{ inputs.repository }}"
+        BRANCH="${{ inputs.branch }}"
+        INTO_BRANCH="${{ inputs.into-branch }}"
+        DRY_RUN="${{ inputs.dry-run }}"
+
+        COMMIT_MSG="${{ inputs.commit-message }}"
+        if [[ -z "$COMMIT_MSG" ]]; then
+          COMMIT_MSG="Merge branch '${BRANCH}' into ${INTO_BRANCH} - workflow retarget only, no tree change [skip actions]"
+        fi
+
+        echo "=== Mark Branch Merged ==="
+        echo "Repository:  $REPO"
+        echo "Branch:      $BRANCH"
+        echo "Into branch: $INTO_BRANCH"
+        echo "Dry run:     $DRY_RUN"
+        echo ""
+
+        fail() {
+          echo "::warning::mark-branch-merged: $1"
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          exit 0
+        }
+
+        if [[ "$BRANCH" == "$INTO_BRANCH" ]]; then
+          fail "branch and into-branch are both '${BRANCH}' - there is nothing to record."
+        fi
+
+        echo "status=failed" >> "$GITHUB_OUTPUT"
+
+        WORKDIR="$(mktemp -d)/_mark_merged_repo"
+        git clone --quiet --single-branch --branch "$INTO_BRANCH" \
+          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$WORKDIR" \
+          || fail "could not clone ${REPO}@${INTO_BRANCH}."
+
+        cd "$WORKDIR"
+        git config user.name  "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
+
+        # A --single-branch clone only tracks into-branch, so the branch being recorded has
+        # to be fetched with an explicit refspec.
+        git fetch --quiet origin "refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" \
+          || fail "could not fetch ${BRANCH} from ${REPO}."
+
+        BEFORE="$(git rev-parse HEAD)"
+
+        # Re-running after the branch was already recorded is the normal way this happens.
+        if git merge-base --is-ancestor "origin/${BRANCH}" HEAD; then
+          echo "${BRANCH} is already an ancestor of ${INTO_BRANCH} - nothing to record."
+          echo "status=already-merged" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # --no-ff is redundant - naming a strategy already disables the fast-forward - but it
+        # is the whole point of this step and cheap to state. Without it, and origin/<branch>
+        # being a strict descendant of into-branch at this point, a fast-forward would move
+        # into-branch onto the retarget commit: exactly what this action exists to prevent.
+        git merge -s ours --no-ff -m "$COMMIT_MSG" "origin/${BRANCH}" \
+          || fail "the ours merge of ${BRANCH} into ${INTO_BRANCH} failed."
+
+        # An `ours` merge must never change the tree. Checking here beats discovering
+        # otherwise on main.
+        if ! git diff --quiet "${BEFORE}" HEAD; then
+          echo "::error::mark-branch-merged: the merge changed the ${INTO_BRANCH} tree - refusing to push."
+          git --no-pager diff --stat "${BEFORE}" HEAD
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Recorded ${BRANCH} as merged into ${INTO_BRANCH}; ${INTO_BRANCH}'s tree is unchanged."
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "[dry run] not pushing \"${COMMIT_MSG}\" to ${REPO}@${INTO_BRANCH}."
+          echo "status=would-merge" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # A rejection here is most likely a ruleset requiring linear history on into-branch,
+        # which this merge commit cannot satisfy. See this action's README.
+        git push --quiet origin "HEAD:refs/heads/${INTO_BRANCH}" \
+          || fail "could not push the merge commit to ${REPO}@${INTO_BRANCH} - check whether a ruleset requires linear history there."
+
+        echo "Merge commit pushed to ${REPO}@${INTO_BRANCH}."
+        echo "status=merged" >> "$GITHUB_OUTPUT"
+
+branding:
+  icon: 'git-merge'
+  color: 'blue'
