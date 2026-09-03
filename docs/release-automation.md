@@ -54,6 +54,24 @@ this document:
 | **Tag + milestone** | **OSS** repo | **commercial** repo | **commercial** repo |
 | **`post-release`** | all nine steps | nine, with `commercial: true` | steps 1, 2, 6, 7 only |
 
+### Milestones and release candidates cut across all three
+
+A release type says *where* a release is built and published. It is a separate question
+whether that release is a milestone, a release candidate or a GA, and an OSS train is all
+three in turn: `2026.0.0-M1`, `-M2`, `-RC1`, then `2026.0.0`.
+
+The entry points above are unchanged for a pre-release — the same `release/` branch, the
+same `release-train-join`. Two things downstream are not:
+
+- [`verify-no-snapshot-versions`](../.github/actions/verify-no-snapshot-versions/README.md)
+  is passed `allow-prerelease`, because a milestone build legitimately carries a mixture of
+  `-M<n>`, `-RC<n>` and GA versions. `-SNAPSHOT` is still rejected.
+- [`post-release`](../.github/workflows/README-post-release.md) takes a `promote_to` input
+  and skips the parts that assume the train has moved on. It has not: the maintenance
+  branch stays on `<train>-SNAPSHOT` from M1 all the way to GA, so there is no next
+  snapshot properties file and no version bump — though the merge back still happens. See
+  [Milestone and release candidate releases](../.github/workflows/README-post-release.md#milestone-and-release-candidate-releases).
+
 All three converge on the same machinery once the branch exists: `release-train-join` is
 dispatched, [`spring-release-train-project-ready`](../.github/actions/spring-release-train-project-ready/)
 stamps the final versions, the external release train builds and tags, and

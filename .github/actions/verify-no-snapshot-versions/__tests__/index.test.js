@@ -58,6 +58,38 @@ describe('isPreRelease', () => {
   });
 });
 
+// ─── isPreRelease with allow-prerelease ──────────────────────────────────────
+// A milestone or release-candidate build legitimately mixes -M<n>, -RC<n> and GA
+// versions, so those are permitted; -SNAPSHOT never is.
+
+describe('isPreRelease with allowPrerelease', () => {
+  it('still rejects -SNAPSHOT', () => {
+    expect(isPreRelease('4.2.0-SNAPSHOT', true)).toBe(true);
+  });
+
+  it('still rejects -SNAPSHOT whatever its casing', () => {
+    expect(isPreRelease('4.2.0-snapshot', true)).toBe(true);
+  });
+
+  it('permits a milestone version', () => {
+    expect(isPreRelease('4.2.0-M1', true)).toBe(false);
+  });
+
+  it('permits a release candidate version', () => {
+    expect(isPreRelease('3.3.0-RC1', true)).toBe(false);
+  });
+
+  it('permits a milestone alongside a release candidate and a GA version', () => {
+    for (const v of ['5.1.0-M1', '5.1.0-RC1', '4.2.3']) {
+      expect(isPreRelease(v, true)).toBe(false);
+    }
+  });
+
+  it('leaves GA versions alone', () => {
+    expect(isPreRelease('4.2.0', true)).toBe(false);
+  });
+});
+
 // ─── looksLikeVersion ────────────────────────────────────────────────────────
 
 describe('looksLikeVersion', () => {

@@ -1,8 +1,16 @@
 name: 'Verify No Snapshot Versions'
-description: 'Verifies that every version in every Maven and Gradle build file in a Spring Cloud project is a release version (no -SNAPSHOT, -RC*, or -M* versions), wherever it is declared'
+description: 'Verifies that every version in every Maven and Gradle build file in a Spring Cloud project is a release version (no -SNAPSHOT, and no -RC*/-M* unless allow-prerelease is set), wherever it is declared'
 author: 'Spring Cloud Team'
 
 inputs:
+  allow-prerelease:
+    description: >
+      Permit -M<n> and -RC<n> versions. Set this when verifying a milestone or release
+      candidate: such a build legitimately carries a mixture of milestone,
+      release-candidate and GA versions, and the default would reject every one of them.
+      -SNAPSHOT is rejected either way.
+    required: false
+    default: 'false'
   directory:
     description: 'Root directory of the project to verify. Defaults to the current working directory.'
     required: false

@@ -204,6 +204,109 @@ jobs:
 
           echo "✅ Nested plugin dependency SNAPSHOT detected; the annotated project version and the snapshot repo URL were correctly ignored"
 
+  # ── Integration test (pre-release project with allow-prerelease) ──────────
+  # A milestone or release candidate stamps -M<n>/-RC<n> on purpose and pulls in a
+  # mixture of milestone, release-candidate and GA dependency versions. With
+  # allow-prerelease set, none of that is a violation.
+  integration-test-prerelease-allowed:
+    name: Integration Test (pre-release project with allow-prerelease — should pass)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create a milestone project mixing M, RC and GA versions
+        run: |
+          mkdir -p /tmp/prerelease-project
+
+          cat > /tmp/prerelease-project/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-config</artifactId>
+            <version>5.1.0-M1</version>
+            <packaging>pom</packaging>
+            <properties>
+              <spring-cloud-commons.version>5.1.0-M1</spring-cloud-commons.version>
+              <spring-cloud-contract.version>5.1.0-RC1</spring-cloud-contract.version>
+              <spring-boot.version>4.0.0</spring-boot.version>
+            </properties>
+          </project>
+          EOF
+
+          cat > /tmp/prerelease-project/gradle.properties << 'EOF'
+          version=5.1.0-M1
+          springBootVersion=4.0.0
+          springCloudCommonsVersion=5.1.0-RC1
+          EOF
+
+      - name: Run verify-no-snapshot-versions (should pass)
+        uses: ./.github/actions/verify-no-snapshot-versions
+        with:
+          directory: '/tmp/prerelease-project'
+          allow-prerelease: 'true'
+
+  # ── Integration test (SNAPSHOT still fails with allow-prerelease) ──────────
+  # allow-prerelease relaxes the milestone half of the check and nothing else. A
+  # -SNAPSHOT must never ship, whatever kind of release is being cut.
+  integration-test-prerelease-snapshot:
+    name: Integration Test (SNAPSHOT with allow-prerelease — expected to fail)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create a milestone project with one SNAPSHOT left in it
+        run: |
+          mkdir -p /tmp/prerelease-snapshot-project
+
+          cat > /tmp/prerelease-snapshot-project/pom.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-config</artifactId>
+            <version>5.1.0-M1</version>
+            <packaging>pom</packaging>
+            <properties>
+              <spring-cloud-commons.version>5.1.0-RC1</spring-cloud-commons.version>
+              <spring-boot.version>4.0.0-SNAPSHOT</spring-boot.version>
+            </properties>
+          </project>
+          EOF
+
+      - name: Run verify-no-snapshot-versions (expected to fail)
+        id: verify
+        uses: ./.github/actions/verify-no-snapshot-versions
+        with:
+          directory: '/tmp/prerelease-snapshot-project'
+          allow-prerelease: 'true'
+        continue-on-error: true
+
+      - name: Confirm only the SNAPSHOT was reported
+        env:
+          VIOLATIONS: ${{ steps.verify.outputs.violations }}
+        run: |
+          if [[ "${{ steps.verify.outcome }}" != "failure" ]]; then
+            echo "❌ Expected the action to fail for the SNAPSHOT, but it did not"
+            exit 1
+          fi
+
+          echo "$VIOLATIONS" | jq .
+
+          count=$(echo "$VIOLATIONS" | jq 'length')
+          if [[ "$count" != "1" ]]; then
+            echo "❌ Expected exactly 1 violation (the SNAPSHOT), got ${count}"
+            exit 1
+          fi
+
+          version=$(echo "$VIOLATIONS" | jq -r '.[0].version')
+          if [[ "$version" != "4.0.0-SNAPSHOT" ]]; then
+            echo "❌ Expected the violation to be 4.0.0-SNAPSHOT, got ${version}"
+            exit 1
+          fi
+
+          echo "✅ SNAPSHOT still rejected with allow-prerelease; the -M1 and -RC1 versions were correctly permitted"
+
   # ── Dist is up to date ──────────────────────────────────────────────────────
   dist-up-to-date:
     name: Verify dist is up to date

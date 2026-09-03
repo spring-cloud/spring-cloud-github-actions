@@ -58,7 +58,22 @@ runs:
           release_repo="spring-cloud/spring-cloud-release"
         fi
 
-        filename="${release_train_version//./_}.properties"
+        # Deliberately identical to releaseTrainVersionToFileName in
+        # update-project-versions/src/index.js, which is the action that reads this same
+        # file a few steps below: a pre-release qualifier is lower-cased, the numeric part
+        # is not. 2026.0.0-M1 -> 2026_0_0-m1.properties, 2026.0.0 -> 2026_0_0.properties.
+        # Upper-casing here would validate one file and stamp from another - invisible for
+        # GA versions, which carry no qualifier at all.
+        # tr rather than bash's ${x,,} or GNU sed's \L, both of which are unavailable in
+        # the bash 3.2 on a developer's Mac and so could not be exercised outside a runner.
+        if [[ "$release_train_version" == *-* ]]; then
+          lowered_qualifier=$(printf '%s' "${release_train_version#*-}" \
+            | tr '[:upper:]' '[:lower:]')
+          normalized="${release_train_version%%-*}-${lowered_qualifier}"
+        else
+          normalized="$release_train_version"
+        fi
+        filename="${normalized//./_}.properties"
         echo "Fetching ${filename} from ${release_repo}@jenkins-releaser-config..."
 
         content=$(gh api "repos/${release_repo}/contents/${filename}?ref=jenkins-releaser-config" \
@@ -121,10 +136,16 @@ runs:
           echo "release-ci-settings.xml not found — skipping."
         fi
 
+    # A milestone or release candidate stamps -M<n>/-RC<n> versions on purpose, and its
+    # dependencies are a mixture of milestone, release-candidate and GA versions. Only
+    # -SNAPSHOT is always wrong, so the milestone half of the check is turned off for a
+    # pre-release. Derived from the version being released rather than taken as an input:
+    # the two can never legitimately disagree.
     - name: Verify no snapshot versions
       uses: ./.github/actions/verify-no-snapshot-versions
       with:
         directory: ${{ inputs.project }}
+        allow-prerelease: ${{ contains(inputs.project-version, '-M') || contains(inputs.project-version, '-RC') }}
 
     - name: Commit and push changes
       shell: bash

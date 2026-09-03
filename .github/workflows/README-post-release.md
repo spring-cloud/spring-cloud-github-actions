@@ -96,7 +96,8 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 | Input | Description | Required | Type |
 |-------|-------------|----------|------|
-| `release_version` | The release train version that just shipped, e.g. `2025.1.2`, or `2025.1.2.1` for a commercial hotfix. Must be a plain numeric version with 3 or 4 segments. | Yes | string |
+| `release_version` | The release train version that just shipped, e.g. `2025.1.2`, `2026.0.0-M1` or `2026.0.0-RC1`, or `2025.1.2.1` for a commercial hotfix. Three or four numeric segments, optionally with an `-M<n>` or `-RC<n>` qualifier. | Yes | string |
+| `promote_to` | Where the train goes next. `none` stays in the current phase (`M1` → `M2`, `RC1` → `RC2`); `RC` moves a milestone train to `RC1`; `GA` moves a release candidate train to its final version. Ignored for GA and hotfix releases, which always bump the last segment. See [Milestone and release candidate releases](#milestone-and-release-candidate-releases). | No | choice (default: `none`) |
 | `commercial` | Was this a commercial release? **Ignored when `projects` is supplied.** | No | boolean (default: `false`) |
 | `projects` | Comma-separated project names, `-commercial` suffix included where applicable. Empty processes every project in the properties file. See [The projects filter](#the-projects-filter). | No | string |
 | `skip_close_milestones` | Leave the release milestones open. Nothing else changes — the releases are still published, the next round of milestones is still opened, and the merge back still runs. Use it when issues are still being moved between milestones, then re-run with it unchecked (closing a milestone is idempotent, and everything else is a no-op the second time). | No | boolean (default: `false`) |
@@ -184,6 +185,107 @@ So the two conventions coexist without overlapping:
 | `<train>-internal-snapshot.properties` | maintained separately | `-INTERNAL-SNAPSHOT` stamps for a new OSS release branch |
 
 Note this differs from [ci-status-report](README-ci-status-report.md) and [rollout-deploy-docs](README-rollout-deploy-docs.md), which pair bare project names with a separate `repo_type` input. Here the suffix carries the type, so there is no `repo_type`.
+
+## Milestone and release candidate releases
+
+A train ships `2026.0.0-M1`, then `-M2`, then `-RC1`, and only finally `2026.0.0`. This
+workflow runs after every one of them, but a pre-release is not a small GA release — one
+thing is fundamentally different, and most of the special-casing follows from it:
+
+> **The train does not advance during a pre-release cycle.** `5.1.x` stays on
+> `5.1.0-SNAPSHOT` from M1 all the way to GA.
+
+So on a pre-release run:
+
+| Step | GA release | Milestone / RC release |
+|------|-----------|------------------------|
+| Verify tags | runs | runs |
+| Next snapshot properties file | written | **skipped** — the train has not moved, so there is no new file |
+| New milestones | `5.1.1` | `5.1.0-M2` |
+| Merge back | runs | **runs** |
+| Version bump on the maintenance branch | pushed | **skipped** — the branch is already on the right snapshot |
+| Close milestone, publish release | runs | runs, flagged `prerelease` and **not** marked *Latest* |
+| Website PR | runs | runs, with milestone wording and a `PRERELEASE` entry — see below |
+| start.spring.io PR | runs | runs, if the bom declares a milestone repository |
+| Release board | rolls over | rolls over |
+
+### Naming the next release
+
+`M1` → `M2` and `RC1` → `RC2` are arithmetic, so they are derived. Moving from milestones
+to release candidates, and from release candidates to GA, is a decision somebody makes —
+that is what `promote_to` is for:
+
+| `release_version` | `promote_to` | Next |
+|-------------------|--------------|------|
+| `2026.0.0-M1` | `none` | `2026.0.0-M2` |
+| `2026.0.0-M2` | `RC` | `2026.0.0-RC1` |
+| `2026.0.0-RC1` | `none` | `2026.0.0-RC2` |
+| `2026.0.0-RC2` | `GA` | `2026.0.0` |
+| `2025.1.2` | ignored | `2025.1.3` |
+
+A transition that cannot be meant fails the run rather than producing a version that would
+go on to name milestones and project boards: a milestone cannot be promoted straight to GA
+(set `promote_to=RC` first), and a release candidate cannot be promoted to a release
+candidate. The rules live in
+[`.github/scripts/prerelease-rank.js`](../scripts/prerelease-rank.js), shared with the
+Dependabot triage that resolves milestones and boards by the same grammar.
+
+### Where the GA release picks the train back up
+
+The GA run is an ordinary run: `next_snapshot_config` writes
+`2026_0_1-snapshot.properties`, the maintenance branch is bumped to `2026.0.1-SNAPSHOT`,
+and the site entry that has been carrying the pre-releases is promoted in place to
+`GENERAL_AVAILABILITY`. Note that `promote_to=GA` on the **RC2** run only names the *next*
+release; it is the run with `release_version: 2026.0.0` that actually moves the train on.
+
+### One `documentation.json` entry per line, promoted in place
+
+The site carries exactly one entry for a line while it is in pre-release, rewritten at each
+step rather than accumulating:
+
+| Release | The `5.1` entry afterwards |
+|---------|----------------------------|
+| `5.1.0-M1` | created — `PRERELEASE`, `5.1.0-M1`, `ref: .../reference/5.1/` |
+| `5.1.0-M2` | rewritten — `PRERELEASE`, `5.1.0-M2` |
+| `5.1.0-RC1` | rewritten — `PRERELEASE`, `5.1.0-RC1` |
+| `5.1.0` | rewritten — `GENERAL_AVAILABILITY`, `5.1.0`, and `current` moves onto it |
+
+The first one is cloned from **the same line's `SNAPSHOT` entry**, not from the previous
+line's GA entry. On this site a pre-release entry's `ref` is keyed to the line rather than
+the version — compare spring-data-jpa:
+
+```
+PRERELEASE  4.2.0-M1        ref .../reference/4.2/
+SNAPSHOT    4.2.0-SNAPSHOT  ref .../reference/4.2-SNAPSHOT/
+```
+
+so turning the snapshot entry into the pre-release entry is one substitution,
+`<line>-SNAPSHOT` → `<line>`. Cloning the previous line's GA entry would leave the `ref` on
+*that* line: substituting `5.0.5` → `5.1.0-M1` never touches a ref reading
+`.../reference/5.0/`, and the new milestone would quietly point at the old line's docs.
+That path still exists as a fallback for a line with no snapshot entry, and it substitutes
+the line token as well as the version.
+
+The `SNAPSHOT` entry itself is left alone during the pre-release cycle — `main` has not
+moved — and `current` stays `false` until the GA release, which is the first time the line
+is what the site should point people at.
+
+### Releases are not marked Latest
+
+A pre-release is published with `prerelease: true` and `make_latest: "false"`. Without the
+second of those, GitHub promotes the newest release by date, so publishing `5.1.0-M1` would
+put it above the current 5.0.x GA on every project page and in the API that downstream
+tooling reads to find the current version.
+
+### The version gate
+
+`spring-release-train-project-ready` runs
+[`verify-no-snapshot-versions`](../actions/verify-no-snapshot-versions/README.md) after
+stamping the release versions. That action rejects `-M<n>` and `-RC<n>` by default, which
+would fail every pre-release the moment it was stamped, so it is passed
+`allow-prerelease` when the version being released is one. `-SNAPSHOT` is still rejected.
+
+---
 
 ## Hotfix releases
 

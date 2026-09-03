@@ -61,9 +61,18 @@ on:
         type: boolean
         default: true
       release_version:
-        description: 'Spring Cloud release train version that was just released (e.g. 2025.1.2, or 2025.1.2.1 for a commercial hotfix)'
+        description: 'Spring Cloud release train version that was just released (e.g. 2025.1.2, 2026.0.0-M1 or 2026.0.0-RC1, or 2025.1.2.1 for a commercial hotfix)'
         required: true
         type: string
+      promote_to:
+        description: 'Where the train goes next. Leave as none to stay in the current phase (M1 -> M2, RC1 -> RC2). RC moves a milestone train to RC1; GA moves a release candidate train to its final version. Ignored for GA and hotfix releases, which always bump the last segment.'
+        required: false
+        type: choice
+        default: 'none'
+        options:
+          - none
+          - RC
+          - GA
       commercial:
         description: 'Was this a commercial release? Ignored when projects is supplied - the -commercial suffix on the project names decides.'
         required: false
@@ -116,37 +125,71 @@ jobs:
       props-file: ${{ steps.parse.outputs.props-file }}
       next-version: ${{ steps.parse.outputs.next-version }}
       next-file: ${{ steps.parse.outputs.next-file }}
+      next-versions: ${{ steps.parse.outputs.next-versions }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
       entries: ${{ steps.parse.outputs.entries }}
     steps:
+      # Only for .github/scripts/prerelease-rank.js, which owns the M/RC grammar shared
+      # with dependabot-scan and dependabot-triage.yml. Every other job here reaches
+      # GitHub over the API rather than the working tree, which is why this job had no
+      # checkout before.
+      - uses: actions/checkout@v4
+
       - name: Parse releaser config and build matrix
         id: parse
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           RELEASE_VERSION: ${{ inputs.release_version }}
+          PROMOTE_TO: ${{ inputs.promote_to }}
           COMMERCIAL: ${{ inputs.commercial }}
           PROJECTS_FILTER: ${{ inputs.projects }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const path = require('path');
           const { execFileSync } = require('child_process');
 
+          // The M/RC grammar and the rules for advancing a train, shared with
+          // dependabot-scan and dependabot-triage.yml. This job checks the repository
+          // out, so the module sits under the workspace.
+          const prerelease = require(path.join(process.env.GITHUB_WORKSPACE,
+            '.github', 'scripts', 'prerelease-rank.js'));
+
           const releaseVersion = (process.env.RELEASE_VERSION || '').trim();
+          const promoteTo = (process.env.PROMOTE_TO || 'none').trim();
           const projectsRaw = (process.env.PROJECTS_FILTER || '').trim();
           const commercialInput = (process.env.COMMERCIAL || 'false') === 'true';
 
           const fail = (...msg) => { for (const m of msg) console.error(m); process.exit(1); };
 
-          // Pre-release qualifiers are rejected rather than half-handled: bumping the patch of
-          // something like 2025.1.0-RC1 produces a version nobody wants, and post-release chores
-          // are not run for milestones or release candidates anyway.
-          if (!/^\d+(\.\d+){2,3}$/.test(releaseVersion)) {
-            fail(`ERROR: release_version must be a plain numeric version with 3 or 4 segments ` +
-              `(e.g. 2025.1.2 or 2025.1.2.1); got '${releaseVersion}'.`);
+          // 3 or 4 numeric segments, optionally carrying an -M<n> or -RC<n> qualifier.
+          // split() returns null for anything else - a -SNAPSHOT, a -INTERNAL-SNAPSHOT, a
+          // qualifier outside the grammar - which would resolve to a properties file that
+          // cannot exist, so it is rejected here rather than as a confusing 404 later.
+          const parsed = prerelease.split(releaseVersion);
+          if (!parsed) {
+            fail(`ERROR: release_version must be 3 or 4 numeric segments with an optional ` +
+              `-M<n> or -RC<n> qualifier (e.g. 2025.1.2, 2026.0.0-M1, 2026.0.0-RC1 or ` +
+              `2025.1.2.1); got '${releaseVersion}'.`);
           }
 
+          // A milestone or release candidate. The train does not advance during a pre-release
+          // cycle - the maintenance branch stays on <train>-SNAPSHOT from M1 all the way to
+          // GA - so there is no next snapshot train to write and no version bump to push.
+          // What does happen is the milestones, the releases, the merge back, the website
+          // entry and the board rollover, each named after the next pre-release rather than
+          // the next patch.
+          const isPrerelease = parsed.kind !== null;
+
           // A 4-segment version is a commercial hotfix: only the tag gate and the
-          // milestone/release step apply to it.
-          const hotfix = releaseVersion.split('.').length === 4;
+          // milestone/release step apply to it. Counted on the base so that a qualifier
+          // cannot be mistaken for a fourth segment.
+          const hotfix = parsed.base.split('.').length === 4;
+
+          if (isPrerelease && hotfix) {
+            fail(`ERROR: '${releaseVersion}' is both a 4-segment hotfix version and a ` +
+              'pre-release. Commercial hotfixes do not have milestones or release candidates.');
+          }
 
           // ── projects filter ─────────────────────────────────────────────────────────
           // Commerciality comes from the names, not from the commercial input, because the
@@ -184,7 +227,17 @@ jobs:
           // `commercial`. That input still decides everything else - which project repos are
           // acted on, whether release notes are sanitized, and the OSS tag fallback.
           const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
-          const propsFile = releaseVersion.replace(/\./g, '_') + '.properties';
+
+          // Deliberately identical to releaseTrainVersionToFileName in
+          // update-project-versions/src/index.js, which is the action that reads this same
+          // file during the merge back: a pre-release qualifier is lower-cased, the numeric
+          // part is not. 2026.0.0-M1 -> 2026_0_0-m1.properties. Upper-casing here would read
+          // one file and stamp from another - invisible for GA versions, which carry no
+          // qualifier at all.
+          const propsFileFor = v => v
+            .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
+            .replace(/\./g, '_') + '.properties';
+          const propsFile = propsFileFor(releaseVersion);
 
           // ── read the properties file ────────────────────────────────────────────────
           console.log(`Reading ${propsFile} from ${releaseRepo}@jenkins-releaser-config...`);
@@ -247,33 +300,89 @@ jobs:
             }))
             .sort((a, b) => a.project.localeCompare(b.project));
 
-          // ── next snapshot train version ─────────────────────────────────────────────
-          const bump = v => {
-            const parts = v.split('.');
-            const last = parts[parts.length - 1];
-            if (!/^\d+$/.test(last)) return null;
-            parts[parts.length - 1] = String(Number(last) + 1);
-            return parts.join('.');
-          };
-
+          // ── where the train goes next ───────────────────────────────────────────────
+          // Two different things, and only the first exists on a pre-release run:
+          //
+          //   nextVersion  - the next release's train version. Names the new milestones and
+          //                  the new project board. Always computed (except for a hotfix).
+          //   nextFile     - the next <train>-snapshot.properties file. GA only: a
+          //                  pre-release cycle does not move the train off its snapshot, so
+          //                  there is no new file to write and nothing to bump on the
+          //                  maintenance branch.
+          //
+          // prerelease.next() throws on a transition that cannot be meant - a milestone
+          // promoted straight to GA, a release candidate promoted to a release candidate -
+          // rather than returning a version that would go on to name milestones and boards.
           let nextVersion = '';
           let nextFile = '';
+          const nextVersions = {};
           if (!hotfix) {
-            const unbumpable = entries.filter(e => bump(e.version) === null);
-            if (unbumpable.length) {
-              fail('ERROR: these versions do not end in a numeric segment and cannot be bumped:',
-                ...unbumpable.map(e => `  ${e.key}=${e.version}`));
+            try {
+              nextVersion = prerelease.next(releaseVersion, promoteTo);
+            } catch (err) {
+              fail(`ERROR: ${err.message}`);
             }
-            nextVersion = bump(releaseVersion);
-            nextFile = nextVersion.replace(/\./g, '_') + '-snapshot.properties';
+
+            if (isPrerelease) {
+              // Each project advances the same way the train does, from its own version:
+              // spring-cloud-config 5.1.0-M1 -> 5.1.0-M2. Derived per entry rather than read
+              // from a snapshot file, because on this path there is no snapshot file to
+              // read - next-snapshot-config does not run.
+              //
+              // Only entries that are themselves pre-releases are advanced. An entry sitting
+              // at a GA version during a pre-release train is either spring-boot or a module
+              // pinned to a released version, and in neither case does the next milestone of
+              // this train imply a next version of it - advancing spring-boot 4.0.0 to 4.0.1
+              // would invent a Spring Boot release. Those keys are simply absent from the
+              // map, and the jobs that read it skip a project with no entry.
+              const unadvanceable = [];
+              const notAdvanced = [];
+              for (const e of entries) {
+                if (NON_REPO_KEYS.has(e.key) || !prerelease.isPrerelease(e.version)) {
+                  notAdvanced.push(`${e.key}=${e.version}`);
+                  continue;
+                }
+                try {
+                  nextVersions[e.key] = prerelease.next(e.version, promoteTo);
+                } catch (err) {
+                  unadvanceable.push(`  ${e.key}=${e.version}: ${err.message}`);
+                }
+              }
+              if (unadvanceable.length) {
+                fail(`ERROR: ${propsFile} holds versions that cannot be advanced to the ` +
+                  'next pre-release:', ...unadvanceable);
+              }
+              if (!Object.keys(nextVersions).length) {
+                fail(`ERROR: no entry in ${propsFile} is a pre-release version, but ` +
+                  `release_version '${releaseVersion}' is one. Check that release_version ` +
+                  'matches the properties file that was actually released.');
+              }
+              if (notAdvanced.length) {
+                console.log(`Not advanced (not a pre-release): ${notAdvanced.join(', ')}`);
+              }
+            } else {
+              // GA: next-snapshot-config writes the new file and publishes the per-project
+              // versions, so nothing is derived here.
+              nextFile = nextVersion.replace(/\./g, '_') + '-snapshot.properties';
+            }
           }
 
           console.log('');
           console.log(`commercial:      ${commercial}`);
           console.log(`hotfix:          ${hotfix}`);
+          console.log(`pre-release:     ${isPrerelease}${isPrerelease ? ` (${parsed.kind}${parsed.num})` : ''}`);
+          console.log(`promote_to:      ${promoteTo}`);
           console.log(`release repo:    ${releaseRepo}`);
           console.log(`properties file: ${propsFile}`);
-          if (!hotfix) console.log(`next snapshot:   ${nextVersion} (${nextFile})`);
+          if (!hotfix) console.log(`next release:    ${nextVersion}`);
+          if (!hotfix && !isPrerelease) console.log(`next snapshot:   ${nextFile}`);
+          if (isPrerelease) {
+            console.log('');
+            console.log('This is a pre-release, so the train stays on its current snapshot:');
+            console.log('  - no <train>-snapshot.properties is written');
+            console.log('  - the release branch is merged back, but no version bump is pushed');
+            console.log('  - milestones and the board roll over to ' + nextVersion);
+          }
           console.log('');
           console.log(`Projects to process: ${matrix.length}`);
           for (const e of matrix) console.log(`  ${e.repo} @ ${e.tag}`);
@@ -287,6 +396,8 @@ jobs:
           fs.appendFileSync(out, `props-file=${propsFile}\n`);
           fs.appendFileSync(out, `next-version=${nextVersion}\n`);
           fs.appendFileSync(out, `next-file=${nextFile}\n`);
+          fs.appendFileSync(out, `next-versions=${JSON.stringify(nextVersions)}\n`);
+          fs.appendFileSync(out, `prerelease=${isPrerelease}\n`);
           fs.appendFileSync(out, `entries=${JSON.stringify(entries)}\n`);
           JSEOF
 
@@ -394,7 +505,10 @@ jobs:
   next-snapshot-config:
     name: Next Snapshot Config
     needs: [setup, verify-tags]
-    if: needs.setup.outputs.hotfix != 'true'
+    # A pre-release does not advance the train: 5.1.x stays on 5.1.0-SNAPSHOT from M1 all
+    # the way to GA, so there is no next snapshot file to write. Every job that consumes
+    # this one's versions reads setup.outputs.next-versions instead on that path.
+    if: needs.setup.outputs.hotfix != 'true' && needs.setup.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.write.outputs.status }}
@@ -574,6 +688,13 @@ jobs:
   new-milestones:
     name: "New Milestone — ${{ matrix.project }}"
     needs: [setup, verify-tags, next-snapshot-config]
+    # next-snapshot-config is skipped on a pre-release run, which would otherwise skip
+    # this job with it. verify-tags is still a hard gate either way.
+    if: |
+      !cancelled() &&
+      needs.verify-tags.result == 'success' &&
+      (needs.next-snapshot-config.result == 'success' ||
+       needs.setup.outputs.prerelease == 'true')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -592,13 +713,22 @@ jobs:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           PROJECT: ${{ matrix.project }}
           REPO: ${{ matrix.repo }}
-          VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+          VERSIONS: ${{ needs.setup.outputs.prerelease == 'true'
+            && needs.setup.outputs.next-versions
+            || needs.next-snapshot-config.outputs.versions }}
         run: |
           set -euo pipefail
 
+          # The map holds the next snapshot version on a GA run (5.1.1-SNAPSHOT) and the
+          # next pre-release on a milestone or RC run (5.1.0-M2), so the -SNAPSHOT strip is
+          # a no-op on the latter. Either way the result is the milestone title.
+          #
+          # A project missing from the map gets no milestone. On a pre-release run that is
+          # how a module pinned to a GA version is skipped: there is no next pre-release of
+          # it to open a milestone for.
           TITLE=$(echo "$VERSIONS" | jq -r --arg k "$PROJECT" '.[$k] // ""' | sed 's/-SNAPSHOT$//')
           if [[ -z "$TITLE" ]]; then
-            echo "No snapshot version for ${PROJECT} - nothing to create."
+            echo "No next version for ${PROJECT} - nothing to create."
             echo "title=" >> "$GITHUB_OUTPUT"
             echo "exists=unknown" >> "$GITHUB_OUTPUT"
             exit 0
@@ -681,6 +811,13 @@ jobs:
   merge-back-and-update:
     name: "Merge Back + Bump — ${{ matrix.project }}"
     needs: [setup, verify-tags, next-snapshot-config]
+    # next-snapshot-config is skipped on a pre-release run, which would otherwise skip
+    # this job with it. verify-tags is still a hard gate either way.
+    if: |
+      !cancelled() &&
+      needs.verify-tags.result == 'success' &&
+      (needs.next-snapshot-config.result == 'success' ||
+       needs.setup.outputs.prerelease == 'true')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -702,7 +839,9 @@ jobs:
           PROJECT: ${{ matrix.project }}
           REPO: ${{ matrix.repo }}
           COMMERCIAL: ${{ needs.setup.outputs.commercial }}
-          VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+          VERSIONS: ${{ needs.setup.outputs.prerelease == 'true'
+            && needs.setup.outputs.next-versions
+            || needs.next-snapshot-config.outputs.versions }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -997,7 +1136,14 @@ jobs:
         id: bump
         # The available check keeps a dry run honest: nothing was committed, so there is no
         # snapshot file to resolve versions from and this is reported as skipped, not failed.
+        #
+        # Skipped outright for a pre-release. The train does not advance between M1 and GA,
+        # so the maintenance branch is already on the versions it should be on - bumping it
+        # would move 5.1.x off 5.1.0-SNAPSHOT and start building a train that does not
+        # exist. The merge above still runs: the release branch's changes have to rejoin
+        # the line whatever kind of release it was.
         if: |
+          needs.setup.outputs.prerelease != 'true' &&
           needs.next-snapshot-config.outputs.available == 'true' &&
           (steps.merge.outputs.status == 'merged' ||
            steps.merge.outputs.status == 'already-merged' ||
@@ -1016,13 +1162,23 @@ jobs:
           directory: project
 
       # ── 5d. one push carrying the merge commit and the version bump ──────────────────
+      # On a pre-release run there is no bump, so this pushes the merge commit alone. The
+      # gate names both cases explicitly rather than relying on a skipped step's outcome:
+      # a skipped step reports 'skipped', which the old `outcome == 'success'` test would
+      # have read as "the bump failed, push nothing" and silently dropped the merge.
       - name: Commit and push
         id: push
-        if: steps.bump.outcome == 'success'
+        if: |
+          steps.bump.outcome == 'success' ||
+          (needs.setup.outputs.prerelease == 'true' &&
+           (steps.merge.outputs.status == 'merged' ||
+            steps.merge.outputs.status == 'already-merged' ||
+            steps.merge.outputs.status == 'no-release-branch'))
         env:
           REPO: ${{ matrix.repo }}
           BRANCH: ${{ steps.branch.outputs.branch }}
           NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
           MERGE_STATUS: ${{ steps.merge.outputs.status }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
@@ -1032,6 +1188,12 @@ jobs:
           git add -A
           if git diff --cached --quiet; then
             echo "No version changes to commit."
+          elif [[ "$PRERELEASE" == "true" ]]; then
+            # Nothing should have changed the versions on this path, so anything staged here
+            # is unexpected. Commit it with the merge rather than dropping it on the floor,
+            # but say plainly that it is not a version bump.
+            git commit --quiet -m "Merging ${MERGE_STATUS} changes into the release line"
+            echo "::warning::Unexpected working tree changes on a pre-release run - committed alongside the merge."
           else
             # Deliberately no [skip actions] here, unlike most workflows in this repo: the
             # whole point of pushing the new snapshot versions is to start CI on them.
@@ -1218,6 +1380,7 @@ jobs:
           TAG: ${{ matrix.tag }}
           RESOLVED_IN: ${{ matrix.resolvedIn }}
           COMMERCIAL: ${{ needs.setup.outputs.commercial }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
           ENTRIES: ${{ needs.setup.outputs.entries }}
           SKIP_CLOSE_MILESTONES: ${{ inputs.skip_close_milestones }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -1232,6 +1395,7 @@ jobs:
           const tag = process.env.TAG;
           const resolvedIn = process.env.RESOLVED_IN;
           const commercial = process.env.COMMERCIAL === 'true';
+          const isPrerelease = process.env.PRERELEASE === 'true';
           const skipCloseMilestones = process.env.SKIP_CLOSE_MILESTONES === 'true';
           const dryRun = process.env.DRY_RUN === 'true';
           const entries = JSON.parse(process.env.ENTRIES);
@@ -1446,8 +1610,22 @@ jobs:
             // and every commercial repo use a v prefix.
             const name = (commercial || project === 'spring-cloud-release') ? tag : version;
 
+            // A milestone or release candidate is flagged as a pre-release, and explicitly
+            // kept from becoming the repository's "Latest" release. Without make_latest
+            // GitHub promotes the newest release by date, so publishing 5.1.0-M1 would put
+            // it above the current 5.0.x GA on every project page and in the API that
+            // downstream tooling reads to find the current version.
+            const payload = { tag_name: tag, name, body };
+            if (isPrerelease) {
+              payload.prerelease = true;
+              // A string, not a boolean: the REST API defines make_latest as an enum of
+              // "true" | "false" | "legacy", and a JSON boolean is rejected.
+              payload.make_latest = 'false';
+            }
+
             if (dryRun) {
-              console.log(`[dry run] would create release '${name}' for ${tag} in ${repo}:`);
+              console.log(`[dry run] would create release '${name}' for ${tag} in ${repo}` +
+                `${isPrerelease ? ' (pre-release, not marked latest)' : ''}:`);
               console.log('---');
               console.log(body);
               console.log('---');
@@ -1456,7 +1634,7 @@ jobs:
 
             // Via --input rather than repeated --field, so a body containing newlines,
             // backticks or quotes cannot be mangled on the way through.
-            fs.writeFileSync('payload.json', JSON.stringify({ tag_name: tag, name, body }));
+            fs.writeFileSync('payload.json', JSON.stringify(payload));
             const created = JSON.parse(gh(['api', `repos/${repo}/releases`,
               '--method', 'POST', '--input', 'payload.json']));
             console.log(`Created release ${created.html_url}`);
@@ -1525,6 +1703,7 @@ jobs:
       inputs.skip_website_pr != true &&
       inputs.projects == '' &&
       (needs.setup.outputs.commercial == 'true' ||
+       needs.setup.outputs.prerelease == 'true' ||
        needs.next-snapshot-config.result == 'success')
     runs-on: ubuntu-latest
     steps:
@@ -1537,7 +1716,10 @@ jobs:
           COMMERCIAL: ${{ needs.setup.outputs.commercial }}
           ENTRIES: ${{ needs.setup.outputs.entries }}
           RESOLVED: ${{ needs.verify-tags.outputs.matrix }}
-          NEXT_VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+          NEXT_VERSIONS: ${{ needs.setup.outputs.prerelease == 'true'
+            && needs.setup.outputs.next-versions
+            || needs.next-snapshot-config.outputs.versions }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
           DRY_RUN: ${{ inputs.dry_run }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -1555,6 +1737,7 @@ jobs:
           const entries = JSON.parse(process.env.ENTRIES);
           const resolved = JSON.parse(process.env.RESOLVED).include;
           const nextVersions = JSON.parse(process.env.NEXT_VERSIONS || '{}');
+          const isPrereleaseRun = process.env.PRERELEASE === 'true';
 
           const WEBSITE = commercial
             ? 'spring-io/spring-website-commercial-content'
@@ -1707,6 +1890,33 @@ jobs:
             `https://x-access-token:${token}@github.com/${WEBSITE}.git`, 'website']);
 
           const boot = (entries.find(e => e.key === 'spring-boot') || {}).version || '';
+
+          // How this release describes itself. A milestone and a release candidate are
+          // announced like a GA release but published somewhere else - the Spring milestone
+          // repository rather than Maven Central - so the wording and the link both change,
+          // and the dependency snippets below need a <repositories> block a GA post does not.
+          const phase = (() => {
+            const m = releaseVersion.match(/-(M|RC)(\d+)$/);
+            if (!m) {
+              return {
+                prerelease: false,
+                blurb: 'the General Availability (RELEASE) of',
+                repoName: 'Maven Central',
+                repoUrl: 'https://repo1.maven.org/maven2/org/springframework/cloud/' +
+                  `spring-cloud-dependencies/${releaseVersion}/`,
+              };
+            }
+            const label = m[1] === 'M' ? `Milestone ${m[2]} (M${m[2]})`
+              : `Release Candidate ${m[2]} (RC${m[2]})`;
+            return {
+              prerelease: true,
+              blurb: `the ${label} of`,
+              repoName: 'the Spring milestone repository',
+              repoUrl: 'https://repo.spring.io/milestone/org/springframework/cloud/' +
+                `spring-cloud-dependencies/${releaseVersion}/`,
+              milestoneRepoUrl: 'https://repo.spring.io/milestone',
+            };
+          })();
           const today = new Date().toISOString().slice(0, 10);
           const dashed = releaseVersion.replace(/\./g, '-');
 
@@ -1755,11 +1965,10 @@ jobs:
             B.push(`author: ${AUTHOR}`);
             B.push('---');
             B.push('');
-            B.push('On behalf of the community, I am pleased to announce that the General ' +
-              `Availability (RELEASE) of the [Spring Cloud ${releaseVersion}]` +
+            B.push('On behalf of the community, I am pleased to announce that ' +
+              `${phase.blurb} the [Spring Cloud ${releaseVersion}]` +
               '(https://cloud.spring.io) Release Train is available today. The release can be ' +
-              'found in [Maven Central](https://repo1.maven.org/maven2/org/springframework/' +
-              `cloud/spring-cloud-dependencies/${releaseVersion}/). You can check out the ` +
+              `found in [${phase.repoName}](${phase.repoUrl}). You can check out the ` +
               `${releaseVersion} [release notes for more information](https://github.com/` +
               `spring-cloud/spring-cloud-release/wiki/Spring-Cloud-${trainLine}-Release-Notes).`);
             B.push('');
@@ -1820,6 +2029,21 @@ jobs:
             B.push('    </dependency>');
             B.push('    ...');
             B.push('</dependencies>');
+            if (phase.prerelease) {
+              // Without this the snippet does not build: a milestone BOM is not on Central,
+              // and the reader's first move after copying it is an unresolvable dependency.
+              B.push('');
+              B.push('<repositories>');
+              B.push('    <repository>');
+              B.push('        <id>spring-milestones</id>');
+              B.push('        <name>Spring Milestones</name>');
+              B.push(`        <url>${phase.milestoneRepoUrl}</url>`);
+              B.push('        <snapshots>');
+              B.push('            <enabled>false</enabled>');
+              B.push('        </snapshots>');
+              B.push('    </repository>');
+              B.push('</repositories>');
+            }
             B.push('```');
             B.push('');
             B.push('or with Gradle:');
@@ -1846,6 +2070,13 @@ jobs:
             B.push("compile 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'");
             B.push('...');
             B.push('}');
+            if (phase.prerelease) {
+              B.push('');
+              B.push('repositories {');
+              B.push('mavenCentral()');
+              B.push(`maven { url '${phase.milestoneRepoUrl}' }`);
+              B.push('}');
+            }
             B.push('```');
 
             fs.mkdirSync(path.dirname(`website/${blogFile}`), { recursive: true });
@@ -2005,7 +2236,10 @@ jobs:
             // template's version to begin with. The entry is still added, since the version
             // and tag are right and a missing entry is worse, but it is reported so the PR
             // says which field to look at.
-            const strays = [...new Set((block.join('\n').match(/\d+\.\d+\.\d+(?:\.\d+)?/g) || [])
+            // The qualifier is part of the version: without it, cloning for 5.1.0-M1 would
+            // match the bare 5.1.0 inside it and report the entry's own version as a stray.
+            const strays = [...new Set(
+              (block.join('\n').match(/\d+\.\d+\.\d+(?:\.\d+)?(?:-(?:M|RC)\d+)?/g) || [])
               .filter(v => v !== e.version))];
             if (strays.length) {
               rec.strays = strays;
@@ -2064,11 +2298,23 @@ jobs:
           // whose version is unchanged simply produces no diff, and its snapshot entry still
           // has to follow the new snapshot train. Each file holds one GENERAL_AVAILABILITY
           // and one SNAPSHOT entry per major.minor line, so the released version's line
-          // picks out exactly the two entries to update.
+          // picks out exactly the entries to update.
+          //
+          // A train that ships milestones adds a third status to that line, and the site
+          // carries exactly one of them at a time - the entry is promoted rather than
+          // accumulated:
+          //
+          //   5.1.0-M1   no entry on the line yet, so one is created  PRERELEASE  5.1.0-M1
+          //   5.1.0-M2   the same entry, rewritten                    PRERELEASE  5.1.0-M2
+          //   5.1.0-RC1  the same entry, rewritten                    PRERELEASE  5.1.0-RC1
+          //   5.1.0      the same entry, rewritten and promoted       GA          5.1.0
+          //
+          // So a reader never sees a milestone listed next to the GA that supersedes it, and
+          // the line only ever grows by one entry however many pre-releases it takes.
           for (const e of (commercial ? [] : projects)) {
             const rel = `project/${docFor(e.key)}/documentation.json`;
             const file = `website/${rel}`;
-            const rec = { project: e.key, file: rel, ga: '', snapshot: '', status: 'unchanged' };
+            const rec = { project: e.key, file: rel, ga: '', snapshot: '', prerelease: '', status: 'unchanged' };
             result.docs.push(rec);
 
             // spring-cloud-build has no page on the website, so it has no file here.
@@ -2102,28 +2348,239 @@ jobs:
               return true;
             };
 
+            // Rewrites the status of the entry that currently carries `version`. Same
+            // one-match-or-nothing rule as replaceVersion, and matched on the pair so that
+            // two entries sharing a status cannot be confused for each other.
+            const replaceStatus = (version, newStatus) => {
+              const quoted = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              // Anchored on the version so the status of a neighbouring entry cannot be
+              // rewritten instead. The version is re-emitted rather than left to a capture
+              // group spanning it, because dropping it here would blank the field.
+              const re = new RegExp(
+                `("version"\\s*:\\s*")${quoted}("[\\s\\S]{0,400}?"status"\\s*:\\s*")[A-Z_]+(")`);
+              const before = text;
+              text = text.replace(re, `$1${version}$2${newStatus}$3`);
+              return text !== before;
+            };
+
+            // No githubTag handling here, unlike the commercial pass above: entries on the
+            // OSS site do not carry that field at all. An entry is identified by its version
+            // and its ref, and both are handled explicitly.
+
             const target = lineOf(e.version);
-            const ga = list.find(x =>
-              x.status === 'GENERAL_AVAILABILITY' && lineOf(x.version) === target);
-            const snap = list.find(x =>
-              x.status === 'SNAPSHOT' && lineOf(x.version) === target);
+            const onLine = x => x.version && lineOf(x.version) === target;
+            const ga = list.find(x => x.status === 'GENERAL_AVAILABILITY' && onLine(x));
+            const snap = list.find(x => x.status === 'SNAPSHOT' && onLine(x));
+            const pre = list.find(x => x.status === 'PRERELEASE' && onLine(x));
             const nextSnap = nextVersions[e.key] || '';
 
-            if (!ga && !snap) {
-              rec.status = 'no-entry';
-              console.log(`${rel}: no ${target} entry - skipped.`);
-              continue;
-            }
-            if (ga && ga.version !== e.version) {
-              if (replaceVersion(ga.version, e.version)) rec.ga = `${ga.version} → ${e.version}`;
-              else rec.status = 'ambiguous';
-            }
-            if (snap && nextSnap && snap.version !== nextSnap) {
-              if (replaceVersion(snap.version, nextSnap)) {
-                rec.snapshot = `${snap.version} → ${nextSnap}`;
+            if (isPrereleaseRun) {
+              // The snapshot entry is deliberately untouched: main has not moved off its
+              // snapshot, so there is nothing to follow. nextVersions is empty on this path
+              // anyway, but the intent is worth stating.
+              if (pre) {
+                if (pre.version !== e.version) {
+                  if (replaceVersion(pre.version, e.version)) {
+                    rec.prerelease = `${pre.version} → ${e.version}`;
+                  } else {
+                    rec.status = 'ambiguous';
+                  }
+                }
               } else {
-                rec.status = 'ambiguous';
+                // First pre-release of this line, so there is no entry to rewrite. Creating
+                // one is handled below, after the in-place cases, because it splices lines
+                // rather than editing them.
+                rec.status = 'needs-entry';
               }
+            } else {
+              if (!ga && !snap && !pre) {
+                rec.status = 'no-entry';
+                console.log(`${rel}: no ${target} entry - skipped.`);
+                continue;
+              }
+              if (ga && ga.version !== e.version) {
+                if (replaceVersion(ga.version, e.version)) rec.ga = `${ga.version} → ${e.version}`;
+                else rec.status = 'ambiguous';
+              }
+              // The GA that concludes a pre-release cycle. With no GA entry on the line the
+              // pre-release entry becomes it, which is the whole point of promoting in place;
+              // with one already there the pre-release entry is stale and its version is
+              // folded into the GA entry above, so it is dropped rather than left behind
+              // advertising an RC that GA has superseded.
+              if (pre) {
+                if (!ga) {
+                  const versionOk = pre.version === e.version ||
+                    replaceVersion(pre.version, e.version);
+                  if (versionOk && replaceStatus(e.version, 'GENERAL_AVAILABILITY')) {
+                    rec.ga = `${pre.version} → ${e.version} (promoted from PRERELEASE)`;
+                    // `current` marks the one release the site points people at. The entry
+                    // being promoted has carried current: false since it was a milestone, so
+                    // without this the GA of a whole new line would ship marked not-current
+                    // while the previous line kept the flag. An ordinary GA release never hits
+                    // this: it edits an entry that already holds the flag.
+                    //
+                    // Done over the entry blocks rather than by regex around the version,
+                    // because field order is not consistent across these files - most write
+                    // version first, spring-cli writes it last - so "the current after this
+                    // version" is not a safe thing to match on.
+                    const curLines = text.split('\n');
+                    const curBlocks = entryBlocks(curLines);
+                    if (curBlocks.length === list.length) {
+                      const promoted = list.indexOf(pre);
+                      let flagged = false;
+                      for (let bi = 0; bi < list.length; bi++) {
+                        const want = bi === promoted;
+                        for (let ln = curBlocks[bi].start; ln <= curBlocks[bi].end; ln++) {
+                          const next = curLines[ln].replace(
+                            /^(\s*"current"\s*:\s*)(?:true|false)/, `$1${want}`);
+                          if (next !== curLines[ln]) { curLines[ln] = next; flagged = true; }
+                        }
+                      }
+                      // A file with no current field anywhere is left exactly as it was.
+                      if (flagged) text = curLines.join('\n');
+                    } else {
+                      problem(`${rel}: could not line up entries to move the 'current' flag ` +
+                        `onto ${e.version} - set it by hand.`);
+                    }
+                  } else {
+                    rec.status = 'ambiguous';
+                  }
+                } else {
+                  rec.prerelease = `${pre.version} superseded by ${e.version}`;
+                  problem(`${rel}: the ${target} line has both a GENERAL_AVAILABILITY entry ` +
+                    `and a PRERELEASE entry for ${pre.version}. The GA entry was updated; ` +
+                    'remove the stale pre-release entry by hand.');
+                }
+              }
+              if (snap && nextSnap && snap.version !== nextSnap) {
+                if (replaceVersion(snap.version, nextSnap)) {
+                  rec.snapshot = `${snap.version} → ${nextSnap}`;
+                } else {
+                  rec.status = 'ambiguous';
+                }
+              }
+            }
+
+            if (rec.status === 'needs-entry') {
+              // ── first pre-release of a new line: clone an entry for it ──────────────
+              // Same shape as the commercial path above and for the same reason: these
+              // files have no single entry shape to assemble from fields, so the newest
+              // entry that already looks right is copied as text.
+              const lines = text.split('\n');
+              const blocks = entryBlocks(lines);
+              if (blocks.length !== list.length) {
+                rec.status = 'unrecognised-format';
+                console.log(`${rel}: not one block per entry - left alone.`);
+                continue;
+              }
+
+              // Which entry to copy, and it matters which. On this site a pre-release entry's
+              // ref is keyed to the *line*, not the version - spring-data-jpa carries
+              //
+              //   PRERELEASE  4.2.0-M1        ref .../reference/4.2/
+              //   SNAPSHOT    4.2.0-SNAPSHOT  ref .../reference/4.2-SNAPSHOT/
+              //
+              // so the same line's SNAPSHOT entry is the right template: it is the only entry
+              // already pointing at this line, and turning it into the pre-release entry is
+              // one substitution, `<line>-SNAPSHOT` -> `<line>`. Cloning a previous line's GA
+              // entry instead would leave the ref on that line - substituting 5.0.5 -> 5.1.0-M1
+              // never touches a ref that reads .../reference/5.0/ - and quietly point the new
+              // milestone at the old line's documentation.
+              const snapAnchor = list.findIndex(x => x.status === 'SNAPSHOT' && onLine(x));
+
+              // Fallback for a line with no snapshot entry yet. The line token is substituted
+              // as well as the version, so the ref still lands on the right line.
+              const versionInRef = x => {
+                const ref = x.ref || '';
+                return ref.includes('{version}') || (!!x.version && ref.includes(x.version));
+              };
+              const gaCandidates = list
+                .map((x, i) => i)
+                .filter(i => list[i].status === 'GENERAL_AVAILABILITY' &&
+                  NUMERIC.test(list[i].version || '') && !versionInRef(list[i]));
+              const gaAnchor = gaCandidates.reduce(
+                (best, i) => (best < 0 || cmp(list[i].version, list[best].version) > 0 ? i : best),
+                -1);
+
+              const anchor = snapAnchor >= 0 ? snapAnchor : gaAnchor;
+              if (anchor < 0) {
+                rec.status = 'no-template';
+                console.log(`${rel}: no ${target} snapshot entry and no released Antora entry ` +
+                  'to clone one from - skipped.');
+                continue;
+              }
+
+              const template = list[anchor];
+              const fromLine = lineOf(template.version);
+              let block = lines.slice(blocks[anchor].start, blocks[anchor].end + 1);
+              if (snapAnchor >= 0) {
+                // 5.1-SNAPSHOT -> 5.1 in ref and api. Bounded on the left so 15.1 cannot match.
+                const snapToken = new RegExp(
+                  `(?<![\\d.])${fromLine.replace(/\./g, '\\.')}-SNAPSHOT`, 'g');
+                block = block.map(l => l.replace(snapToken, fromLine));
+              } else {
+                const lineToken = new RegExp(
+                  `(?<![\\d.])${fromLine.replace(/\./g, '\\.')}(?![\\d.])`, 'g');
+                const bounded = new RegExp(
+                  `(?<![\\d.])${template.version.replace(/\./g, '\\.')}(?![\\d.])`, 'g');
+                block = block.map(l => l.replace(bounded, e.version).replace(lineToken, target));
+              }
+
+              // version, status and current are set rather than substituted: the version field
+              // must end up exactly this release whatever the template held, the template's
+              // status is SNAPSHOT or GENERAL_AVAILABILITY and either would misdescribe this
+              // entry, and `current` marks the one release a project points people at - which
+              // a milestone never is. Every PRERELEASE entry on the site reads current: false.
+              block = block.map(l => l
+                .replace(/^(\s*"version"\s*:\s*")[^"]*(")/, `$1${e.version}$2`)
+                .replace(/^(\s*"status"\s*:\s*")[A-Z_]+(")/, '$1PRERELEASE$2')
+                .replace(/^(\s*"current"\s*:\s*)(?:true|false)/, '$1false'));
+
+              const rendered = block.join('\n');
+              if (!/"status"\s*:\s*"PRERELEASE"/.test(rendered) ||
+                  !new RegExp(`"version"\\s*:\\s*"${e.version.replace(/\./g, '\\.')}"`).test(rendered)) {
+                rec.status = 'no-template';
+                console.log(`${rel}: the ${template.version} entry has no version or status ` +
+                  'field to set - left alone.');
+                continue;
+              }
+
+              // Newest first or oldest first differs by file, so the new entry goes on
+              // whichever end already holds the newest version. Anything else reorders the
+              // file around it.
+              const newestFirst = list.length > 1 &&
+                cmp(list[0].version || '0', list[list.length - 1].version || '0') > 0;
+              if (newestFirst) {
+                block[block.length - 1] = '  },';
+                lines.splice(blocks[0].start, 0, ...block);
+              } else if (lines[blocks[list.length - 1].end] === '  }') {
+                lines[blocks[list.length - 1].end] = '  },';
+                block[block.length - 1] = '  }';
+                lines.splice(blocks[list.length - 1].end + 1, 0, ...block);
+              } else {
+                block[block.length - 1] = '  },';
+                lines.splice(blocks[list.length - 1].end + 1, 0, ...block);
+              }
+
+              // The splice is a text edit, so prove the result is still the same JSON plus
+              // one entry before writing it.
+              const updated = lines.join('\n');
+              let check = null;
+              try { check = JSON.parse(updated); } catch (err) { /* check stays null */ }
+              if (!check || check.length !== list.length + 1 ||
+                  !check.some(x => x.version === e.version && x.status === 'PRERELEASE')) {
+                rec.status = 'error';
+                console.log(`${rel}: the edit did not produce the expected JSON - left alone.`);
+                continue;
+              }
+
+              fs.writeFileSync(file, updated);
+              rec.status = 'added';
+              rec.prerelease = `added ${e.version}`;
+              rec.from = template.version;
+              console.log(`${rel}: added ${e.version} as PRERELEASE, cloned from ` +
+                `${template.version} - first ${target} entry`);
+              continue;
             }
 
             if (text !== original) {
@@ -2131,7 +2588,9 @@ jobs:
               if (rec.status === 'unchanged') rec.status = 'updated';
             }
             console.log(`${rel}: ${rec.status}` +
-              `${rec.ga ? ` · GA ${rec.ga}` : ''}${rec.snapshot ? ` · ${rec.snapshot}` : ''}`);
+              `${rec.ga ? ` · GA ${rec.ga}` : ''}` +
+              `${rec.prerelease ? ` · pre-release ${rec.prerelease}` : ''}` +
+              `${rec.snapshot ? ` · ${rec.snapshot}` : ''}`);
           }
 
           // ── e. commit, push, open the PR ────────────────────────────────────────────
@@ -2381,6 +2840,7 @@ jobs:
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           RELEASE_VERSION: ${{ inputs.release_version }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
           DRY_RUN: ${{ inputs.dry_run }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -2390,6 +2850,7 @@ jobs:
 
           const token = process.env.GH_TOKEN;
           const releaseVersion = process.env.RELEASE_VERSION;
+          const isPrerelease = process.env.PRERELEASE === 'true';
           const dryRun = process.env.DRY_RUN === 'true';
           const runUrl = process.env.RUN_URL || '';
 
@@ -2506,6 +2967,29 @@ jobs:
               `${FILE} already maps ${target}.x to ${releaseVersion}.`);
           }
 
+          // A milestone or release candidate BOM is published to the Spring milestone
+          // repository, not to Maven Central, so a mapping that does not declare that
+          // repository would generate projects nobody can build: start.spring.io would hand
+          // out a pom pointing at a version Central has never heard of.
+          //
+          // The whole bom block is searched rather than just this mapping's own lines,
+          // because the repository can be declared once for the bom and inherited by every
+          // mapping under it. That makes this deliberately permissive - it answers "does
+          // this bom know about milestones at all", not "does this exact mapping". Getting
+          // that wrong in the permissive direction opens a PR a human reviews; getting it
+          // wrong the other way blocks a release for no reason.
+          if (isPrerelease) {
+            const bomBlock = lines.slice(keyLine, blockEnd).join('\n');
+            if (!/milestone/i.test(bomBlock)) {
+              finish('no-milestone-repo',
+                `${releaseVersion} is a pre-release, published to the Spring milestone ` +
+                `repository rather than Maven Central, but the spring-cloud bom in ${FILE} ` +
+                'declares no milestone repository. Pointing it at this version would make ' +
+                'start.spring.io generate projects that cannot resolve the BOM. Add the ' +
+                'milestone repository to that bom by hand first; nothing was changed.');
+            }
+          }
+
           // ── c. the one-line change ─────────────────────────────────────────────────
           lines[hit.index] = `${hit.prefix}${hit.quote}${releaseVersion}${hit.quote}${hit.trail}`;
           fs.writeFileSync(path, lines.join('\n'));
@@ -2592,7 +3076,8 @@ jobs:
     needs: [setup, verify-tags, next-snapshot-config, new-milestones]
     if: |
       !cancelled() &&
-      needs.next-snapshot-config.result == 'success' &&
+      (needs.next-snapshot-config.result == 'success' ||
+       needs.setup.outputs.prerelease == 'true') &&
       needs.setup.outputs.commercial != 'true' &&
       needs.setup.outputs.hotfix != 'true' &&
       inputs.skip_release_board != true &&
@@ -2606,7 +3091,9 @@ jobs:
           RELEASE_VERSION: ${{ inputs.release_version }}
           NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
           ENTRIES: ${{ needs.setup.outputs.entries }}
-          NEXT_VERSIONS: ${{ needs.next-snapshot-config.outputs.versions }}
+          NEXT_VERSIONS: ${{ needs.setup.outputs.prerelease == 'true'
+            && needs.setup.outputs.next-versions
+            || needs.next-snapshot-config.outputs.versions }}
           # The columns whose contents follow the train. Anything else - Done, and whatever
           # else a board has grown - stays on the board being closed.
           CARRY_OVER_COLUMNS: 'Todo,In Progress'
@@ -3034,6 +3521,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.release_version }}
           COMMERCIAL: ${{ needs.setup.outputs.commercial }}
           HOTFIX: ${{ needs.setup.outputs.hotfix }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
           NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
           PROJECTS_FILTER: ${{ inputs.projects }}
           SKIP_CLOSE_MILESTONES: ${{ inputs.skip_close_milestones }}
@@ -3045,6 +3533,7 @@ jobs:
           const dryRun = (process.env.DRY_RUN || 'false') === 'true';
           const skipCloseMilestones = (process.env.SKIP_CLOSE_MILESTONES || 'false') === 'true';
           const hotfix = (process.env.HOTFIX || 'false') === 'true';
+          const isPrerelease = (process.env.PRERELEASE || 'false') === 'true';
           const commercial = (process.env.COMMERCIAL || 'false') === 'true';
           const releaseVersion = process.env.RELEASE_VERSION || '';
           const nextVersion = process.env.NEXT_VERSION || '';
@@ -3076,6 +3565,11 @@ jobs:
           L.push('');
           L.push(`Release **${releaseVersion}** · ${commercial ? 'commercial' : 'OSS'}` +
             (hotfix ? ' · **hotfix** (no snapshot train, new milestone or merge back)' : '') +
+            // Said plainly, because the absence of a snapshot file and of a version bump is
+            // the single most surprising thing about one of these runs to anyone reading the
+            // summary who has only ever seen a GA release.
+            (isPrerelease ? ' · **pre-release** (the train stays on its current snapshot: ' +
+              'no snapshot properties file, no version bump - the merge back still happens)' : '') +
             (filter ? ` · filtered to \`${filter}\`` : '') +
             (skipCloseMilestones ? ' · **milestones left open** (`skip_close_milestones`)' : ''));
           L.push('');
@@ -3092,9 +3586,9 @@ jobs:
             'already-closed': '➖', 'already-exists': '➖', 'already-merged': '➖',
             'nothing-to-push': '➖', 'no-release-branch': '➖',
             // website-pr
-            'branch-exists': '➖', 'no-changes': '➖',
+            'branch-exists': '➖', 'no-changes': '➖', added: '✅', 'needs-entry': '⚠️',
             // start-site-pr
-            'already-current': '➖', 'no-mapping': '⚠️',
+            'already-current': '➖', 'no-mapping': '⚠️', 'no-milestone-repo': '⚠️',
             'file-not-found': '❌', 'bom-not-found': '❌',
             // release-board
             done: '✅', 'would-run': '🔎', partial: '⚠️',
