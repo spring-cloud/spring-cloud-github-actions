@@ -39,8 +39,21 @@ run-name: "Create OSS Release Branch - ${{ inputs.oss_repo }} (${{ inputs.oss_br
 #   pom versions stay at -INTERNAL-SNAPSHOT until release-train-ready stamps the real
 #   release versions.  Release branches are not registered in projects.json.
 #
+#   On a milestone or release candidate the phase is appended, so the branch is
+#   release/5.1.0-M1 or release/5.1.0-RC2.  The phase comes from the
+#   spring_cloud_release_train input (2026.0.0-M1 → M1); the pom supplies the numeric
+#   version.  Nothing in the tree can supply it: at this point every version is
+#   -INTERNAL-SNAPSHOT or -SNAPSHOT, so the content is identical whether this branch is
+#   about to become M1, RC1 or the GA.
+#
+#   The phase is taken back out before the properties file is looked up, so every
+#   pre-release of a train reads one 2026_0_0-internal-snapshot.properties.  The internal
+#   branch sits at 5.1.0-INTERNAL-SNAPSHOT from M1 through to GA and does not move
+#   between pre-releases, so per-phase files would be byte-identical.
+#
 # After both branches exist:
-#   - A milestone is created in the OSS repo
+#   - A milestone is created in the OSS repo, named for the same qualified version
+#     (5.1.0-M1), which is the title post-release later closes and rolls forward
 #   - release-train-join.yml and release-train-ready.yml are ensured in the release branch
 #   - release-train-join.yml is triggered with deployment-destination=Maven Central
 #     (unless the trigger_release_train_join input is set to false to opt out)
@@ -62,7 +75,7 @@ on:
         required: true
         type: string
       spring_cloud_release_train:
-        description: 'Spring Cloud release train version this release is part of (e.g. 2026.1.0). Used to look up the -INTERNAL-SNAPSHOT properties file in spring-cloud-release-commercial@jenkins-releaser-config.'
+        description: 'Spring Cloud release train version this release is part of (e.g. 2026.1.0, or 2026.0.0-M1 / 2026.0.0-RC2 for a pre-release). The -M<n>/-RC<n> names the release branch and the milestone; it is stripped before looking up the -INTERNAL-SNAPSHOT properties file in spring-cloud-release-commercial@jenkins-releaser-config, so one file serves the whole train. Pass the same value here as to release-train-ready and post-release.'
         required: true
         type: string
       sha:
@@ -87,6 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_version:        ${{ steps.derive.outputs.release_version }}
+      qualified_version:      ${{ steps.derive.outputs.qualified_version }}
+      version_qualifier:      ${{ steps.derive.outputs.version_qualifier }}
       commercial_repo:        ${{ steps.derive.outputs.commercial_repo }}
       commercial_project:     ${{ steps.derive.outputs.commercial_project }}
       commercial_branch:      ${{ steps.derive.outputs.commercial_branch }}
@@ -122,21 +137,64 @@ jobs:
           fi
           INTERNAL_BRANCH="$(echo "$release_version" | cut -d. -f1-2).x-internal"
 
-          # The internal snapshot properties file is looked up by release train version:
-          # 2026.1.0 -> 2026.1.0-INTERNAL-SNAPSHOT -> 2026_1_0-internal-snapshot.properties
+          # The release train version carries the phase this release is part of - 2026.0.0-M1,
+          # 2026.0.0-RC2, or a bare 2026.0.0 for GA - and it is the only thing here that does.
+          # At this point in the release every version in the tree is -INTERNAL-SNAPSHOT or
+          # -SNAPSHOT, so nothing in the properties file content says whether the branch being
+          # cut will become a milestone, a release candidate or the GA. The input does, and it
+          # is the same string passed to spring-release-train-project-ready and to
+          # post-release, so one train version means the same thing at every step.
           train="${{ inputs.spring_cloud_release_train }}"
+
+          # A caller may already have appended the suffix. Compared upper-cased so the check is
+          # case-insensitive, then cut from the original by length so the caller's own casing of
+          # the part in front survives.
           train_upper="$(echo "$train" | tr '[:lower:]' '[:upper:]')"
           if [[ "$train_upper" == *-INTERNAL-SNAPSHOT ]]; then
-            INTERNAL_TRAIN_VERSION="$train"
+            stripped_upper="${train_upper%-INTERNAL-SNAPSHOT}"
+            train="${train:0:${#stripped_upper}}"
+            train_upper="$stripped_upper"
+          fi
+
+          # Pull the phase off the train version, and take it back out of the train itself: the
+          # internal branch sits at 5.1.0-INTERNAL-SNAPSHOT from M1 all the way to GA and does
+          # not move between pre-releases, so one 2026_0_0-internal-snapshot.properties serves
+          # the whole train. Naming that file per phase would mean a row of byte-identical
+          # files whose only job was to spell their own name.
+          VERSION_QUALIFIER=""
+          if [[ "$train_upper" =~ -(M|RC)([0-9]+)$ ]]; then
+            VERSION_QUALIFIER="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+            stripped_upper="${train_upper%-${VERSION_QUALIFIER}}"
+            train="${train:0:${#stripped_upper}}"
+          fi
+
+          INTERNAL_TRAIN_VERSION="${train}-INTERNAL-SNAPSHOT"
+
+          # Only for the log line below - update-project-versions derives this itself. Kept
+          # identical to releaseTrainVersionToFileName in that action's src/index.js: the
+          # qualifier is lower-cased, the numeric part is not. tr rather than bash's ${x,,} or
+          # GNU sed's \L, neither of which exists in the bash 3.2 on a developer's Mac.
+          lowered_qualifier="$(printf '%s' "${INTERNAL_TRAIN_VERSION#*-}" \
+            | tr '[:upper:]' '[:lower:]')"
+          INTERNAL_PROPS_FILE="$(printf '%s' "${INTERNAL_TRAIN_VERSION%%-*}-${lowered_qualifier}" \
+            | tr '.' '_').properties"
+
+          # Everything this release is named after carries the phase: release/5.1.0-M1 and a
+          # 5.1.0-M1 milestone, which are the branch post-release merges back and the milestone
+          # it closes before opening 5.1.0-M2.
+          if [[ -n "$VERSION_QUALIFIER" ]]; then
+            QUALIFIED_VERSION="${release_version}-${VERSION_QUALIFIER}"
           else
-            INTERNAL_TRAIN_VERSION="${train}-INTERNAL-SNAPSHOT"
+            QUALIFIED_VERSION="$release_version"
           fi
 
           COMMERCIAL_REPO="spring-cloud/${{ inputs.oss_repo }}-commercial"
           COMMERCIAL_PROJECT="${{ inputs.oss_repo }}-commercial"
-          COMMERCIAL_BRANCH="release/${release_version}"
+          COMMERCIAL_BRANCH="release/${QUALIFIED_VERSION}"
 
           echo "release_version=${release_version}"               >> "$GITHUB_OUTPUT"
+          echo "qualified_version=${QUALIFIED_VERSION}"           >> "$GITHUB_OUTPUT"
+          echo "version_qualifier=${VERSION_QUALIFIER}"           >> "$GITHUB_OUTPUT"
           echo "commercial_repo=${COMMERCIAL_REPO}"               >> "$GITHUB_OUTPUT"
           echo "commercial_project=${COMMERCIAL_PROJECT}"         >> "$GITHUB_OUTPUT"
           echo "commercial_branch=${COMMERCIAL_BRANCH}"           >> "$GITHUB_OUTPUT"
@@ -146,6 +204,9 @@ jobs:
           echo "OSS repo:           spring-cloud/${{ inputs.oss_repo }}"
           echo "OSS branch:         ${{ inputs.oss_branch }}"
           echo "Release version:    ${release_version}"
+          echo "Properties file:    ${INTERNAL_PROPS_FILE}"
+          echo "Phase:              ${VERSION_QUALIFIER:-GA}"
+          echo "Qualified version:  ${QUALIFIED_VERSION}"
           echo "Commercial repo:    ${COMMERCIAL_REPO}"
           echo "Internal branch:    ${INTERNAL_BRANCH}"
           echo "Internal train:     ${INTERNAL_TRAIN_VERSION}"
@@ -282,7 +343,7 @@ jobs:
 
           if gh api "repos/${commercial_repo}/git/ref/heads/${commercial_branch}" --silent 2>/dev/null; then
             echo "ERROR: ${commercial_branch} already exists in ${commercial_repo}."
-            echo "Version ${{ needs.derive.outputs.release_version }} looks like it has already been released."
+            echo "Version ${{ needs.derive.outputs.qualified_version }} looks like it has already been released."
             exit 1
           fi
 
@@ -328,7 +389,7 @@ jobs:
 
   # Create a milestone in the OSS repo (not the commercial repo) for the release version.
   create-milestone:
-    name: Create Milestone - ${{ needs.derive.outputs.release_version }}
+    name: Create Milestone - ${{ needs.derive.outputs.qualified_version }}
     needs: derive
     runs-on: ubuntu-latest
     steps:
@@ -339,7 +400,10 @@ jobs:
         uses: ./.github/actions/create-milestone
         with:
           repo:    spring-cloud/${{ inputs.oss_repo }}
-          version: ${{ needs.derive.outputs.release_version }}
+          # The qualified version, so a milestone release opens 5.1.0-M1 rather than 5.1.0.
+          # post-release closes this exact title and opens the next one, and dependabot-scan
+          # resolves PRs against it, so it has to match what the release is actually called.
+          version: ${{ needs.derive.outputs.qualified_version }}
           token:   ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
   # Check whether the OSS branch already contains the required release train workflow

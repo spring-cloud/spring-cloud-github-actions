@@ -60,8 +60,27 @@ A release type says *where* a release is built and published. It is a separate q
 whether that release is a milestone, a release candidate or a GA, and an OSS train is all
 three in turn: `2026.0.0-M1`, `-M2`, `-RC1`, then `2026.0.0`.
 
-The entry points above are unchanged for a pre-release — the same `release/` branch, the
-same `release-train-join`. Two things downstream are not:
+The entry points above are mostly unchanged for a pre-release, with one difference: the
+release branch and the milestone carry the phase, so `create-oss-release-branch` cuts
+`release/5.1.0-M1` and opens a `5.1.0-M1` milestone rather than `5.1.0`.
+
+The phase comes from the `spring_cloud_release_train` input, because nothing else can
+supply it. When the release branch is cut every version in the tree is still
+`-INTERNAL-SNAPSHOT` or `-SNAPSHOT`, so the properties file content is identical whether
+this branch is about to become M1, RC1 or the GA. Passing `2026.0.0-M1` is what makes it a
+milestone — the same string you pass to `release-train-ready` and to `post-release`, so one
+train version means the same thing at all three steps.
+
+The phase is stripped again before the internal properties file is looked up, so every
+pre-release of a train reads one `2026_0_0-internal-snapshot.properties`. The internal
+branch stays at `5.1.0-INTERNAL-SNAPSHOT` from M1 through to GA, so per-phase copies of
+that file would be byte-identical.
+
+The result is one name through the whole chain: the release properties file says
+`spring-cloud-config=5.1.0-M1`, the release train checks out `release/5.1.0-M1`, and
+`post-release` merges `release/5.1.0-M1` back and closes the `5.1.0-M1` milestone.
+
+Two further things downstream differ:
 
 - [`verify-no-snapshot-versions`](../.github/actions/verify-no-snapshot-versions/README.md)
   is passed `allow-prerelease`, because a milestone build legitimately carries a mixture of
