@@ -2784,24 +2784,44 @@ jobs:
       inputs.projects == ''
     runs-on: ubuntu-latest
     steps:
+      # Only so the script below can require .github/scripts/.
+      - uses: actions/checkout@v4
+
       - name: Bump the Spring Cloud version and open the PR
         id: run
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           RELEASE_VERSION: ${{ inputs.release_version }}
           PRERELEASE: ${{ needs.setup.outputs.prerelease }}
+          ENTRIES: ${{ needs.setup.outputs.entries }}
           DRY_RUN: ${{ inputs.dry_run }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const path = require('path');
           const { execFileSync } = require('child_process');
+
+          const prerelease = require(path.join(process.env.GITHUB_WORKSPACE,
+            '.github', 'scripts', 'prerelease-rank.js'));
+          const { rangeFor, snapshotRangeFor } = require(path.join(
+            process.env.GITHUB_WORKSPACE, '.github', 'scripts',
+            'boot-compatibility-range.js'));
 
           const token = process.env.GH_TOKEN;
           const releaseVersion = process.env.RELEASE_VERSION;
           const isPrerelease = process.env.PRERELEASE === 'true';
           const dryRun = process.env.DRY_RUN === 'true';
           const runUrl = process.env.RUN_URL || '';
+
+          // The compatibility range is anchored on the Spring Boot version this train is
+          // built against, which is in the same properties file as everything else.
+          const entries = JSON.parse(process.env.ENTRIES || '[]');
+          const bootVersion = (entries.find(e => e.key === 'spring-boot') || {}).version || '';
+
+          // Filled in by whichever branch of the edit runs, so the summary and the PR body
+          // do not have to re-derive what changed.
+          let changeDetail = '';
 
           const REPO = 'spring-io/start.spring.io';
           const BASE = 'main';
@@ -2830,9 +2850,6 @@ jobs:
             process.exit(0);
           };
 
-          const lineOf = v => v.split('.').slice(0, 2).join('.');
-          const target = lineOf(releaseVersion);
-
           // ── a. is there already a branch for this release? ──────────────────────────
           let branchExists = false;
           try {
@@ -2855,12 +2872,12 @@ jobs:
           git(['clone', '--quiet', '--depth', '1', '--branch', BASE,
             `https://x-access-token:${token}@github.com/${REPO}.git`, 'start']);
 
-          const path = `start/${FILE}`;
-          if (!fs.existsSync(path)) {
+          const filePath = `start/${FILE}`;
+          if (!fs.existsSync(filePath)) {
             finish('file-not-found', `${FILE} is not in ${REPO} - it has moved.`);
           }
 
-          const original = fs.readFileSync(path, 'utf8');
+          const original = fs.readFileSync(filePath, 'utf8');
           const lines = original.split('\n');
           const indentOf = l => l.match(/^(\s*)/)[1].length;
 
@@ -2891,58 +2908,154 @@ jobs:
           }
           console.log(`spring-cloud bom: ${FILE}:${keyLine + 1}-${blockEnd}`);
 
-          const mappings = [];
+          // Each mapping is an item starting at a `- compatibilityRange:` line and running
+          // to the next one, or to the end of the bom block. Handled as lines rather than
+          // parsed YAML so this stays a splice and the other 700 lines of that file keep
+          // their formatting exactly.
+          const ITEM = /^(\s*)-\s+compatibilityRange:\s*(.*?)\s*$/;
+
+          const items = [];
           for (let i = keyLine + 1; i < blockEnd; i++) {
-            const m = lines[i].match(VERSION_RE);
-            if (m) mappings.push({ index: i, version: m[3], prefix: m[1], quote: m[2], trail: m[4] });
+            const m = lines[i].match(ITEM);
+            if (m) items.push({ start: i, indent: m[1], range: m[2], end: blockEnd });
           }
-          result.mappings = mappings.map(m => m.version);
-          console.log(`Versions currently mapped: ${result.mappings.join(', ') || 'none'}`);
-
-          const hit = mappings.find(m => lineOf(m.version) === target);
-          if (!hit) {
-            // Deliberately not a PR. A new mapping needs a compatibilityRange saying which
-            // Spring Boot versions this train supports, and that is not derivable from
-            // anything this workflow reads.
-            finish('no-mapping',
-              `No ${target}.x mapping in ${FILE} - start.spring.io does not currently offer ` +
-              `this train line. Add a mapping with the right compatibilityRange by hand; ` +
-              'nothing was changed.');
+          for (let k = 0; k < items.length - 1; k++) items[k].end = items[k + 1].start;
+          if (!items.length) {
+            finish('bom-not-found',
+              `The spring-cloud bom in ${FILE} has no compatibilityRange mappings.`);
           }
-
-          result.from = hit.version;
-          if (hit.version === releaseVersion) {
-            finish('already-current',
-              `${FILE} already maps ${target}.x to ${releaseVersion}.`);
-          }
-
-          // A milestone or release candidate BOM is published to the Spring milestone
-          // repository, not to Maven Central, so a mapping that does not declare that
-          // repository would generate projects nobody can build: start.spring.io would hand
-          // out a pom pointing at a version Central has never heard of.
-          //
-          // The whole bom block is searched rather than just this mapping's own lines,
-          // because the repository can be declared once for the bom and inherited by every
-          // mapping under it. That makes this deliberately permissive - it answers "does
-          // this bom know about milestones at all", not "does this exact mapping". Getting
-          // that wrong in the permissive direction opens a PR a human reviews; getting it
-          // wrong the other way blocks a release for no reason.
-          if (isPrerelease) {
-            const bomBlock = lines.slice(keyLine, blockEnd).join('\n');
-            if (!/milestone/i.test(bomBlock)) {
-              finish('no-milestone-repo',
-                `${releaseVersion} is a pre-release, published to the Spring milestone ` +
-                `repository rather than Maven Central, but the spring-cloud bom in ${FILE} ` +
-                'declares no milestone repository. Pointing it at this version would make ' +
-                'start.spring.io generate projects that cannot resolve the BOM. Add the ' +
-                'milestone repository to that bom by hand first; nothing was changed.');
+          for (const it of items) {
+            for (let i = it.start; i < it.end; i++) {
+              const m = lines[i].match(VERSION_RE);
+              if (m) { it.versionIndex = i; it.version = m[3]; it.vQuote = m[2]; break; }
             }
           }
+          result.mappings = items.map(it => it.version).filter(Boolean);
+          console.log(`Versions currently mapped: ${result.mappings.join(', ') || 'none'}`);
 
-          // ── c. the one-line change ─────────────────────────────────────────────────
-          lines[hit.index] = `${hit.prefix}${hit.quote}${releaseVersion}${hit.quote}${hit.trail}`;
-          fs.writeFileSync(path, lines.join('\n'));
-          console.log(`${FILE}:${hit.index + 1}  ${hit.version} -> ${releaseVersion}`);
+          if (!bootVersion) {
+            finish('no-boot-version',
+              `The properties file for ${releaseVersion} has no spring-boot entry, and the ` +
+              'compatibility range is derived from it. Nothing was changed.');
+          }
+
+          // This train's own entries, found by version rather than by Boot range: a train
+          // that has never shipped has no range to match on, and the old lineOf() test - the
+          // first two segments - cannot pick 2026.0.0 out of 2024.0.2 and 2025.1.0-M3 either.
+          const trainBase = prerelease.split(releaseVersion).base;
+          const belongsToTrain = v => !!v && (v === trainBase || v.startsWith(`${trainBase}-`));
+          const isSnapshotVersion = v => /-SNAPSHOT$/i.test(v || '');
+          const ours = items.filter(it => belongsToTrain(it.version));
+          const snapshotEntry = ours.find(it => isSnapshotVersion(it.version));
+          const releaseEntry = ours.find(it => !isSnapshotVersion(it.version));
+
+          let wantRange, wantSnapshotRange;
+          try {
+            wantRange = rangeFor(bootVersion, releaseVersion);
+            wantSnapshotRange = snapshotRangeFor(bootVersion);
+          } catch (err) {
+            finish('no-boot-version', `Cannot derive a compatibility range: ${err.message}`);
+          }
+          const snapshotVersion = `${trainBase}-SNAPSHOT`;
+          console.log(`Spring Boot ${bootVersion} -> ${wantRange} for ${releaseVersion}`);
+
+          if (releaseEntry) {
+            // ── c. this train already has an entry: rewrite it in place ───────────────
+            // Both fields, because the range moves as the train changes phase: the floor
+            // goes -M1 -> -RC1, and at GA the whole range widens to the next Boot minor.
+            const fromVersion = releaseEntry.version;
+            const fromRange = releaseEntry.range;
+            result.from = fromVersion;
+
+            if (fromVersion === releaseVersion &&
+                fromRange.replace(/^["']|["']$/g, '') === wantRange) {
+              finish('already-current',
+                `${FILE} already maps ${wantRange} to ${releaseVersion}.`);
+            }
+            if (releaseEntry.versionIndex === undefined) {
+              finish('unexpected-mappings',
+                `The ${fromRange} mapping in ${FILE} has no version line to rewrite.`);
+            }
+
+            lines[releaseEntry.start] =
+              `${releaseEntry.indent}- compatibilityRange: "${wantRange}"`;
+            const vq = releaseEntry.vQuote;
+            lines[releaseEntry.versionIndex] = lines[releaseEntry.versionIndex]
+              .replace(VERSION_RE, `$1${vq}${releaseVersion}${vq}$4`);
+
+            result.action = 'updated';
+            changeDetail = `\`${fromRange}\` → \`"${wantRange}"\` and ` +
+              `\`${fromVersion}\` → \`${releaseVersion}\``;
+            console.log(`${FILE}:${releaseEntry.start + 1}  ${fromRange} -> "${wantRange}"`);
+            console.log(`${FILE}:${releaseEntry.versionIndex + 1}  ${fromVersion} -> ${releaseVersion}`);
+          } else if (!snapshotEntry) {
+            // ── c. first release of this train: add both entries ──────────────────────
+            // The release itself, and the train's snapshot line. Only the snapshot entry
+            // names a repository: Spring Boot 4.0 and up publishes milestones to Maven
+            // Central, so a milestone bom resolves without one - which is why the other
+            // pre-release entries in that file carry no repositories key - while snapshots
+            // still come from repo.spring.io.
+            const last = items[items.length - 1];
+            const ind = last.indent;
+            const block = [
+              `${ind}- compatibilityRange: "${wantRange}"`,
+              `${ind}  version: ${releaseVersion}`,
+              `${ind}- compatibilityRange: "${wantSnapshotRange}"`,
+              `${ind}  version: ${snapshotVersion}`,
+              `${ind}  repositories:`,
+              `${ind}    - spring-snapshots`,
+            ];
+
+            // After the last mapping's last non-blank line, so a blank line separating this
+            // bom from the next one stays where it is.
+            let at = last.end - 1;
+            while (at > last.start && !lines[at].trim()) at--;
+            lines.splice(at + 1, 0, ...block);
+
+            result.action = 'added';
+            result.added = [releaseVersion, snapshotVersion];
+            changeDetail = `added \`${wantRange}\` → \`${releaseVersion}\` and ` +
+              `\`${wantSnapshotRange}\` → \`${snapshotVersion}\``;
+            console.log(`Added two mappings after ${FILE}:${at + 1}:`);
+            for (const l of block) console.log(l);
+          } else {
+            // A snapshot entry but nothing to release into. Adding a second entry here would
+            // leave two mappings for one train and no way to tell which a later run should
+            // move, so this is reported rather than guessed at.
+            finish('unexpected-mappings',
+              `${FILE} has a ${snapshotEntry.version} mapping for this train but no release ` +
+              'mapping beside it. Sort that out by hand; nothing was changed.');
+          }
+
+          // The splice is a text edit, so prove the result still has the shape intended
+          // before writing it. The bom block is re-scanned rather than the YAML parsed - the
+          // runner has no YAML library, and what matters is that the mappings list grew by
+          // what was expected and carries this release exactly once.
+          const after = lines.slice();
+          const aAnchor = after.findIndex(l => ANCHOR.test(l));
+          let aKey = -1;
+          for (let k = aAnchor - 1; k >= 0; k--) {
+            if (!after[k].trim()) continue;
+            if (indentOf(after[k]) < indentOf(after[aAnchor])) { aKey = k; break; }
+          }
+          let aEnd = after.length;
+          for (let k = aAnchor + 1; k < after.length; k++) {
+            if (!after[k].trim()) continue;
+            if (indentOf(after[k]) <= indentOf(after[aKey])) { aEnd = k; break; }
+          }
+          const aItems = after.slice(aKey, aEnd).filter(l => ITEM.test(l)).length;
+          const aCarries = after.slice(aKey, aEnd)
+            .filter(l => { const m = l.match(VERSION_RE); return m && m[3] === releaseVersion; })
+            .length;
+          const expectedItems = items.length + (result.action === 'added' ? 2 : 0);
+          if (aItems !== expectedItems || aCarries !== 1) {
+            finish('error',
+              `The edit did not produce the expected mappings in ${FILE}: ${aItems} ` +
+              `mapping(s) where ${expectedItems} were expected, ${aCarries} carrying ` +
+              `${releaseVersion}. Left alone.`);
+          }
+
+          fs.writeFileSync(filePath, lines.join('\n'));
 
           git(['config', 'user.name', 'Spring Builds'], 'start');
           git(['config', 'user.email', 'svc.spring-builds@broadcom.com'], 'start');
@@ -2958,8 +3071,7 @@ jobs:
             fs.appendFileSync(summaryFile, [
               `## start.spring.io${dryRun ? ' — dry run, nothing was pushed' : ''}`,
               '',
-              `\`${REPO}\` · \`${branch}\` · \`${FILE}\` line ${hit.index + 1}: ` +
-                `\`${hit.version}\` → \`${releaseVersion}\``,
+              `\`${REPO}\` · \`${branch}\` · \`${FILE}\`: ${changeDetail}`,
               '',
               '```diff',
               diff.replace(/\n+$/, ''),
@@ -2973,8 +3085,21 @@ jobs:
             `Generated by the [post release workflow](${runUrl}).`,
             '',
             `Spring Cloud ${releaseVersion} has been released, so the \`spring-cloud\` bom ` +
-              `mapping for the ${target} line moves from \`${hit.version}\` to ` +
-              `\`${releaseVersion}\`. The \`compatibilityRange\` is unchanged.`,
+              `${changeDetail}.`,
+            '',
+            result.action === 'added'
+              ? 'Two mappings, because this train is offered on two Spring Boot lines: the ' +
+                'released version for Boot ' + bootVersion.replace(/-.*$/, '') + ', and the ' +
+                'train snapshot for that line\'s snapshots. Only the snapshot mapping names a ' +
+                'repository - Spring Boot 4.0 and up publishes milestones to Maven Central, so ' +
+                'the released mapping resolves without one, matching the other pre-release ' +
+                'entries in this file.'
+              : 'The `compatibilityRange` moves with the phase of the train: the floor goes ' +
+                '`-M1` to `-RC1` when release candidates start, and widens to the next Spring ' +
+                'Boot minor at GA.',
+            '',
+            'Mappings for earlier trains are deliberately untouched; they use the previous ' +
+            'single-entry convention.',
           ].join('\n');
 
           if (dryRun) {
@@ -3537,7 +3662,8 @@ jobs:
             // website-pr
             'branch-exists': '➖', 'no-changes': '➖', added: '✅', 'needs-entry': '⚠️',
             // start-site-pr
-            'already-current': '➖', 'no-mapping': '⚠️', 'no-milestone-repo': '⚠️',
+            'already-current': '➖', 'no-mapping': '⚠️',
+            'unexpected-mappings': '⚠️', 'no-boot-version': '⚠️',
             'file-not-found': '❌', 'bom-not-found': '❌',
             // release-board
             done: '✅', 'would-run': '🔎', partial: '⚠️',

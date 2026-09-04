@@ -527,15 +527,42 @@ The version lives in `start-site/src/main/resources/application.yml`, in one map
             version: 2025.1.2
 ```
 
-The mapping already on the released train's `major.minor` line is bumped, and nothing else — the `compatibilityRange` is untouched.
+A train gets **two** mappings, added the first time it ships and then carried through the whole progression:
+
+```yaml
+          - compatibilityRange: "[4.2.0-M1,4.2.0-SNAPSHOT)"
+            version: 2026.0.0-M1
+          - compatibilityRange: "[4.2.0-SNAPSHOT,4.3.0-M1)"
+            version: 2026.0.0-SNAPSHOT
+            repositories:
+              - spring-snapshots
+```
+
+Both ranges are anchored on the Spring Boot version in the release's properties file — but only on its numeric **base**. Spring Cloud 2026.0.0-M1 is built against Boot `4.2.0-M2`, and the range still opens at `4.2.0-M1`, so the bound does not churn on every milestone and a user on an earlier Boot milestone is still offered the train.
+
+| Release | The train's release mapping afterwards |
+|---------|----------------------------------------|
+| `2026.0.0-M1` (first) | **added**, together with the `-SNAPSHOT` mapping |
+| `2026.0.0-M2` | version only — `[4.2.0-M1,4.2.0-SNAPSHOT)` is unchanged |
+| `2026.0.0-RC1` | the floor moves — `[4.2.0-RC1,4.2.0-SNAPSHOT)` |
+| `2026.0.0-RC2` | version only |
+| `2026.0.0` (GA) | widened to the next Boot minor — `[4.2.0,4.3.0-M1)` |
+
+The `-SNAPSHOT` mapping is written once and never rewritten, GA included. Note that after GA its range overlaps the released one for every Boot version from `4.2.0` up, since `4.2.0-SNAPSHOT` sorts below `4.2.0`; which mapping wins is then down to Initializr's resolution order.
+
+**Only the `-SNAPSHOT` mapping names a repository.** Spring Boot 4.0 and up publishes milestones to Maven Central — start.spring.io's own `Repositories.java` says as much — so a milestone BOM resolves without one, which is why the other pre-release entries in that file carry no `repositories` key either. Snapshots still come from `repo.spring.io`. `spring-snapshots` and `spring-milestones` are Initializr built-in repository ids; nothing has to be declared in `application.yml` to reference them.
+
+**Mappings for earlier trains are left alone.** They use the previous convention — a single entry per train, edited in place — and migrating them is a judgement for whoever reviews that repository.
 
 **Scoped to that bom by reading the file, not by pattern.** Half a dozen boms in that file are called `spring-cloud`-something — `spring-cloud-azure`, `spring-cloud-gcp`, `spring-cloud-services`, `solace-spring-cloud` — and each has `version:` lines of its own. The block is found by its unique `artifactId: spring-cloud-dependencies` line, then bounded by indentation: its key is the nearest line above indented less than it, and the block runs to the next line indented no further than that key. Only `version:` lines inside those bounds are considered, so a reindentation upstream cannot silently retarget this at a neighbour.
 
-### When the line has no mapping
+### When it declines to act
 
-**No PR is opened, and the run says so.** A new mapping needs a `compatibilityRange` declaring which Spring Boot versions the train supports, and that is a judgement nothing here can make.
+**No PR is opened, and the run says so**, in three cases:
 
-This is not hypothetical: as of writing, the only mapping is `[4.0.0,4.2.0-M1) → 2025.1.2`, so a `2025.1.x` release bumps it and **a `2025.0.x` release has nothing to bump** — Boot 3.5 has aged off the site. It happens the other way round too, for the first release of a brand-new train line.
+- `no-boot-version` — the properties file has no `spring-boot` entry, or one this cannot parse. Every range is derived from it.
+- `unexpected-mappings` — the train has a `-SNAPSHOT` mapping but no release mapping beside it. Adding one would leave two mappings for one train and no way to tell which a later run should move.
+- `bom-not-found` / `file-not-found` — the `spring-cloud` bom, or the file itself, has moved.
 
 The summary gets its own **start.spring.io PR** section spelling out the reason and listing what is currently mapped, and the Google Chat message carries a `Needs attention` bullet and a ⚠️ header.
 
@@ -545,10 +572,14 @@ The summary gets its own **start.spring.io PR** section spelling out the reason 
 
 | Status | Meaning |
 |--------|---------|
-| `created` / `would-create` | the mapping was bumped; the diff is in the job's own summary |
-| `already-current` | the mapping already names this version — a re-run, or a hand-made PR that already landed |
+| `created` / `would-create` | the PR was opened; the diff is in the job's own summary |
+| `added` | the train had no mappings, so both were added — its first release |
+| `updated` | the train's existing mapping was rewritten |
+| `already-current` | the mapping already names this version and range — a re-run, or a hand-made PR that already landed |
 | `branch-exists` | `<version>-release` is already in the repo; it is left alone and the existing PR is linked |
-| `no-mapping` | ⚠️ nothing to bump, see above |
+| `no-boot-version` | ⚠️ no usable `spring-boot` entry to derive the range from, see above |
+| `unexpected-mappings` | ⚠️ a `-SNAPSHOT` mapping with no release mapping beside it, see above |
+| `error` | ❌ the edit did not produce the expected mappings, so nothing was written |
 | `file-not-found` / `bom-not-found` | ❌ `application.yml` moved, or the `spring-cloud` bom is no longer identifiable in it |
 
 ## The release board
