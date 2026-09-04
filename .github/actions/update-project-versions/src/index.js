@@ -1,4 +1,5 @@
 const core = require('@actions/core');
+const { releaserConfigFileName } = require('../../../scripts/releaser-config-file');
 const { XMLParser } = require('fast-xml-parser');
 const fs = require('fs');
 const path = require('path');
@@ -184,12 +185,11 @@ async function run() {
  *
  * Exported for unit testing.
  */
-function releaseTrainVersionToFileName(version) {
-  // Pre-release qualifiers (-SNAPSHOT, -RC1, -M1, etc.) are lowercase in file names.
-  return version
-    .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
-    .replace(/\./g, '_') + '.properties';
-}
+// Re-exported under its original name so the tests and the rest of this file are unchanged.
+// The rule itself lives in .github/scripts/releaser-config-file.js because six places need
+// it - this action, three workflows and two composite actions - and each used to carry its
+// own copy. ncc bundles this require into dist/, so the published action stays standalone.
+const releaseTrainVersionToFileName = releaserConfigFileName;
 
 /**
  * Builds the raw GitHub URL for the releaser config properties file.

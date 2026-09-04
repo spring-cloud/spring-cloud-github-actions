@@ -157,14 +157,10 @@ jobs:
 
           INTERNAL_TRAIN_VERSION="${train}-INTERNAL-SNAPSHOT"
 
-          # Kept identical to releaseTrainVersionToFileName in
-          # update-project-versions/src/index.js, which is the action that reads this same
-          # file later: the qualifier is lower-cased, the numeric part is not. tr rather than
-          # bash's ${x,,} or GNU sed's \L, neither of which exists in bash 3.2 on a Mac.
-          lowered_qualifier="$(printf '%s' "${INTERNAL_TRAIN_VERSION#*-}" \
-            | tr '[:upper:]' '[:lower:]')"
-          INTERNAL_PROPS_FILE="$(printf '%s' "${INTERNAL_TRAIN_VERSION%%-*}-${lowered_qualifier}" \
-            | tr '.' '_').properties"
+          # The same rule update-project-versions uses to resolve this file later, so the
+          # version read here and the versions stamped there always come from one file.
+          INTERNAL_PROPS_FILE=$(node "${GITHUB_WORKSPACE}/.github/scripts/releaser-config-file.js" \
+            "$INTERNAL_TRAIN_VERSION")
 
           echo "Release train:      ${{ inputs.spring_cloud_release_train }}"
           echo "Phase:              ${VERSION_QUALIFIER:-GA}"

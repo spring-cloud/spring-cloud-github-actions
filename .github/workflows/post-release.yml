@@ -154,6 +154,8 @@ jobs:
           // out, so the module sits under the workspace.
           const prerelease = require(path.join(process.env.GITHUB_WORKSPACE,
             '.github', 'scripts', 'prerelease-rank.js'));
+          const { releaserConfigFileName } = require(path.join(process.env.GITHUB_WORKSPACE,
+            '.github', 'scripts', 'releaser-config-file.js'));
 
           const releaseVersion = (process.env.RELEASE_VERSION || '').trim();
           const promoteTo = (process.env.PROMOTE_TO || 'none').trim();
@@ -228,16 +230,10 @@ jobs:
           // acted on, whether release notes are sanitized, and the OSS tag fallback.
           const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
 
-          // Deliberately identical to releaseTrainVersionToFileName in
-          // update-project-versions/src/index.js, which is the action that reads this same
-          // file during the merge back: a pre-release qualifier is lower-cased, the numeric
-          // part is not. 2026.0.0-M1 -> 2026_0_0-m1.properties. Upper-casing here would read
-          // one file and stamp from another - invisible for GA versions, which carry no
-          // qualifier at all.
-          const propsFileFor = v => v
-            .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
-            .replace(/\./g, '_') + '.properties';
-          const propsFile = propsFileFor(releaseVersion);
+          // The same rule update-project-versions uses to resolve this file during the merge
+          // back. Upper-casing the qualifier here would read one file and stamp from another -
+          // invisible for GA versions, which carry no qualifier at all.
+          const propsFile = releaserConfigFileName(releaseVersion);
 
           // ── read the properties file ────────────────────────────────────────────────
           console.log(`Reading ${propsFile} from ${releaseRepo}@jenkins-releaser-config...`);
@@ -362,8 +358,10 @@ jobs:
               }
             } else {
               // GA: next-snapshot-config writes the new file and publishes the per-project
-              // versions, so nothing is derived here.
-              nextFile = nextVersion.replace(/\./g, '_') + '-snapshot.properties';
+              // versions, so nothing is derived here. Named through the shared rule with the
+              // qualifier spelled out rather than by pasting '-snapshot.properties' on the
+              // end, so the snapshot file and the release file are built the same way.
+              nextFile = releaserConfigFileName(`${nextVersion}-SNAPSHOT`);
             }
           }
 

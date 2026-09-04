@@ -58,22 +58,13 @@ runs:
           release_repo="spring-cloud/spring-cloud-release"
         fi
 
-        # Deliberately identical to releaseTrainVersionToFileName in
-        # update-project-versions/src/index.js, which is the action that reads this same
-        # file a few steps below: a pre-release qualifier is lower-cased, the numeric part
-        # is not. 2026.0.0-M1 -> 2026_0_0-m1.properties, 2026.0.0 -> 2026_0_0.properties.
-        # Upper-casing here would validate one file and stamp from another - invisible for
-        # GA versions, which carry no qualifier at all.
-        # tr rather than bash's ${x,,} or GNU sed's \L, both of which are unavailable in
-        # the bash 3.2 on a developer's Mac and so could not be exercised outside a runner.
-        if [[ "$release_train_version" == *-* ]]; then
-          lowered_qualifier=$(printf '%s' "${release_train_version#*-}" \
-            | tr '[:upper:]' '[:lower:]')
-          normalized="${release_train_version%%-*}-${lowered_qualifier}"
-        else
-          normalized="$release_train_version"
-        fi
-        filename="${normalized//./_}.properties"
+        # The same rule update-project-versions uses a few steps below to resolve this very
+        # file: validating one file and stamping from another is invisible for GA versions,
+        # which carry no qualifier at all, and wrong for every milestone. GITHUB_ACTION_PATH
+        # rather than the workspace so this works for external callers too, the way
+        # dependabot-scan reaches prerelease-rank.js.
+        filename=$(node "${GITHUB_ACTION_PATH}/../../scripts/releaser-config-file.js" \
+          "$release_train_version")
         echo "Fetching ${filename} from ${release_repo}@jenkins-releaser-config..."
 
         content=$(gh api "repos/${release_repo}/contents/${filename}?ref=jenkins-releaser-config" \
