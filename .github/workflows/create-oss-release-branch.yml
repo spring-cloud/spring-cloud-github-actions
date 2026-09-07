@@ -60,8 +60,9 @@ run-name: "Create OSS Release Branch - ${{ inputs.oss_repo }} - ${{ inputs.sprin
 #   - A milestone is created in the OSS repo, named for the same qualified version
 #     (5.1.0-M1), which is the title post-release later closes and rolls forward
 #   - release-train-join.yml and release-train-ready.yml are ensured in the release branch
-#   - release-train-join.yml is triggered with deployment-destination=Maven Central
-#     (unless the trigger_release_train_join input is set to false to opt out)
+#   - release-train-join.yml is triggered with deployment-destination=Maven Central,
+#     when a spring_release_train is supplied — leaving that input empty prepares the
+#     branch and stops short of joining
 #   - The release branch's [skip actions] commits are squashed and pushed to trigger CI
 
 on:
@@ -72,9 +73,10 @@ on:
         required: true
         type: string
       spring_release_train:
-        description: 'Spring release train this release is part of (e.g. 2026.1)'
-        required: true
+        description: 'Spring release train this release is part of (e.g. 2026.1). Supplying it joins that train once the branch is prepared; leave it empty to prepare the branch without joining.'
+        required: false
         type: string
+        default: ''
       spring_cloud_release_train:
         description: 'Spring Cloud release train version this release is part of (e.g. 2026.1.0, or 2026.0.0-M1 / 2026.0.0-RC2 for a pre-release). The -M<n>/-RC<n> names the release branch and the milestone; it is stripped before looking up the -INTERNAL-SNAPSHOT properties file in spring-cloud-release-commercial@jenkins-releaser-config, so one file serves the whole train. Pass the same value here as to release-train-ready and post-release.'
         required: true
@@ -84,11 +86,6 @@ on:
         required: false
         type: string
         default: ''
-      trigger_release_train_join:
-        description: 'Join the Spring release train after the branch is prepared. Uncheck to opt out.'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -556,7 +553,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger release-train-join workflow and wait
-        if: ${{ inputs.trigger_release_train_join }}
+        if: ${{ inputs.spring_release_train != '' }}
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |

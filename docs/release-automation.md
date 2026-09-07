@@ -427,9 +427,8 @@ it is now a constant in the dispatch, not a derived value.
 |---|---|---|
 | `project` | yes | Either `spring-cloud-config` or `spring-cloud-config-commercial` — the suffix is what selects the destination |
 | `branch` | yes | Source branch (`main`, `4.2.x`) |
-| `release-train` | yes | Spring release train to join (e.g. `2026.09`) |
+| `release-train` | no | Spring release train to join (e.g. `2026.09`). Supplying it joins that train; leave it empty to prepare the branch without joining |
 | `token` | no | Falls back to `GH_ACTIONS_REPO_TOKEN` |
-| `trigger-release-train-join` | no, default `true` | Uncheck to prepare the branch without joining the train |
 
 Available as both `workflow_dispatch` and `workflow_call`.
 
@@ -627,12 +626,11 @@ flowchart TD
 |---|---|---|
 | `oss_repo` | yes | e.g. `spring-cloud-stream` — the commercial repo is always this plus `-commercial` |
 | `oss_tag` | yes | e.g. `v5.0.1` |
-| `spring_release_train` | yes | The Spring release train this hotfix joins |
+| `spring_release_train` | no | The Spring release train this hotfix joins. Supplying it joins that train; leave it empty to prepare the branch without joining |
 | `project_version` | no | Override the auto-computed `<current>.1-SNAPSHOT` |
 | `release_train_version` | no | When set, dependency versions are pulled from that Spring Cloud train's properties file |
 | `versions` | no | JSON map of explicit dependency versions, e.g. `{"spring-boot":"3.3.0"}`. **Mutually exclusive** with `release_train_version` |
 | `sha` | no | Commit of *this* repo to copy release-train action files from |
-| `trigger_release_train_join` | no, default `true` | Uncheck to prepare without joining |
 
 ### The seven jobs
 
