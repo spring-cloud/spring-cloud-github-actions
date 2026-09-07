@@ -10,20 +10,16 @@ inputs:
   project:
     description: >
       The spring-cloud GitHub project name (e.g. spring-cloud-config or
-      spring-cloud-config-commercial). The action checks out
-      spring-cloud/<project> at branch release/<project-version>.
-    required: true
-  project-version:
-    description: >
-      The version of the project being released (e.g. 4.2.0). Used to
-      identify the release/<project-version> branch to check out.
+      spring-cloud-config-commercial). Selects the repository to act on; the
+      release branch inside it is derived from the release train, not passed in.
     required: true
   spring-cloud-release-train-version:
     description: >
       The Spring Cloud release train version that matches the properties file
-      in the jenkins-releaser-config branch of spring-cloud-release
-      (e.g. 2025.0.0). Passed to update-project-versions to resolve
-      dependency versions.
+      in the jenkins-releaser-config branch of spring-cloud-release-commercial
+      (e.g. 2025.0.0, 2026.0.0-M1). This project's entry in that file is the
+      version being released, which names the release/<version> branch and is
+      passed to update-project-versions to resolve dependency versions.
     required: true
   spring-release-train-version:
     description: >
@@ -41,14 +37,18 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Validate version against jenkins-releaser-config
+    - name: Resolve the project version and confirm it is unreleased
+      id: version
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
       run: |
         project="${{ inputs.project }}"
-        project_version="${{ inputs.project-version }}"
         release_train_version="${{ inputs.spring-cloud-release-train-version }}"
+
+        # The plain project name: the -commercial suffix selects the repository to act on,
+        # not the project, and the tag lookups below check both sides.
+        base_project="${project%-commercial}"
 
         # Where the config lives, the file name, and the lookup all come from the shared
         # module - it owns that choice for every caller, and it is always
@@ -75,24 +75,49 @@ runs:
           exit 1
         fi
 
-        echo "Version in jenkins-releaser-config: ${config_version}"
-        echo "Version in branch name:             ${project_version}"
+        echo "Release train:      ${release_train_version}"
+        echo "Version to release: ${config_version}"
+        echo "Release branch:     release/${config_version}"
 
-        if [[ "$config_version" != "$project_version" ]]; then
-          echo "ERROR: Version mismatch!"
-          echo "  Branch name expects:     release/${project_version}"
-          echo "  jenkins-releaser-config: ${config_version}"
-          echo "  Check that spring-cloud-release-train-version is correct."
+        # Release branches are not deleted after a release, so release/5.0.5 is still there
+        # long after 5.0.5 shipped. Without this, a run naming an already-released train
+        # would happily re-stamp that branch and re-dispatch readiness for it - the version
+        # check this replaced never caught that, because it only compared two inputs that
+        # agreed with each other.
+        #
+        # matching-refs returns an array and is compared exactly: a plain
+        # git/refs/tags/v5.0.2 lookup also prefix-matches v5.0.20.
+        tag="v${config_version}"
+        tag_exists() {
+          gh api "repos/$1/git/matching-refs/tags/${tag}" --jq '.[].ref' 2>/dev/null \
+            | grep -qx "refs/tags/${tag}"
+        }
+
+        # An OSS release tags the OSS repository and a commercial one tags the commercial
+        # repository, so both are checked. A repository that does not exist returns nothing,
+        # which reads as "not released" - correct for a commercial-only project.
+        released=false
+        for repo in "spring-cloud/${base_project}" "spring-cloud/${base_project}-commercial"; do
+          if tag_exists "$repo"; then
+            echo "ERROR: ${tag} already exists in ${repo}."
+            released=true
+          else
+            echo "  ${tag} not found in ${repo}"
+          fi
+        done
+        if [[ "$released" == "true" ]]; then
+          echo "Aborting: ${config_version} has already been released, so there is nothing to"
+          echo "make ready. Check that spring-cloud-release-train-version names the right train."
           exit 1
         fi
 
-        echo "Version check passed: ${base_project} = ${project_version}"
+        echo "version=${config_version}" >> "$GITHUB_OUTPUT"
 
     - name: Checkout project release branch
       uses: actions/checkout@v4
       with:
         repository: spring-cloud/${{ inputs.project }}
-        ref: release/${{ inputs.project-version }}
+        ref: release/${{ steps.version.outputs.version }}
         token: ${{ inputs.token }}
         path: ${{ inputs.project }}
 
@@ -136,7 +161,7 @@ runs:
       uses: ./.github/actions/verify-no-snapshot-versions
       with:
         directory: ${{ inputs.project }}
-        allow-prerelease: ${{ contains(inputs.project-version, '-M') || contains(inputs.project-version, '-RC') }}
+        allow-prerelease: ${{ contains(steps.version.outputs.version, '-M') || contains(steps.version.outputs.version, '-RC') }}
 
     - name: Commit and push changes
       shell: bash
@@ -148,7 +173,7 @@ runs:
         if git diff --cached --quiet; then
           echo "No changes to commit."
         else
-          git commit -m "Release ${{ inputs.project-version }}"
+          git commit -m "Release ${{ steps.version.outputs.version }}"
           git push
           echo "Committed and pushed changes."
         fi
@@ -160,7 +185,7 @@ runs:
       run: |
         run_url=$(gh workflow run release-train-ready.yml \
           --repo spring-cloud/${{ inputs.project }} \
-          --ref release/${{ inputs.project-version }} \
+          --ref release/${{ steps.version.outputs.version }} \
           --field release-train=${{ inputs.spring-release-train-version }} \
           --field release-train-repository=spring-io/release-train)
         echo "Dispatched workflow run. Waiting for $run_url to complete."
@@ -178,7 +203,7 @@ runs:
       uses: ./.github/actions/update-antora-playbook
       with:
         repository: spring-cloud/${{ inputs.project }}
-        branch: release/${{ inputs.project-version }}
+        branch: release/${{ steps.version.outputs.version }}
         operation: remove
         token: ${{ inputs.token }}
 

@@ -28,7 +28,6 @@ jobs:
 
           const requiredInputs = [
             'project',
-            'project-version',
             'spring-cloud-release-train-version',
             'spring-release-train-version',
             'token'
@@ -50,6 +49,7 @@ jobs:
           stepNames.forEach(n => console.log(`  - ${n}`));
 
           const expectedSteps = [
+            'Resolve the project version and confirm it is unreleased',
             'Checkout project release branch',
             'Update project versions',
             'Verify no snapshot versions',

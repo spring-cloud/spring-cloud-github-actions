@@ -339,7 +339,7 @@ per project. Its nine jobs, in order:
 over the [`spring-release-train-project-ready`](../.github/actions/spring-release-train-project-ready/)
 composite action, which for each project:
 
-1. Validate the branch version against the `jenkins-releaser-config` properties file
+1. Resolve this project's version from the `jenkins-releaser-config` properties file — that entry names the `release/<version>` branch — and refuse if `v<version>` is already tagged
 2. Check out `release/<version>`
 3. `update-project-versions` — stamp final, non-SNAPSHOT dependency versions
 4. Delete `ci.yml`, `pr.yml`, `ci-release.yml`, `release-ci-settings.xml` from the release branch
