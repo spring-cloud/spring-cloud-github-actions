@@ -91,6 +91,9 @@ jobs:
           // workspace.
           const { releaserConfigFileName } = require(path.join(process.env.GITHUB_WORKSPACE,
             '.github', 'scripts', 'releaser-config-file.js'));
+          const { RELEASER_CONFIG_REPO, RELEASER_CONFIG_BRANCH, fetchReleaserConfig } =
+            require(path.join(process.env.GITHUB_WORKSPACE,
+              '.github', 'scripts', 'releaser-config.js'));
 
 
           const trainVersion = (process.env.TRAIN_VERSION || '').trim();
@@ -137,36 +140,22 @@ jobs:
             }
           }
 
-          // Always spring-cloud-release-commercial, for OSS trains too: that repository holds the
-          // releaser config for every train now, so this is deliberately NOT derived from
-          // `commercial`. That input decides only which project repositories are updated.
-          const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
-          const BRANCH = 'jenkins-releaser-config';
+          // Where the config lives, from the shared module - it owns that choice for every
+          // caller. `commercial` decides only which project repositories are updated.
+          const releaseRepo = RELEASER_CONFIG_REPO;
+          const BRANCH = RELEASER_CONFIG_BRANCH;
 
           // ── read the properties file ────────────────────────────────────────────────
           console.log(`Reading ${propsFile} from ${releaseRepo}@${BRANCH}...`);
-          let content;
+          let entries;
           try {
-            const b64 = execFileSync('gh', ['api',
-              `repos/${releaseRepo}/contents/${propsFile}?ref=${BRANCH}`,
-              '--jq', '.content'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-            content = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+            entries = fetchReleaserConfig(trainVersion).entries;
           } catch (err) {
-            fail(`ERROR: could not read ${propsFile} from ${releaseRepo}@${BRANCH}.`,
+            fail(`ERROR: ${err.message}.`,
               'This workflow applies an existing properties file, it does not create one.',
               'Check that release_train_version matches a file on that branch (post-release',
               'writes the -snapshot file; it can also be committed by hand), and that the token',
               'has read access to the repository.');
-          }
-
-          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
-          const entries = [];
-          for (const line of content.split('\n')) {
-            const m = line.match(ENTRY_RE);
-            if (m) entries.push({ key: m[1].trim(), version: m[2].trim() });
-          }
-          if (!entries.length) {
-            fail(`ERROR: ${propsFile} contains no releaser.fixed-versions[...] entries.`);
           }
           console.log(`Found ${entries.length} version entries.`);
 

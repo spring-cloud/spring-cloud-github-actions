@@ -48,9 +48,27 @@ jobs:
           token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 ```
 
+### Where the releaser config comes from
+
+**Always `spring-cloud/spring-cloud-release-commercial`, for OSS releases too** — the same
+choice `post-release.yml`, `update-versions.yml`, `setup-next-release-train.yml` and
+`create-oss-release-branch.yml` all make. That repository holds the releaser config for
+every train now, and its train files are plain OSS train files: `2026_0_0-m1.properties` is
+`spring-cloud-config=5.1.0-M1` and so on, with no commercial-only versions in it.
+
+The OSS repository's copy of `jenkins-releaser-config` stopped at 2025.1.3 and disagrees
+with reality where the two still overlap, so reading it for an OSS release would 404 on a
+current train and stamp versions that were never released on an older one.
+
+Both reads go there — the version check, and the `commercial: 'true'` passed to
+`update-project-versions` — so the file validated against and the file stamped from are
+always the same one.
+
 ### Commercial Variant
 
-When the project name ends in `-commercial`, the `commercial` flag is automatically set to `true` when calling `update-project-versions`, so the releaser config is fetched from `spring-cloud-release-commercial` instead of `spring-cloud-release`.
+The `-commercial` suffix selects the **project repository** to check out and dispatch into,
+and nothing else. It is stripped before looking the project up in the properties file,
+since the config lists `spring-cloud-config` rather than `spring-cloud-config-commercial`.
 
 ```yaml
 - name: Mark spring-cloud-config-commercial ready in release train
@@ -123,7 +141,7 @@ The action triggers `release-train-ready.yml` via `gh workflow run` with:
 The token provided (or the `GH_ACTIONS_REPO_TOKEN` secret) must have:
 - **Contents: write** on `spring-cloud/<project>` — to push commits to the release branch
 - **Actions: write** on `spring-cloud/<project>` — to dispatch the `release-train-ready.yml` workflow
-- **Contents: read** on `spring-cloud/spring-cloud-release` (or `spring-cloud-release-commercial` for commercial projects) — to fetch the jenkins-releaser-config properties file
+- **Contents: read** on `spring-cloud/spring-cloud-release-commercial` — to fetch the jenkins-releaser-config properties file, for OSS releases too (see [Where the releaser config comes from](#where-the-releaser-config-comes-from))
 
 ## License
 

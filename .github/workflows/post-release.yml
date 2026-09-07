@@ -156,6 +156,9 @@ jobs:
             '.github', 'scripts', 'prerelease-rank.js'));
           const { releaserConfigFileName } = require(path.join(process.env.GITHUB_WORKSPACE,
             '.github', 'scripts', 'releaser-config-file.js'));
+          const { RELEASER_CONFIG_REPO, RELEASER_CONFIG_BRANCH, fetchReleaserConfig } =
+            require(path.join(process.env.GITHUB_WORKSPACE,
+              '.github', 'scripts', 'releaser-config.js'));
 
           const releaseVersion = (process.env.RELEASE_VERSION || '').trim();
           const promoteTo = (process.env.PROMOTE_TO || 'none').trim();
@@ -224,39 +227,22 @@ jobs:
             }
           }
 
-          // Always spring-cloud-release-commercial, for OSS trains too: that repository holds
-          // the releaser config for every train now, so this is deliberately NOT derived from
-          // `commercial`. That input still decides everything else - which project repos are
-          // acted on, whether release notes are sanitized, and the OSS tag fallback.
-          const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
-
-          // The same rule update-project-versions uses to resolve this file during the merge
-          // back. Upper-casing the qualifier here would read one file and stamp from another -
-          // invisible for GA versions, which carry no qualifier at all.
+          // Where the config lives, and the name of the file, both from the shared module -
+          // it owns that choice for every caller. `commercial` still decides everything else
+          // here: which project repos are acted on, whether release notes are sanitized, and
+          // the OSS tag fallback.
+          const releaseRepo = RELEASER_CONFIG_REPO;
           const propsFile = releaserConfigFileName(releaseVersion);
 
           // ── read the properties file ────────────────────────────────────────────────
-          console.log(`Reading ${propsFile} from ${releaseRepo}@jenkins-releaser-config...`);
-          let content;
+          console.log(`Reading ${propsFile} from ${releaseRepo}@${RELEASER_CONFIG_BRANCH}...`);
+          let entries;
           try {
-            const b64 = execFileSync('gh', ['api',
-              `repos/${releaseRepo}/contents/${propsFile}?ref=jenkins-releaser-config`,
-              '--jq', '.content'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-            content = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+            entries = fetchReleaserConfig(releaseVersion).entries;
           } catch (err) {
-            fail(`ERROR: could not read ${propsFile} from ${releaseRepo}@jenkins-releaser-config.`,
+            fail(`ERROR: ${err.message}.`,
               'Check that release_version matches a properties file on that branch, and that the',
               'token has read access to the repository.');
-          }
-
-          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
-          const entries = [];
-          for (const line of content.split('\n')) {
-            const m = line.match(ENTRY_RE);
-            if (m) entries.push({ key: m[1].trim(), version: m[2].trim() });
-          }
-          if (!entries.length) {
-            fail(`ERROR: ${propsFile} contains no releaser.fixed-versions[...] entries.`);
           }
           console.log(`Found ${entries.length} version entries.`);
 
@@ -513,6 +499,9 @@ jobs:
       available: ${{ steps.write.outputs.available }}
       versions: ${{ steps.write.outputs.versions }}
     steps:
+      # Only so the script below can require .github/scripts/.
+      - uses: actions/checkout@v4
+
       - name: Write the next snapshot properties file
         id: write
         env:
@@ -525,6 +514,9 @@ jobs:
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const path = require('path');
+          const { parseReleaserConfig, ENTRY_RE } = require(path.join(
+            process.env.GITHUB_WORKSPACE, '.github', 'scripts', 'releaser-config.js'));
           const { execFileSync } = require('child_process');
 
           const releaseRepo = process.env.RELEASE_REPO;
@@ -549,13 +541,10 @@ jobs:
             } catch (err) { return null; }
           };
 
-          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
+          // The shared parse, folded into the {key: version} map this job works in.
           const parse = text => {
             const map = {};
-            for (const line of text.split('\n')) {
-              const m = line.match(ENTRY_RE);
-              if (m) map[m[1].trim()] = m[2].trim();
-            }
+            for (const e of parseReleaserConfig(text)) map[e.key] = e.version;
             return map;
           };
 
@@ -1656,6 +1645,9 @@ jobs:
        needs.next-snapshot-config.result == 'success')
     runs-on: ubuntu-latest
     steps:
+      # Only so the script below can require .github/scripts/.
+      - uses: actions/checkout@v4
+
       - name: Build the website changes and open the PR
         id: run
         env:
@@ -1674,6 +1666,8 @@ jobs:
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const { parseReleaserConfig, ENTRY_RE } = require(path.join(
+            process.env.GITHUB_WORKSPACE, '.github', 'scripts', 'releaser-config.js'));
           const path = require('path');
           const { execFileSync } = require('child_process');
 
@@ -1730,7 +1724,6 @@ jobs:
             return 0;
           };
 
-          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
           const [major, minor] = releaseVersion.split('.');
           const trainLine = `${major}.${minor}`;
 
@@ -1779,10 +1772,7 @@ jobs:
                   '--jq', '.content']);
                 const text = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
                 previousVersions = {};
-                for (const line of text.split('\n')) {
-                  const m = line.match(ENTRY_RE);
-                  if (m) previousVersions[m[1].trim()] = m[2].trim();
-                }
+                for (const e of parseReleaserConfig(text)) previousVersions[e.key] = e.version;
                 console.log(`Comparing against ${result.previousFile} to find what was released.`);
               }
             } catch (err) {

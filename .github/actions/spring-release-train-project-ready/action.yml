@@ -50,32 +50,28 @@ runs:
         project_version="${{ inputs.project-version }}"
         release_train_version="${{ inputs.spring-cloud-release-train-version }}"
 
-        if [[ "$project" == *-commercial ]]; then
-          base_project="${project%-commercial}"
-          release_repo="spring-cloud/spring-cloud-release-commercial"
-        else
-          base_project="$project"
-          release_repo="spring-cloud/spring-cloud-release"
-        fi
+        # Where the config lives, the file name, and the lookup all come from the shared
+        # module - it owns that choice for every caller, and it is always
+        # spring-cloud-release-commercial, for OSS releases too. Only the project repository
+        # checked out below is selected by the -commercial suffix; the properties key is the
+        # plain project name, which the module strips for us.
+        #
+        # GITHUB_ACTION_PATH rather than the workspace so this works for external callers,
+        # the way dependabot-scan reaches prerelease-rank.js.
+        script="${GITHUB_ACTION_PATH}/../../scripts/releaser-config.js"
 
-        # The same rule update-project-versions uses a few steps below to resolve this very
-        # file: validating one file and stamping from another is invisible for GA versions,
-        # which carry no qualifier at all, and wrong for every milestone. GITHUB_ACTION_PATH
-        # rather than the workspace so this works for external callers too, the way
-        # dependabot-scan reaches prerelease-rank.js.
-        filename=$(node "${GITHUB_ACTION_PATH}/../../scripts/releaser-config-file.js" \
-          "$release_train_version")
-        echo "Fetching ${filename} from ${release_repo}@jenkins-releaser-config..."
-
-        content=$(gh api "repos/${release_repo}/contents/${filename}?ref=jenkins-releaser-config" \
-          --jq '.content' | tr -d '\n' | base64 -d)
-
-        config_version=$(echo "$content" | \
-          grep "^releaser\.fixed-versions\[${base_project}\]=" | \
-          cut -d'=' -f2 | tr -d '[:space:]')
-
-        if [[ -z "$config_version" ]]; then
-          echo "ERROR: '${base_project}' not found in ${filename} on ${release_repo}@jenkins-releaser-config"
+        # rc captured through || rather than read from $? after an `if !`, where $? is the
+        # result of the negation and always 0 - which would swallow the exit code the script
+        # uses to say *why* it failed.
+        rc=0
+        config_version=$(node "$script" "$release_train_version" "$project") || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+          case "$rc" in
+            3) echo "ERROR: no properties file for release train '${release_train_version}' in"
+               echo "spring-cloud-release-commercial@jenkins-releaser-config." ;;
+            4) echo "ERROR: '${project%-commercial}' is not part of release train '${release_train_version}'." ;;
+            *) echo "ERROR: could not read the releaser config (exit ${rc})." ;;
+          esac
           exit 1
         fi
 
@@ -104,7 +100,11 @@ runs:
       uses: ./.github/actions/update-project-versions
       with:
         release-train-version: ${{ inputs.spring-cloud-release-train-version }}
-        commercial: ${{ endsWith(inputs.project, '-commercial') }}
+        # Hardcoded true, not the project's flavour. This input does one thing in the action
+        # - pick which repository the releaser config is fetched from - and that is always
+        # spring-cloud-release-commercial, matching the version check above. Passing the
+        # derived value would validate against one file and stamp from another.
+        commercial: 'true'
         token: ${{ inputs.token }}
         directory: ${{ inputs.project }}
 

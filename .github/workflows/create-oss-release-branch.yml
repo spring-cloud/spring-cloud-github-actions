@@ -180,26 +180,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
           PROPS_FILE: ${{ steps.train.outputs.props_file }}
+          INTERNAL_TRAIN_VERSION: ${{ steps.train.outputs.internal_train_version }}
           PROJECT: ${{ inputs.oss_repo }}
         run: |
           set -euo pipefail
-          RELEASE_REPO="spring-cloud/spring-cloud-release-commercial"
 
-          echo "Reading ${PROPS_FILE} from ${RELEASE_REPO}@jenkins-releaser-config..."
-          if ! content=$(gh api \
-            "repos/${RELEASE_REPO}/contents/${PROPS_FILE}?ref=jenkins-releaser-config" \
-            --jq '.content' | tr -d '\n' | base64 -d); then
-            echo "::error::Could not read ${PROPS_FILE} from ${RELEASE_REPO}@jenkins-releaser-config."
-            echo "::error::Check that spring_cloud_release_train names a train that has one."
-            exit 1
-          fi
-
-          raw=$(printf '%s' "$content" \
-            | grep "^releaser\.fixed-versions\[${PROJECT}\]=" \
-            | cut -d'=' -f2 | tr -d '[:space:]' || true)
-          if [[ -z "$raw" ]]; then
-            echo "::error::'${PROJECT}' is not in ${PROPS_FILE}, so it is not part of this"
-            echo "::error::release train and no release branch should be cut for it."
+          # Where the config lives, the file name and the lookup all come from the shared
+          # module, so this reads the same file update-project-versions stamps from a few
+          # steps later. rc captured through || rather than read from $? after an `if !`,
+          # where $? is the result of the negation and always 0.
+          rc=0
+          raw=$(node "${GITHUB_WORKSPACE}/.github/scripts/releaser-config.js" \
+            "$INTERNAL_TRAIN_VERSION" "$PROJECT") || rc=$?
+          if [[ "$rc" -ne 0 ]]; then
+            case "$rc" in
+              3) echo "::error::Could not read ${PROPS_FILE} from the releaser config."
+                 echo "::error::Check that spring_cloud_release_train names a train that has one." ;;
+              4) echo "::error::'${PROJECT}' is not in ${PROPS_FILE}, so it is not part of this"
+                 echo "::error::release train and no release branch should be cut for it." ;;
+              *) echo "::error::Could not read the releaser config (exit ${rc})." ;;
+            esac
             exit 1
           fi
 
