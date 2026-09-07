@@ -147,9 +147,11 @@ jobs:
 
           // ── read the properties file ────────────────────────────────────────────────
           console.log(`Reading ${propsFile} from ${releaseRepo}@${BRANCH}...`);
-          let entries;
+          // content as well as entries: the CDN wait below compares what raw.githubusercontent
+          // serves against the bytes the API returned, so it needs the file itself.
+          let content, entries;
           try {
-            entries = fetchReleaserConfig(trainVersion).entries;
+            ({ content, entries } = fetchReleaserConfig(trainVersion));
           } catch (err) {
             fail(`ERROR: ${err.message}.`,
               'This workflow applies an existing properties file, it does not create one.',
