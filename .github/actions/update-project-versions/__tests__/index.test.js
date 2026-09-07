@@ -14,6 +14,7 @@ const {
   hasVersionCheckOff,
   updateGradlePropertiesContent,
   updateBuildGradleContent,
+  projectForArtifact,
   camelToKebab,
   artifactIdToProjectName,
   isChildOfRoot,
@@ -232,6 +233,45 @@ describe('updateGradlePropertiesContent', () => {
   });
 });
 
+// ── projectForArtifact ────────────────────────────────────────────────────────
+
+describe('projectForArtifact', () => {
+  const versions = {
+    'spring-boot': '4.2.0-M2',
+    'spring-cloud-function': '5.1.0-M1',
+    'spring-cloud-config': '5.1.0-M1',
+  };
+
+  it('resolves an exact project name', () => {
+    expect(projectForArtifact('spring-cloud-function', versions)).toBe('spring-cloud-function');
+  });
+
+  // Spring Cloud publishes a project's modules at the project's own version.
+  it('resolves a module to the project that releases it', () => {
+    expect(projectForArtifact('spring-cloud-function-adapter-azure', versions))
+      .toBe('spring-cloud-function');
+    expect(projectForArtifact('spring-cloud-config-server', versions))
+      .toBe('spring-cloud-config');
+    expect(projectForArtifact('spring-boot-starter-web', versions)).toBe('spring-boot');
+  });
+
+  // The boundary is what stops spring-cloud-configuration resolving to spring-cloud-config.
+  it('only matches on a dash boundary', () => {
+    expect(projectForArtifact('spring-cloud-configuration', versions)).toBeNull();
+  });
+
+  it('prefers the longest match', () => {
+    const nested = { 'spring-cloud': 'a', 'spring-cloud-function': 'b' };
+    expect(projectForArtifact('spring-cloud-function-adapter-azure', nested))
+      .toBe('spring-cloud-function');
+  });
+
+  it('returns null for an artifact no project releases', () => {
+    expect(projectForArtifact('some-other-lib', versions)).toBeNull();
+    expect(projectForArtifact('spring-cloud-starter-function-web', versions)).toBeNull();
+  });
+});
+
 // ── updateBuildGradleContent ──────────────────────────────────────────────────
 
 describe('updateBuildGradleContent', () => {
@@ -252,6 +292,107 @@ describe('updateBuildGradleContent', () => {
     const { updated } = updateBuildGradleContent(content, '3.1.1');
     expect(updated).toContain(`group = 'org.example'`);
     expect(updated).toContain(`description = 'My project'`);
+  });
+
+  // spring-cloud-function's Gradle samples declare these in an ext block rather than in
+  // gradle.properties, so a release used to leave them at whatever they had been pinned at
+  // - Boot 2.1.0.BUILD-SNAPSHOT in a train releasing against Boot 4.
+  describe('version properties in an ext block', () => {
+    const versions = {
+      'spring-boot': '4.2.0-M2',
+      'spring-cloud-function': '5.1.0-M1',
+    };
+
+    it('updates a property inside buildscript { ext { } }', () => {
+      const content = [
+        'buildscript {',
+        '\text {',
+        "\t\tspringBootVersion = '2.1.0.BUILD-SNAPSHOT'",
+        '\t}',
+        '}',
+      ].join('\n');
+      const { updated, updatedProperties } =
+        updateBuildGradleContent(content, '5.1.0-M1', versions);
+      expect(updated).toContain("springBootVersion = '4.2.0-M2'");
+      expect(updatedProperties).toEqual(['springBootVersion: 4.2.0-M2']);
+    });
+
+    it('updates a double-quoted property and preserves the quote style', () => {
+      const content = 'ext {\n\tspringCloudFunctionVersion = "2.0.0.BUILD-SNAPSHOT"\n}';
+      const { updated } = updateBuildGradleContent(content, '5.1.0-M1', versions);
+      expect(updated).toContain('springCloudFunctionVersion = "5.1.0-M1"');
+    });
+
+    it('preserves indentation', () => {
+      const content = "    springBootVersion = '2.1.0.BUILD-SNAPSHOT'";
+      const { updated } = updateBuildGradleContent(content, '5.1.0-M1', versions);
+      expect(updated).toBe("    springBootVersion = '4.2.0-M2'");
+    });
+
+    it('leaves a property that resolves to no project alone', () => {
+      const content = "ext {\n\tjavaVersion = '11'\n}";
+      const { updated, updatedProperties } =
+        updateBuildGradleContent(content, '5.1.0-M1', versions);
+      expect(updated).toBe(content);
+      expect(updatedProperties).toEqual([]);
+    });
+
+    it('leaves an unquoted value alone', () => {
+      const content = 'languageVersion = JavaLanguageVersion.of(17)';
+      expect(updateBuildGradleContent(content, '5.1.0-M1', versions).updated).toBe(content);
+    });
+
+    it('does not treat the project version line as a property', () => {
+      const content = "version = '5.0.0'\n";
+      const { updated, updatedProperties } =
+        updateBuildGradleContent(content, '5.1.0-M1', versions);
+      expect(updated).toBe("version = '5.1.0-M1'\n");
+      expect(updatedProperties).toEqual([]);
+    });
+
+    it('updates the project version and its properties together', () => {
+      const content = [
+        "version = '5.1.0-INTERNAL-SNAPSHOT'",
+        'ext {',
+        "\tspringCloudFunctionVersion = '2.0.0.BUILD-SNAPSHOT'",
+        '}',
+      ].join('\n');
+      const { updated } = updateBuildGradleContent(content, '5.1.0-M1', versions);
+      expect(updated).toContain("version = '5.1.0-M1'");
+      expect(updated).toContain("springCloudFunctionVersion = '5.1.0-M1'");
+    });
+
+    it('rewrites an inline dependency coordinate for a released artifact', () => {
+      const content =
+        'implementation "org.springframework.cloud:spring-cloud-function-adapter-azure:4.1.0-SNAPSHOT"';
+      const { updated, updatedProperties } =
+        updateBuildGradleContent(content, '5.1.0-M1', versions);
+      expect(updated).toContain(
+        '"org.springframework.cloud:spring-cloud-function-adapter-azure:5.1.0-M1"');
+      expect(updatedProperties).toEqual(['spring-cloud-function-adapter-azure: 5.1.0-M1']);
+    });
+
+    // Replacing the reference with a literal would break the indirection the build uses.
+    it('leaves an interpolated coordinate version alone', () => {
+      const content =
+        'mavenBom "org.springframework.cloud:spring-cloud-function-dependencies:${springCloudFunctionVersion}"';
+      expect(updateBuildGradleContent(content, '5.1.0-M1', versions).updated).toBe(content);
+    });
+
+    it('leaves a non-Spring group alone even when the artifact name matches', () => {
+      const content = "implementation 'com.example:spring-cloud-function-fork:1.0.0-SNAPSHOT'";
+      expect(updateBuildGradleContent(content, '5.1.0-M1', versions).updated).toBe(content);
+    });
+
+    it('leaves a coordinate with no version alone', () => {
+      const content = "implementation 'org.springframework.cloud:spring-cloud-function-context'";
+      expect(updateBuildGradleContent(content, '5.1.0-M1', versions).updated).toBe(content);
+    });
+
+    it('is a no-op when no versions map is supplied', () => {
+      const content = "ext {\n\tspringBootVersion = '2.1.0.BUILD-SNAPSHOT'\n}";
+      expect(updateBuildGradleContent(content, '5.1.0-M1').updated).toBe(content);
+    });
   });
 
   it('returns unchanged content when no version declaration is present', () => {

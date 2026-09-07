@@ -149,8 +149,8 @@ async function run() {
     }
 
     // ── build.gradle / build.gradle.kts ────────────────────────────────────
-    // Only the project version declaration is updated (version = '...' / version = "...").
-    // Dependency versions are managed exclusively via gradle.properties in Spring Cloud.
+    // The project version declaration, plus any `{prefix}Version` properties declared in an
+    // ext block rather than in gradle.properties.
     const buildGradleFiles = [
       ...findFiles(directory, 'build.gradle'),
       ...findFiles(directory, 'build.gradle.kts'),
@@ -158,11 +158,16 @@ async function run() {
     if (buildGradleFiles.length > 0) {
       core.info(`Found ${buildGradleFiles.length} build.gradle file(s)`);
       for (const file of buildGradleFiles) {
-        const { changed } = updateBuildGradleVersion(file, projectVersion);
+        const { changed, updatedProperties } = updateBuildGradleVersion(
+          file,
+          projectVersion,
+          versions
+        );
         if (changed) {
-          core.info(`Updated ${path.relative(directory, file)}: version`);
+          core.info(`Updated ${path.relative(directory, file)}: ` +
+            ['version', ...updatedProperties].join(', '));
         } else {
-          core.info(`No changes to ${path.relative(directory, file)}: version`);
+          core.info(`No changes to ${path.relative(directory, file)}`);
         }
       }
     }
@@ -549,27 +554,29 @@ function updateGradlePropertiesContent(content, projectVersion, versions) {
 // ── build.gradle / build.gradle.kts ───────────────────────────────────────
 
 /**
- * Updates the project version declaration in a build.gradle or build.gradle.kts file.
- * Handles both single-quoted and double-quoted versions:
+ * Updates the project version declaration and any version properties in a build.gradle
+ * or build.gradle.kts file. Handles both single-quoted and double-quoted versions:
  *   version = '4.1.0'
- *   version = "4.1.0"
- *
- * Only the project-level version line is updated; dependency version properties
- * are managed via gradle.properties in Spring Cloud projects.
+ *   springCloudFunctionVersion = "4.1.0"
  *
  * Exported for unit testing.
  *
  * @param {string} filePath
  * @param {string} projectVersion
+ * @param {Record<string, string>} versions
  */
-function updateBuildGradleVersion(filePath, projectVersion) {
+function updateBuildGradleVersion(filePath, projectVersion, versions) {
   const content = fs.readFileSync(filePath, 'utf-8');
-  const { updated } = updateBuildGradleContent(content, projectVersion);
+  const { updated, updatedProperties } = updateBuildGradleContent(
+    content,
+    projectVersion,
+    versions
+  );
   const changed = updated !== content;
   if (changed) {
     fs.writeFileSync(filePath, updated, 'utf-8');
   }
-  return { changed };
+  return { changed, updatedProperties };
 }
 
 /**
@@ -578,14 +585,64 @@ function updateBuildGradleVersion(filePath, projectVersion) {
  *
  * Exported for unit testing.
  */
-function updateBuildGradleContent(content, projectVersion) {
+function updateBuildGradleContent(content, projectVersion, versions = {}) {
   // Match: version = '...' or version = "..." at the start of a line (with optional spaces)
-  const updated = content.replace(
+  const withProjectVersion = content.replace(
     /^(version\s*=\s*)(['"])([^'"]+)(['"])/m,
     (_, prefix, openQuote, _oldVersion, closeQuote) =>
       `${prefix}${openQuote}${projectVersion}${closeQuote}`
   );
-  return { updated };
+
+  // `{prefix}Version` assignments, resolved exactly as they are in gradle.properties:
+  // camelCase prefix -> kebab-case project name -> the train's version for it. These live
+  // in an `ext { }` or `buildscript { ext { } }` block rather than at the start of a line,
+  // so leading whitespace is part of the match and is preserved.
+  //
+  // Spring Cloud projects mostly declare these in gradle.properties, which is why this
+  // file only ever rewrote the project version. spring-cloud-function's Gradle samples
+  // declare them here instead, so a release left them at whatever they had been pinned at.
+  //
+  // A key that resolves to no project is left alone, which is what keeps `javaVersion` and
+  // similar build settings out of it.
+  const updatedProperties = [];
+  const updated = withProjectVersion.split('\n').map((line) => {
+    const match = line.match(
+      /^(\s*)([a-zA-Z][a-zA-Z0-9]*Version)(\s*=\s*)(['"])([^'"]+)(['"])(.*)$/
+    );
+    if (!match) return line;
+
+    const [, indent, key, separator, openQuote, currentValue, closeQuote, trailing] = match;
+    const projectName = camelToKebab(key.slice(0, -'Version'.length));
+    const targetVersion = versions[projectName];
+    if (!targetVersion || currentValue === targetVersion) return line;
+
+    updatedProperties.push(`${key}: ${targetVersion}`);
+    return `${indent}${key}${separator}${openQuote}${targetVersion}${closeQuote}${trailing}`;
+  }).join('\n');
+
+  // Inline dependency coordinates - "group:artifact:version" - for artifacts this train
+  // releases. Most Spring Cloud builds express these through a property or let the BOM
+  // manage them, which is why this file never needed it; spring-cloud-function's Azure
+  // sample pins one directly.
+  //
+  // Only org.springframework.* groups, so a third-party artifact that happens to share a
+  // prefix is never touched, and never when the version is an interpolation - rewriting
+  // "...:${springCloudFunctionVersion}" would replace the reference with a literal and
+  // break the very indirection the build is using.
+  const COORDINATE = /(['"])(org\.springframework\.[a-z0-9.]+):([A-Za-z0-9_.-]+):([^'"]+)\1/g;
+  const withCoordinates = updated.replace(
+    COORDINATE,
+    (whole, quote, groupId, artifactId, version) => {
+      if (version.includes('$')) return whole;
+      const projectName = projectForArtifact(artifactId, versions);
+      const targetVersion = projectName && versions[projectName];
+      if (!targetVersion || version === targetVersion) return whole;
+      updatedProperties.push(`${artifactId}: ${targetVersion}`);
+      return `${quote}${groupId}:${artifactId}:${targetVersion}${quote}`;
+    }
+  );
+
+  return { updated: withCoordinates, updatedProperties };
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -634,6 +691,31 @@ function artifactIdToProjectName(artifactId) {
   return artifactId
     .replace(/-dependencies$/, '')
     .replace(/-parent$/, '');
+}
+
+/**
+ * Resolves a Maven artifactId to the project in `versions` that releases it: an exact
+ * match, or the longest project name the artifactId extends on a `-` boundary.
+ *
+ * Spring Cloud publishes a project's modules at the project's own version, so
+ * spring-cloud-function-adapter-azure ships with spring-cloud-function and
+ * spring-cloud-config-server with spring-cloud-config. The boundary matters:
+ * spring-cloud-configuration would not resolve to spring-cloud-config.
+ *
+ * Longest wins so a project whose name extends another still resolves to itself.
+ * Returns null when nothing matches, which leaves the coordinate alone.
+ *
+ * Exported for unit testing.
+ */
+function projectForArtifact(artifactId, versions) {
+  if (Object.prototype.hasOwnProperty.call(versions, artifactId)) return artifactId;
+  let best = null;
+  for (const name of Object.keys(versions)) {
+    if (artifactId.startsWith(`${name}-`) && (best === null || name.length > best.length)) {
+      best = name;
+    }
+  }
+  return best;
 }
 
 /**
@@ -707,6 +789,7 @@ module.exports = {
   findFiles,
   camelToKebab,
   artifactIdToProjectName,
+  projectForArtifact,
   isChildOfRoot,
 };
 
