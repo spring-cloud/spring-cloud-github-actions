@@ -10,8 +10,9 @@ name: Create Hotfix Release Branch
 # <current-version>.1-SNAPSHOT (e.g. 5.0.1 -> 5.0.1.1-SNAPSHOT).
 # Optionally, dependency versions can be updated from a release train or an
 # explicit project-version override can be supplied.
-# Finally, release-train-join.yml is triggered in the commercial repo, unless
-# the trigger_release_train_join input is set to false to opt out.
+# Finally, release-train-join.yml is triggered in the commercial repo, when a
+# spring_release_train is supplied — leaving that input empty prepares the branch
+# and stops short of joining.
 
 on:
   workflow_dispatch:
@@ -25,9 +26,10 @@ on:
         required: true
         type: string
       spring_release_train:
-        description: 'Spring release train this hotfix is part of (e.g. 2026.1)'
-        required: true
+        description: 'Spring release train this hotfix is part of (e.g. 2026.1). Supplying it joins that train once the branch is prepared; leave it empty to prepare the branch without joining.'
+        required: false
         type: string
+        default: ''
       project_version:
         description: 'Override the auto-computed hotfix project version (default: <current-version>.1-SNAPSHOT)'
         required: false
@@ -48,11 +50,6 @@ on:
         required: false
         type: string
         default: ''
-      trigger_release_train_join:
-        description: 'Join the Spring release train after the branch is prepared. Uncheck to opt out.'
-        required: false
-        type: boolean
-        default: true
 
   workflow_call:
     inputs:
@@ -65,9 +62,10 @@ on:
         required: true
         type: string
       spring_release_train:
-        description: 'Spring release train this hotfix is part of (e.g. 2026.1)'
-        required: true
+        description: 'Spring release train this hotfix is part of (e.g. 2026.1). Supplying it joins that train once the branch is prepared; leave it empty to prepare the branch without joining.'
+        required: false
         type: string
+        default: ''
       project_version:
         description: 'Override the auto-computed hotfix project version (default: <current-version>.1-SNAPSHOT)'
         required: false
@@ -88,11 +86,6 @@ on:
         required: false
         type: string
         default: ''
-      trigger_release_train_join:
-        description: 'Dispatch release-train-join.yml in the commercial repo after the branch is prepared. Set to false to opt out.'
-        required: false
-        type: boolean
-        default: true
     secrets:
       token:
         description: 'GitHub token with contents: write on the commercial repo. Falls back to the GH_ACTIONS_REPO_TOKEN organization secret.'
@@ -331,7 +324,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger release-train-join workflow and wait
-        if: ${{ inputs.trigger_release_train_join }}
+        if: ${{ inputs.spring_release_train != '' }}
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         shell: bash

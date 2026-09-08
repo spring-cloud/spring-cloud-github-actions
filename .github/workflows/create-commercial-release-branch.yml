@@ -12,19 +12,15 @@ on:
         required: true
         type: string
       release-train:
-        description: 'Spring release train to join (e.g. 2026.09)'
-        required: true
+        description: 'Spring release train to join (e.g. 2026.09). Supplying it joins that train once the branch is prepared; leave it empty to prepare the branch without joining.'
+        required: false
         type: string
+        default: ''
       token:
         description: 'GitHub token with access to the project repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
         type: string
         default: ''
-      trigger-release-train-join:
-        description: 'Join the Spring release train after the branch is prepared. Uncheck to opt out.'
-        required: false
-        type: boolean
-        default: true
 
   workflow_call:
     inputs:
@@ -37,14 +33,10 @@ on:
         required: true
         type: string
       release-train:
-        description: 'Spring release train to join (e.g. 2025.09)'
-        required: true
-        type: string
-      trigger-release-train-join:
-        description: 'Join the Spring release train after the branch is prepared. Set to false to opt out.'
+        description: 'Spring release train to join (e.g. 2025.09). Supplying it joins that train once the branch is prepared; leave it empty to prepare the branch without joining.'
         required: false
-        type: boolean
-        default: true
+        type: string
+        default: ''
     secrets:
       token:
         description: 'GitHub token with access to the project repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
@@ -209,10 +201,15 @@ jobs:
           commercial-branch: release/${{ steps.setup.outputs.release-version }}
           token:             ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
-      # Dispatch release-train-join.yml in the commercial repo and wait for it,
-      # unless the trigger-release-train-join input is set to false to opt out.
+      # Dispatch release-train-join.yml in the commercial repo and wait for it, when a
+      # release-train is supplied - leaving that input empty prepares the branch and stops
+      # short of joining.
+      #
+      # inputs['release-train'] rather than inputs.release-train: a hyphen in a dot-path is
+      # ambiguous to the expression parser, and getting it wrong here would silently
+      # evaluate falsy and skip the join rather than fail visibly.
       - name: Trigger release-train-join workflow and wait
-        if: ${{ inputs['trigger-release-train-join'] }}
+        if: ${{ inputs['release-train'] != '' }}
         env:
           GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |

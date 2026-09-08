@@ -44,4 +44,83 @@ const best = (titles, base) => {
   return candidates[0].title;
 };
 
-module.exports = { rank, byRankDesc, best };
+// ── advancing a train ────────────────────────────────────────────────────────────────
+// The progression a train walks is M1 -> M2 -> ... -> RC1 -> RC2 -> ... -> GA, and only
+// half of it is derivable: the step within a qualifier is arithmetic, but the step from
+// milestones to release candidates, and from release candidates to GA, is a decision
+// somebody makes. post-release.yml takes that decision as its `promote_to` input and
+// hands it here.
+
+// Pulls a version apart. `kind` is null for a GA version, in which case `num` is 0.
+//   2026.0.0-M1 -> { base: '2026.0.0', kind: 'M',  num: 1 }
+//   2026.0.0    -> { base: '2026.0.0', kind: null, num: 0 }
+// Returns null for anything that is neither - a -SNAPSHOT, a -INTERNAL-SNAPSHOT, or a
+// qualifier this grammar does not know - so callers can reject rather than guess.
+const split = version => {
+  const v = String(version).trim();
+  const m = v.match(/^(\d+(?:\.\d+){2,3})(?:-(M|RC)(\d+))?$/);
+  if (!m) return null;
+  return { base: m[1], kind: m[2] || null, num: m[2] ? Number(m[3]) : 0 };
+};
+
+const isPrerelease = version => {
+  const s = split(version);
+  return !!s && s.kind !== null;
+};
+
+// The version that follows `version`, given the caller's intent.
+//
+// `promoteTo` is 'RC', 'GA', or anything falsy/'none' for "stay in the current phase".
+// A GA version ignores it entirely and bumps its last segment, which is what every
+// release before this function existed already did.
+//
+// Throws on a transition that cannot be meant: a milestone cannot become GA without
+// passing through a release candidate, and neither phase can be promoted to itself.
+// Throwing rather than returning null is deliberate - the caller is about to name
+// milestones and project boards after this value, and a silent wrong answer is far more
+// expensive than a failed run.
+const next = (version, promoteTo) => {
+  const s = split(version);
+  if (!s) {
+    throw new Error(
+      `'${version}' is not a release version this can advance. Expected 3 or 4 numeric ` +
+      'segments with an optional -M<n> or -RC<n> qualifier.');
+  }
+
+  const promote = (promoteTo || 'none').toString().trim().toUpperCase();
+  if (!['NONE', 'RC', 'GA', ''].includes(promote)) {
+    throw new Error(`Unknown promote_to '${promoteTo}'. Expected none, RC or GA.`);
+  }
+
+  // GA releases have no phase to promote out of; they walk the patch line as they always
+  // have. The input is ignored rather than rejected so that a promote_to left set from a
+  // previous run cannot fail an ordinary release.
+  if (s.kind === null) {
+    const parts = s.base.split('.');
+    parts[parts.length - 1] = String(Number(parts[parts.length - 1]) + 1);
+    return parts.join('.');
+  }
+
+  if (promote === 'RC') {
+    if (s.kind === 'RC') {
+      throw new Error(
+        `${version} is already a release candidate - promote_to=RC has nothing to do. ` +
+        'Leave promote_to unset to get the next RC, or set it to GA.');
+    }
+    return `${s.base}-RC1`;
+  }
+
+  if (promote === 'GA') {
+    if (s.kind === 'M') {
+      throw new Error(
+        `${version} is a milestone, so the next release cannot be GA. A train goes ` +
+        'M -> RC -> GA; set promote_to=RC first.');
+    }
+    return s.base;
+  }
+
+  // Same phase, next number.
+  return `${s.base}-${s.kind}${s.num + 1}`;
+};
+
+module.exports = { rank, byRankDesc, best, split, isPrerelease, next };

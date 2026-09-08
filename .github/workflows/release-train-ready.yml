@@ -7,10 +7,6 @@ on:
         description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config)'
         required: true
         type: string
-      project-version:
-        description: 'Project version (e.g. 4.2.0)'
-        required: true
-        type: string
       spring-cloud-release-train-version:
         description: 'Spring Cloud release version matching the jenkins-releaser-config properties file (e.g. 2025.0.0)'
         required: true
@@ -31,10 +27,6 @@ on:
         description: 'Spring Cloud GitHub project name (e.g. spring-cloud-config)'
         required: true
         type: string
-      project-version:
-        description: 'Project version (e.g. 4.2.0)'
-        required: true
-        type: string
       spring-cloud-release-train-version:
         description: 'Spring Cloud release train version matching the jenkins-releaser-config properties file (e.g. 2025.0.0)'
         required: true
@@ -53,7 +45,7 @@ permissions:
 
 jobs:
   release-train-ready:
-    name: Release Train Ready - ${{ inputs.project }} ${{ inputs.project-version }}
+    name: Release Train Ready - ${{ inputs.project }} ${{ inputs.spring-cloud-release-train-version }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +54,6 @@ jobs:
         uses: ./.github/actions/spring-release-train-project-ready
         with:
           project: ${{ inputs.project }}
-          project-version: ${{ inputs.project-version }}
           spring-cloud-release-train-version: ${{ inputs.spring-cloud-release-train-version }}
           spring-release-train-version: ${{ inputs.spring-release-train-version }}
           token: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}

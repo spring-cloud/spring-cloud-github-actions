@@ -4,12 +4,19 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Matches pre-release version suffixes that must not appear in a release build:
+ * Matches the one suffix that must never appear in any release build, milestone
+ * and release candidate included:
  *   -SNAPSHOT      (e.g. 4.1.0-SNAPSHOT)
+ */
+const SNAPSHOT_PATTERN = /-SNAPSHOT$/i;
+
+/**
+ * Matches the pre-release suffixes that are forbidden in a GA build but expected
+ * in a milestone or release candidate one:
  *   -RC<N>         (e.g. 3.2.0-RC1)
  *   -M<N>          (e.g. 2023.0.0-M1)
  */
-const PRE_RELEASE_PATTERN = /-SNAPSHOT$|-RC\d+$|-M\d+$/i;
+const MILESTONE_PATTERN = /-(RC|M)\d+$/i;
 
 /**
  * Matches values that are shaped like a version number: an optional leading `v`,
@@ -29,8 +36,31 @@ const COORDINATE_ELEMENTS = new Set(['dependency', 'plugin', 'extension']);
 
 const CHECK_OFF_ANNOTATION = '@releaser:version-check-off';
 
-function isPreRelease(version) {
-  return PRE_RELEASE_PATTERN.test(String(version).trim());
+/**
+ * Whether milestone and release-candidate versions are tolerated. Set once from the
+ * action input at the top of run(), and read by isPreRelease below.
+ *
+ * Module state rather than a parameter threaded through checkPomFile, walkPomNode,
+ * checkGradlePropertiesContent and the rest: the flag is a property of the run, not of
+ * any one file, and passing it down eight signatures would obscure them for no gain.
+ * isPreRelease still takes an explicit override so the unit tests need no setup.
+ */
+let allowPrereleaseVersions = false;
+
+/**
+ * True when `version` must not appear in the build being verified.
+ *
+ * -SNAPSHOT always counts. -M<n> and -RC<n> count only when the run is verifying a GA
+ * release: a milestone or release-candidate build legitimately carries a mixture of
+ * milestone, release-candidate and GA versions, and rejecting them would fail every
+ * pre-release the moment it was stamped.
+ *
+ * Exported for unit testing.
+ */
+function isPreRelease(version, allowPrerelease = allowPrereleaseVersions) {
+  const value = String(version).trim();
+  if (SNAPSHOT_PATTERN.test(value)) return true;
+  return !allowPrerelease && MILESTONE_PATTERN.test(value);
 }
 
 /**
@@ -59,6 +89,12 @@ function isVersionKey(key) {
 async function run() {
   try {
     const directory = path.resolve(core.getInput('directory') || '.');
+
+    allowPrereleaseVersions = core.getBooleanInput('allow-prerelease');
+    if (allowPrereleaseVersions) {
+      core.info('allow-prerelease is set: -M<n> and -RC<n> versions are permitted. ' +
+        '-SNAPSHOT versions are still rejected.');
+    }
 
     if (!fs.existsSync(directory)) {
       core.setFailed(`Directory not found: ${directory}`);
@@ -96,16 +132,23 @@ async function run() {
     core.setOutput('violations', JSON.stringify(allViolations));
 
     if (allViolations.length === 0) {
-      core.info('All versions are release versions. No pre-release versions found.');
+      core.info(allowPrereleaseVersions
+        ? 'No -SNAPSHOT versions found.'
+        : 'All versions are release versions. No pre-release versions found.');
       return;
     }
 
-    core.error(`Found ${allViolations.length} pre-release version(s):`);
+    const noun = allowPrereleaseVersions ? 'SNAPSHOT' : 'pre-release';
+    core.error(`Found ${allViolations.length} ${noun} version(s):`);
     for (const v of allViolations) {
       core.error(`  ${v.file}: ${v.location} = ${v.version}`);
     }
     core.setFailed(
-      `${allViolations.length} pre-release version(s) found. All dependencies must use release versions.`
+      `${allViolations.length} ${noun} version(s) found. ` +
+      (allowPrereleaseVersions
+        ? 'A milestone or release candidate may depend on -M<n> and -RC<n> versions, ' +
+          'but never on a -SNAPSHOT.'
+        : 'All dependencies must use release versions.')
     );
   } catch (error) {
     core.setFailed(`Action failed: ${error.message}`);

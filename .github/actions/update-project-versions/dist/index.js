@@ -28224,6 +28224,7 @@ module.exports = {
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 const core = __nccwpck_require__(7484);
+const { releaserConfigFileName } = __nccwpck_require__(2805);
 const { XMLParser } = __nccwpck_require__(9741);
 const fs = __nccwpck_require__(9896);
 const path = __nccwpck_require__(6928);
@@ -28373,8 +28374,8 @@ async function run() {
     }
 
     // ── build.gradle / build.gradle.kts ────────────────────────────────────
-    // Only the project version declaration is updated (version = '...' / version = "...").
-    // Dependency versions are managed exclusively via gradle.properties in Spring Cloud.
+    // The project version declaration, plus any `{prefix}Version` properties declared in an
+    // ext block rather than in gradle.properties.
     const buildGradleFiles = [
       ...findFiles(directory, 'build.gradle'),
       ...findFiles(directory, 'build.gradle.kts'),
@@ -28382,11 +28383,16 @@ async function run() {
     if (buildGradleFiles.length > 0) {
       core.info(`Found ${buildGradleFiles.length} build.gradle file(s)`);
       for (const file of buildGradleFiles) {
-        const { changed } = updateBuildGradleVersion(file, projectVersion);
+        const { changed, updatedProperties } = updateBuildGradleVersion(
+          file,
+          projectVersion,
+          versions
+        );
         if (changed) {
-          core.info(`Updated ${path.relative(directory, file)}: version`);
+          core.info(`Updated ${path.relative(directory, file)}: ` +
+            ['version', ...updatedProperties].join(', '));
         } else {
-          core.info(`No changes to ${path.relative(directory, file)}: version`);
+          core.info(`No changes to ${path.relative(directory, file)}`);
         }
       }
     }
@@ -28409,12 +28415,11 @@ async function run() {
  *
  * Exported for unit testing.
  */
-function releaseTrainVersionToFileName(version) {
-  // Pre-release qualifiers (-SNAPSHOT, -RC1, -M1, etc.) are lowercase in file names.
-  return version
-    .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
-    .replace(/\./g, '_') + '.properties';
-}
+// Re-exported under its original name so the tests and the rest of this file are unchanged.
+// The rule itself lives in .github/scripts/releaser-config-file.js because six places need
+// it - this action, three workflows and two composite actions - and each used to carry its
+// own copy. ncc bundles this require into dist/, so the published action stays standalone.
+const releaseTrainVersionToFileName = releaserConfigFileName;
 
 /**
  * Builds the raw GitHub URL for the releaser config properties file.
@@ -28774,27 +28779,29 @@ function updateGradlePropertiesContent(content, projectVersion, versions) {
 // ── build.gradle / build.gradle.kts ───────────────────────────────────────
 
 /**
- * Updates the project version declaration in a build.gradle or build.gradle.kts file.
- * Handles both single-quoted and double-quoted versions:
+ * Updates the project version declaration and any version properties in a build.gradle
+ * or build.gradle.kts file. Handles both single-quoted and double-quoted versions:
  *   version = '4.1.0'
- *   version = "4.1.0"
- *
- * Only the project-level version line is updated; dependency version properties
- * are managed via gradle.properties in Spring Cloud projects.
+ *   springCloudFunctionVersion = "4.1.0"
  *
  * Exported for unit testing.
  *
  * @param {string} filePath
  * @param {string} projectVersion
+ * @param {Record<string, string>} versions
  */
-function updateBuildGradleVersion(filePath, projectVersion) {
+function updateBuildGradleVersion(filePath, projectVersion, versions) {
   const content = fs.readFileSync(filePath, 'utf-8');
-  const { updated } = updateBuildGradleContent(content, projectVersion);
+  const { updated, updatedProperties } = updateBuildGradleContent(
+    content,
+    projectVersion,
+    versions
+  );
   const changed = updated !== content;
   if (changed) {
     fs.writeFileSync(filePath, updated, 'utf-8');
   }
-  return { changed };
+  return { changed, updatedProperties };
 }
 
 /**
@@ -28803,14 +28810,64 @@ function updateBuildGradleVersion(filePath, projectVersion) {
  *
  * Exported for unit testing.
  */
-function updateBuildGradleContent(content, projectVersion) {
+function updateBuildGradleContent(content, projectVersion, versions = {}) {
   // Match: version = '...' or version = "..." at the start of a line (with optional spaces)
-  const updated = content.replace(
+  const withProjectVersion = content.replace(
     /^(version\s*=\s*)(['"])([^'"]+)(['"])/m,
     (_, prefix, openQuote, _oldVersion, closeQuote) =>
       `${prefix}${openQuote}${projectVersion}${closeQuote}`
   );
-  return { updated };
+
+  // `{prefix}Version` assignments, resolved exactly as they are in gradle.properties:
+  // camelCase prefix -> kebab-case project name -> the train's version for it. These live
+  // in an `ext { }` or `buildscript { ext { } }` block rather than at the start of a line,
+  // so leading whitespace is part of the match and is preserved.
+  //
+  // Spring Cloud projects mostly declare these in gradle.properties, which is why this
+  // file only ever rewrote the project version. spring-cloud-function's Gradle samples
+  // declare them here instead, so a release left them at whatever they had been pinned at.
+  //
+  // A key that resolves to no project is left alone, which is what keeps `javaVersion` and
+  // similar build settings out of it.
+  const updatedProperties = [];
+  const updated = withProjectVersion.split('\n').map((line) => {
+    const match = line.match(
+      /^(\s*)([a-zA-Z][a-zA-Z0-9]*Version)(\s*=\s*)(['"])([^'"]+)(['"])(.*)$/
+    );
+    if (!match) return line;
+
+    const [, indent, key, separator, openQuote, currentValue, closeQuote, trailing] = match;
+    const projectName = camelToKebab(key.slice(0, -'Version'.length));
+    const targetVersion = versions[projectName];
+    if (!targetVersion || currentValue === targetVersion) return line;
+
+    updatedProperties.push(`${key}: ${targetVersion}`);
+    return `${indent}${key}${separator}${openQuote}${targetVersion}${closeQuote}${trailing}`;
+  }).join('\n');
+
+  // Inline dependency coordinates - "group:artifact:version" - for artifacts this train
+  // releases. Most Spring Cloud builds express these through a property or let the BOM
+  // manage them, which is why this file never needed it; spring-cloud-function's Azure
+  // sample pins one directly.
+  //
+  // Only org.springframework.* groups, so a third-party artifact that happens to share a
+  // prefix is never touched, and never when the version is an interpolation - rewriting
+  // "...:${springCloudFunctionVersion}" would replace the reference with a literal and
+  // break the very indirection the build is using.
+  const COORDINATE = /(['"])(org\.springframework\.[a-z0-9.]+):([A-Za-z0-9_.-]+):([^'"]+)\1/g;
+  const withCoordinates = updated.replace(
+    COORDINATE,
+    (whole, quote, groupId, artifactId, version) => {
+      if (version.includes('$')) return whole;
+      const projectName = projectForArtifact(artifactId, versions);
+      const targetVersion = projectName && versions[projectName];
+      if (!targetVersion || version === targetVersion) return whole;
+      updatedProperties.push(`${artifactId}: ${targetVersion}`);
+      return `${quote}${groupId}:${artifactId}:${targetVersion}${quote}`;
+    }
+  );
+
+  return { updated: withCoordinates, updatedProperties };
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -28859,6 +28916,31 @@ function artifactIdToProjectName(artifactId) {
   return artifactId
     .replace(/-dependencies$/, '')
     .replace(/-parent$/, '');
+}
+
+/**
+ * Resolves a Maven artifactId to the project in `versions` that releases it: an exact
+ * match, or the longest project name the artifactId extends on a `-` boundary.
+ *
+ * Spring Cloud publishes a project's modules at the project's own version, so
+ * spring-cloud-function-adapter-azure ships with spring-cloud-function and
+ * spring-cloud-config-server with spring-cloud-config. The boundary matters:
+ * spring-cloud-configuration would not resolve to spring-cloud-config.
+ *
+ * Longest wins so a project whose name extends another still resolves to itself.
+ * Returns null when nothing matches, which leaves the coordinate alone.
+ *
+ * Exported for unit testing.
+ */
+function projectForArtifact(artifactId, versions) {
+  if (Object.prototype.hasOwnProperty.call(versions, artifactId)) return artifactId;
+  let best = null;
+  for (const name of Object.keys(versions)) {
+    if (artifactId.startsWith(`${name}-`) && (best === null || name.length > best.length)) {
+      best = name;
+    }
+  }
+  return best;
 }
 
 /**
@@ -28932,12 +29014,59 @@ module.exports = {
   findFiles,
   camelToKebab,
   artifactIdToProjectName,
+  projectForArtifact,
   isChildOfRoot,
 };
 
 if (require.main === require.cache[eval('__filename')]) {
   run();
 }
+
+
+/***/ }),
+
+/***/ 2805:
+/***/ ((module) => {
+
+"use strict";
+
+
+// The name of a jenkins-releaser-config properties file for a release train version.
+//
+// Six places needed this rule and each carried its own copy, in two languages, under a
+// comment saying it had to stay identical to the others. It did not: post-release.yml and
+// spring-release-train-project-ready built 2026_0_0-M1.properties while the action that
+// actually reads the file resolved 2026_0_0-m1.properties, so a milestone release validated
+// one file and stamped from another. That drift was invisible for years because a GA version
+// carries no qualifier at all, which is exactly the case every copy agreed on.
+//
+// Required by the inline node scripts in the workflows, by update-project-versions, and -
+// through the CLI at the bottom - by the composite actions that need it from bash.
+
+// Lower-cases a pre-release qualifier and leaves the numeric part alone, then swaps dots for
+// underscores:
+//
+//   2026.0.0                    -> 2026_0_0.properties
+//   2026.0.0-M1                 -> 2026_0_0-m1.properties
+//   2026.0.0-RC2                -> 2026_0_0-rc2.properties
+//   2026.0.0-SNAPSHOT           -> 2026_0_0-snapshot.properties
+//   2026.0.0-INTERNAL-SNAPSHOT  -> 2026_0_0-internal-snapshot.properties
+//   2025.1.2.1                  -> 2025_1_2_1.properties
+//
+// The qualifier is everything from the first `-` followed by a letter, so the whole of
+// -INTERNAL-SNAPSHOT is lower-cased rather than just its first word.
+const releaserConfigFileName = version => String(version).trim()
+  .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
+  .replace(/\./g, '_') + '.properties';
+
+module.exports = { releaserConfigFileName };
+
+// CLI, so a composite action's bash can call this rather than reimplement it:
+//
+//   file=$(node "$GITHUB_ACTION_PATH/../../scripts/releaser-config-file.js" "$train")
+//
+// Guarded on require.main so importing the module never runs it.
+if (false) {}
 
 
 /***/ }),

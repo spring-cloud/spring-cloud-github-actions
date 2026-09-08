@@ -79,6 +79,9 @@ jobs:
       release-repo: ${{ steps.parse.outputs.release-repo }}
       props-file: ${{ steps.parse.outputs.props-file }}
     steps:
+      # Only so the inline scripts below can require .github/scripts/.
+      - uses: actions/checkout@v4
+
       - name: Parse releaser config and build matrix
         id: parse
         env:
@@ -88,7 +91,18 @@ jobs:
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const path = require('path');
           const { execFileSync } = require('child_process');
+          // The one implementation of this rule, shared with update-project-versions - the
+          // action that reads the very file this names - and with the composite actions that
+          // need it from bash. This job checks the repository out, so the module is under the
+          // workspace.
+          const { releaserConfigFileName } = require(path.join(process.env.GITHUB_WORKSPACE,
+            '.github', 'scripts', 'releaser-config-file.js'));
+          const { RELEASER_CONFIG_REPO, RELEASER_CONFIG_BRANCH, fetchReleaserConfig } =
+            require(path.join(process.env.GITHUB_WORKSPACE,
+              '.github', 'scripts', 'releaser-config.js'));
+
 
           const trainVersion = (process.env.TRAIN_VERSION || '').trim();
           const projectsRaw = (process.env.PROJECTS_FILTER || '').trim();
@@ -100,12 +114,9 @@ jobs:
               `qualifier (e.g. 2026.1.0-SNAPSHOT); got '${trainVersion}'.`);
           }
 
-          // Deliberately identical to releaseTrainVersionToFileName in
-          // update-project-versions/src/index.js: this job must read exactly the file the action
-          // will read, or it would validate one file and apply another.
-          const propsFile = trainVersion
-            .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
-            .replace(/\./g, '_') + '.properties';
+          // This job must read exactly the file update-project-versions will read, or it
+          // would validate one file and apply another.
+          const propsFile = releaserConfigFileName(trainVersion);
 
           const names = projectsRaw
             ? projectsRaw.split(',').map(s => s.trim()).filter(Boolean)
@@ -121,33 +132,22 @@ jobs:
               'Use create-oss-release-branch.yml for the commercial side of a release.');
           }
 
-          // Always spring-cloud-release-commercial, for OSS trains too: that repository holds the
-          // releaser config for every train now.
-          const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
-          const BRANCH = 'jenkins-releaser-config';
+          // Where the config lives, from the shared module - it owns that choice for every
+          // caller. `commercial` decides only which project repositories are updated.
+          const releaseRepo = RELEASER_CONFIG_REPO;
+          const BRANCH = RELEASER_CONFIG_BRANCH;
 
           console.log(`Reading ${propsFile} from ${releaseRepo}@${BRANCH}...`);
-          let content;
+          // content as well as entries: the CDN wait below compares what raw.githubusercontent
+          // serves against the bytes the API returned, so it needs the file itself.
+          let content, entries;
           try {
-            const b64 = execFileSync('gh', ['api',
-              `repos/${releaseRepo}/contents/${propsFile}?ref=${BRANCH}`,
-              '--jq', '.content'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-            content = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+            ({ content, entries } = fetchReleaserConfig(trainVersion));
           } catch (err) {
-            fail(`ERROR: could not read ${propsFile} from ${releaseRepo}@${BRANCH}.`,
+            fail(`ERROR: ${err.message}.`,
               'This workflow applies an existing properties file, it does not create one.',
               'Check that release_train_version matches a file on that branch, and that the',
               'token has read access to the repository.');
-          }
-
-          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
-          const entries = [];
-          for (const line of content.split('\n')) {
-            const m = line.match(ENTRY_RE);
-            if (m) entries.push({ key: m[1].trim(), version: m[2].trim() });
-          }
-          if (!entries.length) {
-            fail(`ERROR: ${propsFile} contains no releaser.fixed-versions[...] entries.`);
           }
           console.log(`Found ${entries.length} version entries.`);
 

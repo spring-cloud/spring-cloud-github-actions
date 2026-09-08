@@ -47,13 +47,50 @@ this document:
 | | **OSS** | **Commercial** | **Hotfix** |
 |---|---|---|---|
 | **Entry point** | [`create-oss-release-branch.yml`](../.github/workflows/create-oss-release-branch.yml) | [`create-commercial-release-branch.yml`](../.github/workflows/create-commercial-release-branch.yml) | [`create-hotfix-release-branch.yml`](../.github/workflows/README-create-hotfix-branch.md) |
-| **Cut from** | an OSS branch (`main`, `5.0.x`) | a commercial branch (`3.3.x`) | an OSS **tag** (`v5.0.1`) |
+| **Cut from** | an OSS branch (`main`, `5.0.x`), derived from the train | a commercial branch (`3.3.x`) | an OSS **tag** (`v5.0.1`) |
 | **Via** | a long-lived `<major>.<minor>.x-internal` branch, full OSS history | nothing — same repo already | an orphan branch, no history |
 | **Release branch** | `release/5.0.0` | `release/3.3.1` | `release/5.0.1.1` — always a `.1` suffix |
 | **Published to** | Maven Central | Spring Enterprise | Spring Enterprise |
 | **Versions stamped** | `-INTERNAL-SNAPSHOT`, final numbers at ready | untouched until ready | `<current>.1-SNAPSHOT` immediately |
 | **Tag + milestone** | **OSS** repo | **commercial** repo | **commercial** repo |
 | **`post-release`** | all nine steps | nine, with `commercial: true` | steps 1, 2, 6, 7 only |
+
+### Milestones and release candidates cut across all three
+
+A release type says *where* a release is built and published. It is a separate question
+whether that release is a milestone, a release candidate or a GA, and an OSS train is all
+three in turn: `2026.0.0-M1`, `-M2`, `-RC1`, then `2026.0.0`.
+
+The entry points above are mostly unchanged for a pre-release, with one difference: the
+release branch and the milestone carry the phase, so `create-oss-release-branch` cuts
+`release/5.1.0-M1` and opens a `5.1.0-M1` milestone rather than `5.1.0`.
+
+The phase comes from the `spring_cloud_release_train` input, because nothing else can
+supply it. When the release branch is cut every version in the tree is still
+`-INTERNAL-SNAPSHOT` or `-SNAPSHOT`, so the properties file content is identical whether
+this branch is about to become M1, RC1 or the GA. Passing `2026.0.0-M1` is what makes it a
+milestone — the same string you pass to `release-train-ready` and to `post-release`, so one
+train version means the same thing at all three steps.
+
+The phase is stripped again before the internal properties file is looked up, so every
+pre-release of a train reads one `2026_0_0-internal-snapshot.properties`. The internal
+branch stays at `5.1.0-INTERNAL-SNAPSHOT` from M1 through to GA, so per-phase copies of
+that file would be byte-identical.
+
+The result is one name through the whole chain: the release properties file says
+`spring-cloud-config=5.1.0-M1`, the release train checks out `release/5.1.0-M1`, and
+`post-release` merges `release/5.1.0-M1` back and closes the `5.1.0-M1` milestone.
+
+Two further things downstream differ:
+
+- [`verify-no-snapshot-versions`](../.github/actions/verify-no-snapshot-versions/README.md)
+  is passed `allow-prerelease`, because a milestone build legitimately carries a mixture of
+  `-M<n>`, `-RC<n>` and GA versions. `-SNAPSHOT` is still rejected.
+- [`post-release`](../.github/workflows/README-post-release.md) takes a `promote_to` input
+  and skips the parts that assume the train has moved on. It has not: the maintenance
+  branch stays on `<train>-SNAPSHOT` from M1 all the way to GA, so there is no next
+  snapshot properties file and no version bump — though the merge back still happens. See
+  [Milestone and release candidate releases](../.github/workflows/README-post-release.md#milestone-and-release-candidate-releases).
 
 All three converge on the same machinery once the branch exists: `release-train-join` is
 dispatched, [`spring-release-train-project-ready`](../.github/actions/spring-release-train-project-ready/)
@@ -307,7 +344,7 @@ per project. Its nine jobs, in order:
 over the [`spring-release-train-project-ready`](../.github/actions/spring-release-train-project-ready/)
 composite action, which for each project:
 
-1. Validate the branch version against the `jenkins-releaser-config` properties file
+1. Resolve this project's version from the `jenkins-releaser-config` properties file — that entry names the `release/<version>` branch — and refuse if `v<version>` is already tagged
 2. Check out `release/<version>`
 3. `update-project-versions` — stamp final, non-SNAPSHOT dependency versions
 4. Delete `ci.yml`, `pr.yml`, `ci-release.yml`, `release-ci-settings.xml` from the release branch
@@ -395,9 +432,8 @@ it is now a constant in the dispatch, not a derived value.
 |---|---|---|
 | `project` | yes | Either `spring-cloud-config` or `spring-cloud-config-commercial` — the suffix is what selects the destination |
 | `branch` | yes | Source branch (`main`, `4.2.x`) |
-| `release-train` | yes | Spring release train to join (e.g. `2026.09`) |
+| `release-train` | no | Spring release train to join (e.g. `2026.09`). Supplying it joins that train; leave it empty to prepare the branch without joining |
 | `token` | no | Falls back to `GH_ACTIONS_REPO_TOKEN` |
-| `trigger-release-train-join` | no, default `true` | Uncheck to prepare the branch without joining the train |
 
 Available as both `workflow_dispatch` and `workflow_call`.
 
@@ -595,12 +631,11 @@ flowchart TD
 |---|---|---|
 | `oss_repo` | yes | e.g. `spring-cloud-stream` — the commercial repo is always this plus `-commercial` |
 | `oss_tag` | yes | e.g. `v5.0.1` |
-| `spring_release_train` | yes | The Spring release train this hotfix joins |
+| `spring_release_train` | no | The Spring release train this hotfix joins. Supplying it joins that train; leave it empty to prepare the branch without joining |
 | `project_version` | no | Override the auto-computed `<current>.1-SNAPSHOT` |
 | `release_train_version` | no | When set, dependency versions are pulled from that Spring Cloud train's properties file |
 | `versions` | no | JSON map of explicit dependency versions, e.g. `{"spring-boot":"3.3.0"}`. **Mutually exclusive** with `release_train_version` |
 | `sha` | no | Commit of *this* repo to copy release-train action files from |
-| `trigger_release_train_join` | no, default `true` | Uncheck to prepare without joining |
 
 ### The seven jobs
 

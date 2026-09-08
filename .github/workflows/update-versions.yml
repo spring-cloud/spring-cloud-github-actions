@@ -70,6 +70,9 @@ jobs:
       release-repo: ${{ steps.parse.outputs.release-repo }}
       props-file: ${{ steps.parse.outputs.props-file }}
     steps:
+      # Only so the inline scripts below can require .github/scripts/.
+      - uses: actions/checkout@v4
+
       - name: Parse releaser config and build matrix
         id: parse
         env:
@@ -80,7 +83,18 @@ jobs:
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const path = require('path');
           const { execFileSync } = require('child_process');
+          // The one implementation of this rule, shared with update-project-versions - the
+          // action that reads the very file this names - and with the composite actions that
+          // need it from bash. This job checks the repository out, so the module is under the
+          // workspace.
+          const { releaserConfigFileName } = require(path.join(process.env.GITHUB_WORKSPACE,
+            '.github', 'scripts', 'releaser-config-file.js'));
+          const { RELEASER_CONFIG_REPO, RELEASER_CONFIG_BRANCH, fetchReleaserConfig } =
+            require(path.join(process.env.GITHUB_WORKSPACE,
+              '.github', 'scripts', 'releaser-config.js'));
+
 
           const trainVersion = (process.env.TRAIN_VERSION || '').trim();
           const projectsRaw = (process.env.PROJECTS_FILTER || '').trim();
@@ -96,12 +110,9 @@ jobs:
               `qualifier (e.g. 2025.1.3-SNAPSHOT or 2025.1.2); got '${trainVersion}'.`);
           }
 
-          // Deliberately identical to releaseTrainVersionToFileName in
-          // update-project-versions/src/index.js: this job must read exactly the file the action
-          // will read, or it would validate one file and apply another.
-          const propsFile = trainVersion
-            .replace(/-([a-zA-Z].*)$/, (_, q) => '-' + q.toLowerCase())
-            .replace(/\./g, '_') + '.properties';
+          // This job must read exactly the file update-project-versions will read, or it
+          // would validate one file and apply another.
+          const propsFile = releaserConfigFileName(trainVersion);
 
           // ── projects filter ─────────────────────────────────────────────────────────
           // Commerciality comes from the names when they are given, because the names are what
@@ -129,36 +140,24 @@ jobs:
             }
           }
 
-          // Always spring-cloud-release-commercial, for OSS trains too: that repository holds the
-          // releaser config for every train now, so this is deliberately NOT derived from
-          // `commercial`. That input decides only which project repositories are updated.
-          const releaseRepo = 'spring-cloud/spring-cloud-release-commercial';
-          const BRANCH = 'jenkins-releaser-config';
+          // Where the config lives, from the shared module - it owns that choice for every
+          // caller. `commercial` decides only which project repositories are updated.
+          const releaseRepo = RELEASER_CONFIG_REPO;
+          const BRANCH = RELEASER_CONFIG_BRANCH;
 
           // ── read the properties file ────────────────────────────────────────────────
           console.log(`Reading ${propsFile} from ${releaseRepo}@${BRANCH}...`);
-          let content;
+          // content as well as entries: the CDN wait below compares what raw.githubusercontent
+          // serves against the bytes the API returned, so it needs the file itself.
+          let content, entries;
           try {
-            const b64 = execFileSync('gh', ['api',
-              `repos/${releaseRepo}/contents/${propsFile}?ref=${BRANCH}`,
-              '--jq', '.content'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-            content = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
+            ({ content, entries } = fetchReleaserConfig(trainVersion));
           } catch (err) {
-            fail(`ERROR: could not read ${propsFile} from ${releaseRepo}@${BRANCH}.`,
+            fail(`ERROR: ${err.message}.`,
               'This workflow applies an existing properties file, it does not create one.',
               'Check that release_train_version matches a file on that branch (post-release',
               'writes the -snapshot file; it can also be committed by hand), and that the token',
               'has read access to the repository.');
-          }
-
-          const ENTRY_RE = /^releaser\.fixed-versions\[([^\]]+)\]=(.+)$/;
-          const entries = [];
-          for (const line of content.split('\n')) {
-            const m = line.match(ENTRY_RE);
-            if (m) entries.push({ key: m[1].trim(), version: m[2].trim() });
-          }
-          if (!entries.length) {
-            fail(`ERROR: ${propsFile} contains no releaser.fixed-versions[...] entries.`);
           }
           console.log(`Found ${entries.length} version entries.`);
 
@@ -264,103 +263,19 @@ jobs:
           persist-credentials: false
 
       # ── resolve the branch to work on ────────────────────────────────────────────────
+      # The branch is always derived from the version in the properties file - there is no
+      # input to override it. Between the .x derivation and the main fallback the action
+      # makes, every branch this workflow targets is covered: the only names in projects.json
+      # that are not <major>.<minor>.x are main, and the -internal branches, which are rebased
+      # from the OSS branches this updates and so are never targeted here.
       - name: Resolve target branch
         id: branch
-        env:
-          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-          REPO: ${{ matrix.repo }}
-          VERSION: ${{ matrix.version }}
-          COMMERCIAL: ${{ needs.setup.outputs.commercial }}
-        run: |
-          node - << 'JSEOF'
-          const fs = require('fs');
-          const { execFileSync } = require('child_process');
-
-          const repo = process.env.REPO;
-          const version = process.env.VERSION;
-          const commercial = process.env.COMMERCIAL === 'true';
-
-          const out = process.env.GITHUB_OUTPUT;
-          const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
-          const stop = (status, message) => {
-            console.log(message);
-            emit('status', status);
-            emit('branch', '');
-            process.exit(0);
-          };
-
-          const branchExists = branch => {
-            try {
-              execFileSync('gh', ['api', `repos/${repo}/branches/${branch}`, '--jq', '.name'],
-                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-              return true;
-            } catch (err) { return false; }
-          };
-
-          // The branch is always derived from the version in the properties file - there is no
-          // input to override it. Between the .x derivation and the main fallback below, every
-          // branch this workflow targets is covered: the only names in projects.json that are
-          // not <major>.<minor>.x are main, and the -internal branches, which are rebased from
-          // the OSS branches this updates and so are never targeted here.
-          //
-          // Drop the last segment and append .x. Works for both lines: OSS 5.0.4-SNAPSHOT ->
-          // 5.0.x, and 3-part commercial 4.2.9-SNAPSHOT -> 4.2.x.
-          const plain = version.replace(/-SNAPSHOT$/, '');
-          const parts = plain.split('.');
-          const target = parts.slice(0, -1).join('.') + '.x';
-
-          if (branchExists(target)) {
-            console.log(`Target branch: ${target}`);
-            emit('status', 'ok');
-            emit('branch', target);
-            process.exit(0);
-          }
-
-          // Commercial repos have no main branch at all - spring-cloud-config-commercial's
-          // default is 4.3.x - so there is no sane fallback to make.
-          if (commercial) {
-            stop('branch-not-found',
-              `ERROR: ${repo} has no ${target} branch, and commercial repos have no main to ` +
-              'fall back to. Skipping this project.');
-          }
-
-          if (!branchExists('main')) {
-            stop('branch-not-found', `ERROR: ${repo} has neither ${target} nor main.`);
-          }
-
-          // Falling back to main is only safe if main really is the line this version belongs
-          // to - otherwise we would bump an unrelated major.minor to these versions.
-          const expected = parts.slice(0, 2).join('.');
-          let pom;
-          try {
-            const b64 = execFileSync('gh', ['api',
-              `repos/${repo}/contents/pom.xml?ref=main`, '--jq', '.content'],
-              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-            pom = Buffer.from(b64.replace(/\s/g, ''), 'base64').toString('utf8');
-          } catch (err) {
-            stop('branch-not-found', `ERROR: no ${target} branch and could not read pom.xml on main.`);
-          }
-
-          // The root <version> is the project's own; fall back to <parent><version> when the
-          // root pom inherits it.
-          const withoutParent = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
-          let m = withoutParent.match(/<version>([^<]+)<\/version>/);
-          if (!m) {
-            const parent = pom.match(/<parent>[\s\S]*?<\/parent>/);
-            if (parent) m = parent[0].match(/<version>([^<]+)<\/version>/);
-          }
-          const pomVersion = m ? m[1].trim() : '';
-
-          if (!pomVersion.startsWith(`${expected}.`)) {
-            stop('version-mismatch',
-              `ERROR: ${repo} has no ${target} branch, and main is at '${pomVersion}', which is ` +
-              `not on the ${expected} line. Refusing to bump main to ${version}.`);
-          }
-
-          console.log(`No ${target} branch; main is at ${pomVersion} - using main.`);
-          emit('status', 'ok');
-          emit('branch', 'main');
-          JSEOF
+        uses: ./.github/actions/resolve-release-branch
+        with:
+          repo: ${{ matrix.repo }}
+          version: ${{ matrix.version }}
+          commercial: ${{ needs.setup.outputs.commercial }}
+          token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Clone project
         id: clone

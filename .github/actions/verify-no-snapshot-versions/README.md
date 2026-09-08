@@ -35,6 +35,7 @@ Any other key has its value checked only when the value is *shaped* like a versi
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
+| `allow-prerelease` | Permit `-M<n>` and `-RC<n>` versions. Set when verifying a milestone or release candidate. `-SNAPSHOT` is rejected either way. | No | `false` |
 | `directory` | Root directory of the project to verify | No | `.` |
 | `exclude-patterns` | Newline-separated list of regular expressions. Any file whose absolute path matches one of these patterns is excluded from version checking. | No | See below |
 
@@ -123,11 +124,33 @@ steps:
 
 Any version value matching one of these patterns (case-insensitive) is a violation:
 
-| Pattern | Example |
-|---------|---------|
-| `-SNAPSHOT` | `4.2.0-SNAPSHOT` |
-| `-RC<N>` | `3.3.0-RC1`, `3.3.0-RC2` |
-| `-M<N>` | `2023.0.0-M1`, `4.2.0-M12` |
+| Pattern | Example | Flagged by default | Flagged with `allow-prerelease` |
+|---------|---------|--------------------|---------------------------------|
+| `-SNAPSHOT` | `4.2.0-SNAPSHOT` | Yes | Yes |
+| `-RC<N>` | `3.3.0-RC1`, `3.3.0-RC2` | Yes | No |
+| `-M<N>` | `2023.0.0-M1`, `4.2.0-M12` | Yes | No |
+
+### Milestone and release candidate releases
+
+A GA release must contain nothing but GA versions, which is the default.
+
+A milestone or release candidate is different: it stamps `-M<n>`/`-RC<n>` on the project
+itself, and it depends on the other projects in the train at *their* pre-release versions
+while still depending on GA versions of everything outside it. So a `5.1.0-M1` build
+legitimately contains a mixture of `-M<n>`, `-RC<n>` and plain versions, and the default
+check would report every one of them.
+
+`allow-prerelease: true` relaxes exactly that, and nothing else. `-SNAPSHOT` is still a
+violation, because a snapshot is a moving target that must never be published in any
+release.
+
+This is a blanket allow rather than a match against the specific version being released —
+during the `5.1.0-RC1` release a stale `5.1.0-M1` left somewhere would pass. That is
+deliberate: a pre-release train carries a mixture of phases by design, so there is no
+single correct version to match against.
+
+`spring-release-train-project-ready` sets this automatically from the version it is
+releasing; callers rarely need to pass it by hand.
 
 ## Suppressing Individual Version Checks in pom.xml
 
