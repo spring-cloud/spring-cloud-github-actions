@@ -14,6 +14,9 @@ const {
   hasVersionCheckOff,
   updateGradlePropertiesContent,
   updateBuildGradleContent,
+  toAntoraVersion,
+  updateReleaseTrainLinksContent,
+  updateReleaseTrainIndexContent,
   projectForArtifact,
   camelToKebab,
   artifactIdToProjectName,
@@ -953,5 +956,132 @@ describe('detectProjectName', () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Release train docs ───────────────────────────────────────────────────────
+
+describe('toAntoraVersion', () => {
+  it('reduces a GA version to major.minor', () => {
+    expect(toAntoraVersion('5.0.5')).toBe('5.0');
+  });
+
+  it('keeps the -SNAPSHOT suffix on major.minor', () => {
+    expect(toAntoraVersion('5.1.0-SNAPSHOT')).toBe('5.1-SNAPSHOT');
+  });
+
+  it('drops a milestone or release candidate qualifier', () => {
+    expect(toAntoraVersion('5.1.0-M1')).toBe('5.1');
+    expect(toAntoraVersion('5.1.0-RC1')).toBe('5.1');
+  });
+});
+
+describe('updateReleaseTrainLinksContent', () => {
+  const versions = {
+    'spring-cloud-build': '5.0.3',
+    'spring-cloud-commons': '5.0.3',
+    'spring-cloud-config': '5.0.5',
+  };
+
+  it('rewrites the reference path and the trailing version of a relative link', () => {
+    const line =
+      ' link:/spring-cloud-config/reference/5.1-SNAPSHOT/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 5.1.0-SNAPSHOT';
+    const { updated, updatedProjects } = updateReleaseTrainLinksContent(line, versions);
+    expect(updated).toBe(
+      ' link:/spring-cloud-config/reference/5.0/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 5.0.5'
+    );
+    expect(updatedProjects).toEqual(['spring-cloud-config: 5.0.5']);
+  });
+
+  it('preserves an absolute docs.spring.io link form', () => {
+    const line =
+      ' https://docs.spring.io/spring-cloud-config/reference/5.1-SNAPSHOT/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 5.1.0-SNAPSHOT';
+    const { updated } = updateReleaseTrainLinksContent(line, versions);
+    expect(updated).toBe(
+      ' https://docs.spring.io/spring-cloud-config/reference/5.0/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 5.0.5'
+    );
+  });
+
+  it('leaves a project that is not in the versions map untouched', () => {
+    const line =
+      ' link:/spring-cloud-zookeeper/reference/5.1-SNAPSHOT/[spring-cloud-zookeeper]' +
+      ' :: Reference Documentation, version 5.1.0-SNAPSHOT';
+    const { updated, updatedProjects } = updateReleaseTrainLinksContent(line, versions);
+    expect(updated).toBe(line);
+    expect(updatedProjects).toEqual([]);
+  });
+
+  it('leaves blank lines and non-link text alone', () => {
+    const content = '\n= Heading\n\ninclude::_spring-cloud-links.adoc[]\n';
+    expect(updateReleaseTrainLinksContent(content, versions).updated).toBe(content);
+  });
+
+  it('rewrites every line of the generated page, preserving order and indentation', () => {
+    const content = loadFixture(
+      'release-train-docs', 'docs', 'modules', 'ROOT', 'pages', '_spring-cloud-links.adoc'
+    );
+    const { updated, updatedProjects } = updateReleaseTrainLinksContent(content, versions);
+    expect(updated).toBe(
+      ' link:/spring-cloud-build/reference/5.0/[spring-cloud-build]' +
+      ' :: Reference Documentation, version 5.0.3\n' +
+      ' link:/spring-cloud-commons/reference/5.0/[spring-cloud-commons]' +
+      ' :: Reference Documentation, version 5.0.3\n' +
+      ' link:/spring-cloud-config/reference/5.0/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 5.0.5\n'
+    );
+    expect(updatedProjects).toEqual([
+      'spring-cloud-build: 5.0.3',
+      'spring-cloud-commons: 5.0.3',
+      'spring-cloud-config: 5.0.5',
+    ]);
+  });
+
+  it('leaves an empty reference path segment empty while still bumping the version', () => {
+    // The form the commercial hotfix branches carry (tag v2025.0.2.1), deliberately
+    // unversioned: filling the segment in would repoint the link.
+    const line =
+      ' https://docs.enterprise.spring.io/spring-cloud-config/reference/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 4.3.3.1-SNAPSHOT';
+    const { updated, updatedProjects } = updateReleaseTrainLinksContent(line, {
+      'spring-cloud-config': '4.3.3.1',
+    });
+    expect(updated).toBe(
+      ' https://docs.enterprise.spring.io/spring-cloud-config/reference/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 4.3.3.1'
+    );
+    expect(updatedProjects).toEqual(['spring-cloud-config: 4.3.3.1']);
+  });
+
+  it('makes no change when the page is already at the target versions', () => {
+    const content =
+      ' link:/spring-cloud-config/reference/5.0/[spring-cloud-config]' +
+      ' :: Reference Documentation, version 5.0.5';
+    const { updated, updatedProjects } = updateReleaseTrainLinksContent(content, versions);
+    expect(updated).toBe(content);
+    expect(updatedProjects).toEqual([]);
+  });
+});
+
+describe('updateReleaseTrainIndexContent', () => {
+  const versions = { 'spring-boot': '4.0.8', 'spring-cloud-config': '5.0.5' };
+
+  it('rewrites the spring-boot-version attribute and nothing else', () => {
+    const content = loadFixture(
+      'release-train-docs', 'docs', 'modules', 'ROOT', 'pages', 'index.adoc'
+    );
+    const { updated, updatedProperties } = updateReleaseTrainIndexContent(content, versions);
+    expect(updated).toBe(content.replace('4.2.0-SNAPSHOT', '4.0.8'));
+    expect(updatedProperties).toEqual(['spring-boot-version: 4.0.8']);
+  });
+
+  it('is a no-op when spring-boot is absent from the versions map', () => {
+    const content = ':spring-boot-version: 4.2.0-SNAPSHOT\n';
+    const { updated, updatedProperties } = updateReleaseTrainIndexContent(content, {});
+    expect(updated).toBe(content);
+    expect(updatedProperties).toEqual([]);
   });
 });

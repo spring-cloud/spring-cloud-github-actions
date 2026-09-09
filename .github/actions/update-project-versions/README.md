@@ -13,6 +13,8 @@ The action walks the `directory` input (default: repo root) recursively and upda
 | `pom.xml` (root **and** child modules) | `<properties>` entries whose key ends in `.version` when the project name is in `versions`, unless [pinned](#pinning-a-property-with-releaserversion-check-off) |
 | `gradle.properties` | Bare `version=` key → `project-version`; `{prefix}Version=` keys → looked up in `versions` via camelCase→kebab-case conversion |
 | `build.gradle` / `build.gradle.kts` | `version = '...'` / `version = "..."` declaration → `project-version` |
+| `docs/modules/ROOT/pages/_spring-cloud-links.adoc` | Each project link's `/reference/<major.minor>/` path segment and trailing `version <v>` → the project's entry in `versions` |
+| `docs/modules/ROOT/pages/index.adoc` | The `:spring-boot-version:` attribute → `versions["spring-boot"]` |
 
 The following directories are always skipped: `.git`, `node_modules`, `target`, `build`, `.gradle`.
 
@@ -159,6 +161,34 @@ Property keys follow the camelCase convention used by Spring Cloud projects:
 | `springCloudCommonsVersion` | `springCloudCommons` → `spring-cloud-commons` | `versions["spring-cloud-commons"]` |
 
 Only keys matching the pattern `^[a-zA-Z0-9]+Version$` (a camelCase prefix immediately followed by `Version`) are considered. Keys like `releaseVersion` or `versionCode` are intentionally ignored.
+
+### Release train docs (`docs/modules/ROOT/pages/`)
+
+Only `spring-cloud-release` and `spring-cloud-release-commercial` have this directory; everywhere else these two steps are skipped, because the action acts only on files that exist.
+
+Those repos commit the Antora pages that `GenerateReleaseTrainDocs` renders from `spring-cloud-dependencies/pom.xml`, and the docs site serves the **committed** copy rather than regenerating it. The release tags the branch tip without running that generator, so unless the version-bump commit updates the pages too, a GA tag ships docs that still link to the snapshots the branch was developing against.
+
+The pages are rewritten line by line rather than re-rendered: for each link the project name in the `[name]` label is looked up in `versions`, and only the two version captures are replaced.
+
+```
+ link:/spring-cloud-config/reference/5.1-SNAPSHOT/[spring-cloud-config] :: Reference Documentation, version 5.1.0-SNAPSHOT
+ link:/spring-cloud-config/reference/5.0/[spring-cloud-config] :: Reference Documentation, version 5.0.5
+```
+
+Everything else on the line is preserved, so a branch keeps whichever link form its own template renders, and this action cannot drift from `_spring-cloud-links.hbs`. Every form still live round-trips:
+
+| Form | Where |
+|---|---|
+| `link:/spring-cloud-build/reference/5.0/[…]` | `main`, `2025.1.x`, `2025.0.x-commercial` — since [spring-cloud-release@4cdacb5](https://github.com/spring-cloud/spring-cloud-release/commit/4cdacb5c4d98ec90ef87ff1f20aa2274acfbd892) made the links relative to whichever site serves the page |
+| `https://docs.spring.io/…` | OSS `2025.0.x`, `2024.0.x` |
+| `https://docs.enterprise.spring.io/…` | `2024.0.x-commercial` |
+| `…/reference/[…]` — no version segment | the older commercial hotfix tags (`v2025.0.2.1`, `v2025.1.1.1`) |
+
+The host is never rewritten — it is not derivable from the releaser config, and the relative form removes the need. A link with no version segment does not gain one (adding it would repoint the link), but its trailing version is still updated. A line whose project is absent from `versions` is left byte-identical.
+
+The `/reference/<segment>/` value is `major.minor`, keeping a `-SNAPSHOT` suffix: `5.0.5` → `5.0`, `5.1.0-SNAPSHOT` → `5.1-SNAPSHOT`, `5.1.0-M1` → `5.1`. This is a port of `TemplateProject.toAntora` in `spring-cloud-release`; the two must agree or a release would rewrite a link to a path Antora does not publish.
+
+`legal.adoc` carries no versions and is left alone.
 
 ## Version name substitutions
 

@@ -172,6 +172,33 @@ async function run() {
       }
     }
 
+    // ── Release train docs ──────────────────────────────────────────────────
+    // spring-cloud-release commits the Antora pages that GenerateReleaseTrainDocs renders
+    // from spring-cloud-dependencies/pom.xml, and the published site serves the committed
+    // copy rather than regenerating it. The release tags the branch tip without ever
+    // running that generator, so without this the tagged docs still link to the snapshots
+    // the branch was developing against. No other project has this directory, which is
+    // what the existence checks are for.
+    const docsPagesDir = path.join(directory, 'docs', 'modules', 'ROOT', 'pages');
+    if (fs.existsSync(docsPagesDir)) {
+      const linksFile = path.join(docsPagesDir, '_spring-cloud-links.adoc');
+      if (fs.existsSync(linksFile)) {
+        const { changed, updatedProjects } = updateReleaseTrainLinksFile(linksFile, versions);
+        if (changed) {
+          core.info(`Updated ${path.relative(directory, linksFile)}: ${updatedProjects.join(', ')}`);
+        } else {
+          core.info(`No changes to ${path.relative(directory, linksFile)}`);
+        }
+      }
+      const indexFile = path.join(docsPagesDir, 'index.adoc');
+      if (fs.existsSync(indexFile)) {
+        const { changed, updatedProperties } = updateReleaseTrainIndexFile(indexFile, versions);
+        if (changed) {
+          core.info(`Updated ${path.relative(directory, indexFile)}: ${updatedProperties.join(', ')}`);
+        }
+      }
+    }
+
     const totalFiles = pomFiles.length + gradlePropsFiles.length + buildGradleFiles.length;
     if (totalFiles === 0) {
       core.warning(`No pom.xml, gradle.properties, or build.gradle files found under ${directory}`);
@@ -645,6 +672,121 @@ function updateBuildGradleContent(content, projectVersion, versions = {}) {
   return { updated: withCoordinates, updatedProperties };
 }
 
+// ── Release train docs ─────────────────────────────────────────────────────
+
+/**
+ * One rendered line of docs/modules/ROOT/pages/_spring-cloud-links.adoc, in either of the
+ * two link forms the template has used:
+ *
+ *   link:/spring-cloud-config/reference/5.1-SNAPSHOT/[spring-cloud-config] :: Reference Documentation, version 5.1.0-SNAPSHOT
+ *   https://docs.spring.io/spring-cloud-config/reference/5.0/[spring-cloud-config] :: Reference Documentation, version 5.0.5
+ *   https://docs.enterprise.spring.io/spring-cloud-config/reference/[spring-cloud-config] :: Reference Documentation, version 4.3.3.1
+ *
+ * Everything outside the two version captures is preserved, so the branch keeps whichever
+ * form its own template renders and this file cannot drift from _spring-cloud-links.hbs.
+ *
+ * The path segment is optional, because the commercial hotfix branches omit it altogether
+ * (tag v2025.0.2.1 renders `/reference/[…]`, deliberately unversioned). A line without one
+ * does not gain one - adding it would repoint the link at a version the page was written
+ * not to name - while its trailing version is still updated.
+ */
+const RELEASE_TRAIN_LINK_LINE =
+  /^(.*\/reference\/)((?:[^/\s]+\/)?)(\[)([a-z0-9-]+)(\].*?\bversion\s+)(\S+)([ \t]*)$/;
+
+/**
+ * The docs URL segment for a project version: major.minor, with -SNAPSHOT kept.
+ * A port of TemplateProject.toAntora in spring-cloud-release's
+ * docs/src/main/java/org/springframework/cloud/internal/TemplateProject.java — the two
+ * must agree, or a release would rewrite a link to a path Antora does not publish.
+ *
+ *   5.0.5          → 5.0
+ *   5.1.0-SNAPSHOT → 5.1-SNAPSHOT
+ *   5.1.0-M1       → 5.1
+ *
+ * Exported for unit testing.
+ */
+function toAntoraVersion(version) {
+  const parts = String(version).split('.');
+  const majorMinor = `${parts[0]}.${parts[1]}`;
+  return String(version).includes('SNAPSHOT') ? `${majorMinor}-SNAPSHOT` : majorMinor;
+}
+
+/**
+ * Rewrites the project links page in place: for each line, the project name in the
+ * `[name]` label is looked up in the versions map, and only the `/reference/<segment>/`
+ * path and the trailing `version <v>` are replaced.
+ *
+ * A line whose project is absent from the map is left byte-identical, which is what keeps
+ * a hand-added entry — or an unrelated file that happens to match — safe.
+ *
+ * Exported for unit testing.
+ */
+function updateReleaseTrainLinksContent(content, versions) {
+  const updatedProjects = [];
+
+  const updated = content.split('\n').map((line) => {
+    const match = line.match(RELEASE_TRAIN_LINK_LINE);
+    if (!match) return line;
+
+    const [, prefix, pathSegment, openBracket, projectName, middle, currentVersion, trailing] = match;
+    const targetVersion = versions[projectName];
+    if (!targetVersion || currentVersion === targetVersion) return line;
+
+    // Captured with its trailing slash, or empty when the link carries no version segment.
+    const newPathSegment = pathSegment === '' ? '' : `${toAntoraVersion(targetVersion)}/`;
+    updatedProjects.push(`${projectName}: ${targetVersion}`);
+    return `${prefix}${newPathSegment}${openBracket}${projectName}` +
+      `${middle}${targetVersion}${trailing}`;
+  }).join('\n');
+
+  return { updated, updatedProjects };
+}
+
+/**
+ * Rewrites the `:spring-boot-version:` attribute in the docs index page. Every other line
+ * is left alone, and a versions map without spring-boot is a no-op.
+ *
+ * Exported for unit testing.
+ */
+function updateReleaseTrainIndexContent(content, versions) {
+  const updatedProperties = [];
+  const targetVersion = versions['spring-boot'];
+  if (!targetVersion) {
+    return { updated: content, updatedProperties };
+  }
+
+  const updated = content.replace(
+    /^(:spring-boot-version:[ \t]*)(\S+)([ \t]*)$/m,
+    (whole, prefix, currentVersion, trailing) => {
+      if (currentVersion === targetVersion) return whole;
+      updatedProperties.push(`spring-boot-version: ${targetVersion}`);
+      return `${prefix}${targetVersion}${trailing}`;
+    }
+  );
+
+  return { updated, updatedProperties };
+}
+
+function updateReleaseTrainLinksFile(filePath, versions) {
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const { updated, updatedProjects } = updateReleaseTrainLinksContent(content, versions);
+  const changed = updated !== content;
+  if (changed) {
+    fs.writeFileSync(filePath, updated, 'utf-8');
+  }
+  return { changed, updatedProjects };
+}
+
+function updateReleaseTrainIndexFile(filePath, versions) {
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const { updated, updatedProperties } = updateReleaseTrainIndexContent(content, versions);
+  const changed = updated !== content;
+  if (changed) {
+    fs.writeFileSync(filePath, updated, 'utf-8');
+  }
+  return { changed, updatedProperties };
+}
+
 // ── Utilities ──────────────────────────────────────────────────────────────
 
 /**
@@ -786,6 +928,9 @@ module.exports = {
   hasVersionCheckOff,
   updateGradlePropertiesContent,
   updateBuildGradleContent,
+  toAntoraVersion,
+  updateReleaseTrainLinksContent,
+  updateReleaseTrainIndexContent,
   findFiles,
   camelToKebab,
   artifactIdToProjectName,

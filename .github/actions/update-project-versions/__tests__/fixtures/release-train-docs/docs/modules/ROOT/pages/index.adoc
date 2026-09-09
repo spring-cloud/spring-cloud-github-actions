@@ -1,0 +1,10 @@
+= Spring Cloud Train Reference Documentation
+
+:spring-boot-version: 4.2.0-SNAPSHOT
+
+Release Train Version: *{spring-cloud-version}*
+
+Supported Boot Version: *{spring-boot-version}*
+
+[horizontal]
+include::_spring-cloud-links.adoc[]

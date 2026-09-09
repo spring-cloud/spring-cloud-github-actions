@@ -1,0 +1,4 @@
+[legal]
+= Legal
+
+{spring-cloud-version}
