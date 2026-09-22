@@ -1,0 +1,163 @@
+name: Test - Shared Scripts
+
+# Unit tests for the .github/scripts/*.js modules shared across the workflows below - the
+# config/projects.json matrix walk (project-branch-matrix.js), the version comparator
+# (version-cmp.js), the gh-CLI and git-data-API/PR mechanics (gh-cli.js, git-pr-helpers.js),
+# the green-PR merge check (merge-if-green.js), and the two domain-specific modules that sit
+# on top of them (maven-wrapper-properties.js, antora-ui-bundle.js).
+#
+# There is deliberately no "dist is up to date" job here, unlike the tests for the actions
+# under .github/actions. These are node20 actions with npm dependencies: they run from a
+# consumer's checkout with no install step, so ncc has to bundle them into dist/index.js.
+# The modules here are neither - they have no dependencies and no action.yml, and are
+# required directly by the inline node scripts in each workflow after this repo is checked
+# out. Bundling them would produce an identical file and one more way for CI to fail.
+
+on:
+  push:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/update-maven-wrapper.yml'
+      - '.github/workflows/update-antora-ui-bundle.yml'
+      - '.github/workflows/rollout-actions-ref.yml'
+      - '.github/workflows/ci-status-report.yml'
+      - '.github/workflows/dependabot-report.yml'
+      - '.github/workflows/dependabot-triage.yml'
+      - '.github/workflows/lock-unlock-branches.yml'
+      - '.github/workflows/test-shared-scripts.yml'
+  pull_request:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/update-maven-wrapper.yml'
+      - '.github/workflows/update-antora-ui-bundle.yml'
+      - '.github/workflows/rollout-actions-ref.yml'
+      - '.github/workflows/ci-status-report.yml'
+      - '.github/workflows/dependabot-report.yml'
+      - '.github/workflows/dependabot-triage.yml'
+      - '.github/workflows/lock-unlock-branches.yml'
+      - '.github/workflows/test-shared-scripts.yml'
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/scripts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: .github/scripts/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run unit tests
+        run: npm test
+
+  # ── Every consuming workflow's own inline scripts ───────────────────────────────
+  # The scripts that use these modules live inside YAML heredocs, where a syntax error is
+  # invisible until the workflow runs against a real repository. Extracting and parsing them
+  # here turns that into a pull-request failure instead. One matrix leg per consuming
+  # workflow rather than one job per workflow: the extraction/check steps are identical, only
+  # the block count and the exports each workflow actually calls differ.
+  inline-scripts:
+    name: "Inline scripts — ${{ matrix.workflow }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workflow: update-maven-wrapper.yml
+            min-blocks: 5
+            exports: >-
+              gh-cli.js:ghRetry|
+              git-pr-helpers.js:readFileAt,createBranch,commitFilesToRef,findOpenPrByHeadPrefix,openPr|
+              merge-if-green.js:mergeIfGreen|
+              project-branch-matrix.js:buildBranchMatrix|
+              version-cmp.js:cmp|
+              maven-wrapper-properties.js:wrapperDirs,propsPath,scriptPaths,currentMaven,dependabotWrapperVersion,rewrite,cmp
+          - workflow: update-antora-ui-bundle.yml
+            min-blocks: 4
+            exports: >-
+              git-pr-helpers.js:readFileAt,createBranch,commitFilesToRef,findOpenPrByHeadPrefix,openPr|
+              merge-if-green.js:mergeIfGreen|
+              project-branch-matrix.js:buildBranchMatrix|
+              antora-ui-bundle.js:PLAYBOOK_PATH,extractBundle,rewrite,cmp
+          - workflow: rollout-actions-ref.yml
+            min-blocks: 2
+            exports: 'project-branch-matrix.js:buildBranchMatrix'
+          - workflow: ci-status-report.yml
+            min-blocks: 2
+            exports: 'project-branch-matrix.js:buildBranchMatrix'
+          - workflow: dependabot-report.yml
+            min-blocks: 2
+            exports: 'project-branch-matrix.js:buildRepoMatrix'
+          - workflow: dependabot-triage.yml
+            min-blocks: 3
+            exports: 'project-branch-matrix.js:buildRepoMatrix'
+          - workflow: lock-unlock-branches.yml
+            min-blocks: 3
+            exports: 'project-branch-matrix.js:parseProjectFilter,knownProjectKeys,buildRepoMatrix'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Extract and syntax-check every inline node block
+        env:
+          WORKFLOW: ${{ matrix.workflow }}
+          MIN_BLOCKS: ${{ matrix['min-blocks'] }}
+        run: |
+          set -euo pipefail
+          WF=".github/workflows/${WORKFLOW}"
+          OUT=$(mktemp -d)
+          awk -v out="$OUT" '
+            /^ +node - << .JSEOF.$/ { n++; f = out "/block-" n ".js"; inblock = 1; next }
+            inblock && /^ +JSEOF$/   { inblock = 0; next }
+            inblock                  { sub(/^          /, ""); print > f }
+          ' "$WF"
+
+          count=$(ls "$OUT" | wc -l | tr -d ' ')
+          echo "Extracted ${count} inline node block(s) from ${WF}"
+
+          # Guards against the extraction silently matching nothing if the heredoc marker
+          # or indentation is ever changed - which would turn this job into a no-op that
+          # always passes.
+          if [ "${count}" -lt "${MIN_BLOCKS}" ]; then
+            echo "❌ expected at least ${MIN_BLOCKS} blocks; the heredoc markers may have changed"
+            exit 1
+          fi
+
+          for f in "${OUT}"/*.js; do
+            node --check "$f"
+            echo "  ✅ $(basename "$f")"
+          done
+
+      - name: Verify the shared modules load and export what this workflow uses
+        env:
+          EXPORTS: ${{ matrix.exports }}
+        run: |
+          node -e '
+            const path = require("path");
+            const specs = process.env.EXPORTS.split("|").map(s => s.trim()).filter(Boolean);
+            const missing = [];
+            for (const spec of specs) {
+              const [file, namesCsv] = spec.split(":");
+              const mod = require(path.resolve(".github/scripts", file));
+              for (const name of namesCsv.split(",")) {
+                if (typeof mod[name] === "undefined") missing.push(`${file}:${name}`);
+              }
+            }
+            if (missing.length) {
+              console.log(`❌ missing exports: ${missing.join(", ")}`);
+              process.exit(1);
+            }
+            console.log(`✅ all exports present: ${specs.join(", ")}`);
+          '

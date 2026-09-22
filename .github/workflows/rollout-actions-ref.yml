@@ -107,53 +107,38 @@ jobs:
         env:
           PROJECTS_FILTER: ${{ inputs.projects }}
           REPO_TYPE: ${{ inputs.repo_type }}
+          MATRIX_LIB: ${{ github.workspace }}/.github/scripts/project-branch-matrix.js
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const { buildBranchMatrix } = require(process.env.MATRIX_LIB);
 
           const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
-
-          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
-          const filter = filterRaw
-            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
-            : new Set();
-
-          const repoType = (process.env.REPO_TYPE || 'both').trim();
-          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
 
           // One matrix entry per (repo, branch). branches.scheduled is the set of
           // branches actively built, which is exactly the set worth migrating -
           // retired branches are removed from it by the retire-branch workflow.
-          const include = [];
-          for (const [projectKey, config] of Object.entries(projects)) {
-            if (projectKey === 'defaults') continue;
-            if (filter.size > 0 && !filter.has(projectKey)) continue;
-            for (const typeKey of typeKeys) {
-              const section = config[typeKey];
-              if (!section) continue;
-              const repo = typeKey === 'commercial'
-                ? `spring-cloud/${projectKey}-commercial`
-                : `spring-cloud/${projectKey}`;
-              for (const branch of section.branches?.scheduled || []) {
-                // -internal branches are rebased from their OSS branch, so ci.yml
-                // and pr.yml there are overwritten from OSS and must not be pinned
-                // here. ci-release.yml is internal-only and survives the rebase, so
-                // it is the one file the rollout owns on those branches - and the
-                // one file it must not touch anywhere else.
-                const internal = branch.endsWith('-internal');
-                include.push({
-                  repo,
-                  branch,
-                  type: typeKey,
-                  scope: internal ? 'ci-release.yml only' : 'all but ci-release.yml',
-                  includeFiles: internal ? 'ci-release.yml' : '',
-                  excludeFiles: internal ? '' : 'ci-release.yml',
-                });
-              }
-            }
-          }
+          // `-internal` branches are kept (excludeInternal: false) and given their own
+          // scope below rather than excluded: they are rebased from their OSS branch, so
+          // ci.yml and pr.yml there are overwritten from OSS and must not be pinned here.
+          // ci-release.yml is internal-only and survives the rebase, so it is the one file
+          // the rollout owns on those branches - and the one file it must not touch
+          // anywhere else.
+          const { entries } = buildBranchMatrix(projects, {
+            filter: process.env.PROJECTS_FILTER,
+            repoType: process.env.REPO_TYPE,
+            excludeInternal: false,
+          });
 
-          include.sort((a, b) => a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
+          const include = entries.map(({ repo, branch, type }) => {
+            const internal = branch.endsWith('-internal');
+            return {
+              repo, branch, type,
+              scope: internal ? 'ci-release.yml only' : 'all but ci-release.yml',
+              includeFiles: internal ? 'ci-release.yml' : '',
+              excludeFiles: internal ? '' : 'ci-release.yml',
+            };
+          });
 
           console.log(`${include.length} (repo, branch) pairs:`);
           for (const e of include) console.log(`  ${e.repo}@${e.branch}  [${e.scope}]`);

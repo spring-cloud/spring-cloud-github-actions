@@ -96,42 +96,20 @@ jobs:
         env:
           PROJECTS_FILTER: ${{ inputs.projects }}
           REPO_TYPE: ${{ inputs.repo_type || 'both' }}
+          MATRIX_LIB: ${{ github.workspace }}/.github/scripts/project-branch-matrix.js
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const { buildRepoMatrix } = require(process.env.MATRIX_LIB);
 
           const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
 
-          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
-          const filter = filterRaw
-            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
-            : new Set();
-
-          const repoType = (process.env.REPO_TYPE || 'both').trim();
-          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
-
           // One entry per repository, matching dependabot-report.yml - Dependabot PRs are
           // listed repo-wide and then attributed to a branch.
-          const entries = [];
-          for (const [projectKey, config] of Object.entries(projects)) {
-            if (projectKey === 'defaults') continue;
-            if (filter.size > 0 && !filter.has(projectKey)) continue;
-            for (const typeKey of typeKeys) {
-              if (!config[typeKey]) continue;
-              const branches = config[typeKey]?.branches?.scheduled || [];
-              const repo = typeKey === 'commercial'
-                ? `spring-cloud/${projectKey}-commercial`
-                : `spring-cloud/${projectKey}`;
-              entries.push({
-                project: projectKey,
-                repo,
-                type: typeKey,
-                branches: branches.join(','),
-              });
-            }
-          }
-
-          entries.sort((a, b) => a.repo.localeCompare(b.repo));
+          const { entries } = buildRepoMatrix(projects, {
+            filter: process.env.PROJECTS_FILTER,
+            repoType: process.env.REPO_TYPE,
+          });
 
           console.log(`Repositories to triage: ${entries.length}`);
           for (const e of entries) console.log(`  ${e.repo} (${e.type}) [${e.branches}]`);
