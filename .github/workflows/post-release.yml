@@ -2515,7 +2515,7 @@ jobs:
 
               fs.writeFileSync(file, updated);
               rec.status = 'added';
-              rec.prerelease = `added ${e.version}`;
+              rec.prerelease = `added ${e.version}, cloned from ${template.version}`;
               rec.from = template.version;
               console.log(`${rel}: added ${e.version} as PRERELEASE, cloned from ` +
                 `${template.version} - first ${target} entry`);
@@ -2648,8 +2648,12 @@ jobs:
               'this PR only carries the documentation versions.');
             P.push('');
           }
-          const added = result.docs.filter(d => d.status === 'added');
-          const bumped = result.docs.filter(d => d.ga || d.snapshot);
+          // `added` is the commercial site's shape: a new GA entry appended per release. The
+          // OSS site is edited in place, and the new PRERELEASE entry an M1 creates there is
+          // reported through `prerelease` alongside the other in-place changes.
+          const added = commercial ? result.docs.filter(d => d.status === 'added') : [];
+          const bumped = result.docs.filter(d => d.ga || d.snapshot || d.prerelease);
+          const anyPrerelease = bumped.some(d => d.prerelease);
           if (added.length) {
             P.push('### documentation.json');
             P.push('');
@@ -2672,10 +2676,13 @@ jobs:
           if (bumped.length) {
             P.push('### documentation.json');
             P.push('');
-            P.push('| Project | General availability | Snapshot |');
-            P.push('|---|---|---|');
+            // The Pre-release column only appears when there is something to put in it, so a
+            // plain GA run keeps the two-column table.
+            P.push(`| Project | General availability |${anyPrerelease ? ' Pre-release |' : ''} Snapshot |`);
+            P.push(`|---|---|${anyPrerelease ? '---|' : ''}---|`);
             for (const d of bumped) {
-              P.push(`| \`${d.project}\` | ${d.ga || '—'} | ${d.snapshot || '—'} |`);
+              P.push(`| \`${d.project}\` | ${d.ga || '—'} |` +
+                `${anyPrerelease ? ` ${d.prerelease || '—'} |` : ''} ${d.snapshot || '—'} |`);
             }
             P.push('');
           }
@@ -3768,8 +3775,8 @@ jobs:
             const docs = web.docs || [];
             // The commercial site is appended to, the OSS site is edited in place, so the two
             // have nothing to report in common.
-            const addedDocs = docs.filter(d => d.status === 'added');
-            if (addedDocs.length || commercial) {
+            if (commercial) {
+              const addedDocs = docs.filter(d => d.status === 'added');
               L.push(`- \`documentation.json\` — ${addedDocs.length} new ` +
                 `${addedDocs.length === 1 ? 'entry' : 'entries'}`);
               for (const d of addedDocs.filter(d => d.legacyTemplate)) {
@@ -3778,7 +3785,7 @@ jobs:
                   `\`${d.from}\` and carries a version in the path. Check it.`);
               }
             } else {
-              const touched = docs.filter(d => d.ga || d.snapshot);
+              const touched = docs.filter(d => d.ga || d.snapshot || d.prerelease);
               L.push(`- \`documentation.json\` — ${touched.length} project(s) updated`);
               L.push(web.previousFile
                 ? `- modules listed: everything that changed since \`${web.previousFile}\``
