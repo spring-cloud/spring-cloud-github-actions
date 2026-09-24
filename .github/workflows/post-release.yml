@@ -1666,9 +1666,9 @@ jobs:
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const path = require('path');
           const { parseReleaserConfig, ENTRY_RE } = require(path.join(
             process.env.GITHUB_WORKSPACE, '.github', 'scripts', 'releaser-config.js'));
-          const path = require('path');
           const { execFileSync } = require('child_process');
 
           const token = process.env.GH_TOKEN;
