@@ -53,7 +53,7 @@ For an OSS release the tag is in the OSS repo but **the commit it points at was 
 
 Anything else does not count, including a clean merge whose version bump failed — that leaves the merge in the runner's clone and nowhere else.
 
-**A dry run is judged on the merge alone.** It merges in the runner's clone and pushes nothing, and the version bump is skipped too, because no snapshot file was committed for it to resolve versions from — so `pushStatus` is `skipped` for every project on every dry run and carries no information about what a real run would do. The merge status still does: a conflict, a failed clone or an unreadable release branch are real answers on a dry run, and still hold the release back.
+**A dry run is judged on the merge alone.** It merges in the runner's clone and pushes nothing, and on a GA run the version bump is skipped too, because no snapshot file was committed for it to resolve versions from. A pre-release dry run does restore the current snapshot, since that file already exists, but still pushes nothing. Either way `pushStatus` carries no information about what a real run would do. The merge status still does: a conflict, a failed clone or an unreadable release branch are real answers on a dry run, and still hold the release back.
 
 Each held-back entry in the summary names **why**, not just the project. The merge back table can read as healthy while a release is held back — a clean merge whose push never happened, say — and two sections of the same report appearing to disagree is worse than either being terse.
 
@@ -193,7 +193,10 @@ workflow runs after every one of them, but a pre-release is not a small GA relea
 thing is fundamentally different, and most of the special-casing follows from it:
 
 > **The train does not advance during a pre-release cycle.** `5.1.x` stays on
-> `5.1.0-SNAPSHOT` from M1 all the way to GA.
+> `5.1.0-SNAPSHOT` from M1 all the way to GA. The merge back does bring the release's
+> `5.1.0-M1` versions onto the branch, so after it the branch is put back on the train's
+> *current* snapshot from `<train>-snapshot.properties` (e.g. `2026_0_0-snapshot.properties`),
+> which already exists. Setup fails early if it doesn't.
 
 So on a pre-release run:
 
@@ -203,7 +206,7 @@ So on a pre-release run:
 | Next snapshot properties file | written | **skipped** — the train has not moved, so there is no new file |
 | New milestones | `5.1.1` | `5.1.0-M2` |
 | Merge back | runs | **runs** |
-| Version bump on the maintenance branch | pushed | **skipped** — the branch is already on the right snapshot |
+| Version bump on the maintenance branch | pushed — the **next** snapshot (`5.1.1-SNAPSHOT`) | **restored** — back to the **current** snapshot (`5.1.0-SNAPSHOT`), undoing the `-M<n>`/`-RC<n>` versions the merge brought in. Applied on a dry run too, since the file already exists |
 | Close milestone, publish release | runs | runs, flagged `prerelease` and **not** marked *Latest* |
 | Website PR | runs | runs, with milestone wording and a `PRERELEASE` entry — see below |
 | start.spring.io PR | runs | runs, if the bom declares a milestone repository |

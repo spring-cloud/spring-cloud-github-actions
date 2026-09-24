@@ -126,6 +126,7 @@ jobs:
       next-version: ${{ steps.parse.outputs.next-version }}
       next-file: ${{ steps.parse.outputs.next-file }}
       next-versions: ${{ steps.parse.outputs.next-versions }}
+      snapshot-version: ${{ steps.parse.outputs.snapshot-version }}
       prerelease: ${{ steps.parse.outputs.prerelease }}
       entries: ${{ steps.parse.outputs.entries }}
     steps:
@@ -180,8 +181,10 @@ jobs:
 
           // A milestone or release candidate. The train does not advance during a pre-release
           // cycle - the maintenance branch stays on <train>-SNAPSHOT from M1 all the way to
-          // GA - so there is no next snapshot train to write and no version bump to push.
-          // What does happen is the milestones, the releases, the merge back, the website
+          // GA - so there is no next snapshot train to write and nothing to advance. The merge
+          // back does bring the release's -M<n>/-RC<n> versions onto the branch, though, so
+          // after it the branch is put back on <train>-SNAPSHOT from the file that already
+          // exists for it. What also happens is the milestones, the releases, the website
           // entry and the board rollover, each named after the next pre-release rather than
           // the next patch.
           const isPrerelease = parsed.kind !== null;
@@ -289,14 +292,20 @@ jobs:
           //                  the new project board. Always computed (except for a hotfix).
           //   nextFile     - the next <train>-snapshot.properties file. GA only: a
           //                  pre-release cycle does not move the train off its snapshot, so
-          //                  there is no new file to write and nothing to bump on the
-          //                  maintenance branch.
+          //                  there is no new file to write.
+          //
+          // And one that exists only on a pre-release run:
+          //
+          //   snapshotVersion - the train's current <base>-SNAPSHOT. The merge back brings
+          //                  the release's -M<n>/-RC<n> versions onto the maintenance branch,
+          //                  and this is the file that puts it back on its snapshot.
           //
           // prerelease.next() throws on a transition that cannot be meant - a milestone
           // promoted straight to GA, a release candidate promoted to a release candidate -
           // rather than returning a version that would go on to name milestones and boards.
           let nextVersion = '';
           let nextFile = '';
+          let snapshotVersion = '';
           const nextVersions = {};
           if (!hotfix) {
             try {
@@ -342,6 +351,20 @@ jobs:
               if (notAdvanced.length) {
                 console.log(`Not advanced (not a pre-release): ${notAdvanced.join(', ')}`);
               }
+
+              // Checked here rather than left to the bump step to discover: without this file
+              // every merge back would land and then have nothing to restore from, leaving the
+              // branches on the pre-release versions - which is the state this step exists to
+              // prevent. Failing before anything has run is cheaper than sixteen half-done legs.
+              snapshotVersion = `${parsed.base}-SNAPSHOT`;
+              try {
+                fetchReleaserConfig(snapshotVersion);
+              } catch (err) {
+                fail(`ERROR: ${releaserConfigFileName(snapshotVersion)} could not be read: ` +
+                  `${err.message}.`,
+                  'A pre-release run puts each maintenance branch back on the train\'s snapshot ' +
+                  'versions after the merge back, and that file is where they come from.');
+              }
             } else {
               // GA: next-snapshot-config writes the new file and publishes the per-project
               // versions, so nothing is derived here. Named through the shared rule with the
@@ -360,11 +383,13 @@ jobs:
           console.log(`properties file: ${propsFile}`);
           if (!hotfix) console.log(`next release:    ${nextVersion}`);
           if (!hotfix && !isPrerelease) console.log(`next snapshot:   ${nextFile}`);
+          if (isPrerelease) console.log(`snapshot version: ${snapshotVersion}`);
           if (isPrerelease) {
             console.log('');
             console.log('This is a pre-release, so the train stays on its current snapshot:');
-            console.log('  - no <train>-snapshot.properties is written');
-            console.log('  - the release branch is merged back, but no version bump is pushed');
+            console.log('  - no new <train>-snapshot.properties is written');
+            console.log(`  - the release branch is merged back, then the branch is put back on ` +
+              `${snapshotVersion}`);
             console.log('  - milestones and the board roll over to ' + nextVersion);
           }
           console.log('');
@@ -381,6 +406,7 @@ jobs:
           fs.appendFileSync(out, `next-version=${nextVersion}\n`);
           fs.appendFileSync(out, `next-file=${nextFile}\n`);
           fs.appendFileSync(out, `next-versions=${JSON.stringify(nextVersions)}\n`);
+          fs.appendFileSync(out, `snapshot-version=${snapshotVersion}\n`);
           fs.appendFileSync(out, `prerelease=${isPrerelease}\n`);
           fs.appendFileSync(out, `entries=${JSON.stringify(entries)}\n`);
           JSEOF
@@ -1072,24 +1098,27 @@ jobs:
       # spring-cloud-build, verifierVersion to spring-cloud-contract, and so on.
       - name: Apply new snapshot versions
         id: bump
-        # The available check keeps a dry run honest: nothing was committed, so there is no
+        # GA: the next train's snapshot, from the file next-snapshot-config just wrote. The
+        # available check keeps a dry run honest: nothing was committed, so there is no
         # snapshot file to resolve versions from and this is reported as skipped, not failed.
         #
-        # Skipped outright for a pre-release. The train does not advance between M1 and GA,
-        # so the maintenance branch is already on the versions it should be on - bumping it
-        # would move 5.1.x off 5.1.0-SNAPSHOT and start building a train that does not
-        # exist. The merge above still runs: the release branch's changes have to rejoin
-        # the line whatever kind of release it was.
+        # Pre-release: the train's current snapshot, not the next one. The train does not
+        # advance between M1 and GA, but the merge above brings the release branch's
+        # -M<n>/-RC<n> versions onto the maintenance branch, so it has to be put back on
+        # <train>-SNAPSHOT. That file already exists (setup checks it), so unlike GA a dry run
+        # can apply it for real and show the diff.
         if: |
-          needs.setup.outputs.prerelease != 'true' &&
-          needs.next-snapshot-config.outputs.available == 'true' &&
+          (needs.setup.outputs.prerelease == 'true' ||
+           needs.next-snapshot-config.outputs.available == 'true') &&
           (steps.merge.outputs.status == 'merged' ||
            steps.merge.outputs.status == 'already-merged' ||
            steps.merge.outputs.status == 'no-release-branch')
         continue-on-error: true
         uses: ./.github/actions/update-project-versions
         with:
-          release-train-version: ${{ needs.setup.outputs.next-version }}-SNAPSHOT
+          release-train-version: ${{ needs.setup.outputs.prerelease == 'true'
+            && needs.setup.outputs.snapshot-version
+            || format('{0}-SNAPSHOT', needs.setup.outputs.next-version) }}
           # Hardcoded true, not the run's commercial flavour. This input does one thing in the
           # action - pick which repo the releaser config is fetched from
           # (update-project-versions/src/index.js:193-194) - and the config now always lives in
@@ -1100,24 +1129,19 @@ jobs:
           directory: project
 
       # ── 5d. one push carrying the merge commit and the version bump ──────────────────
-      # On a pre-release run there is no bump, so this pushes the merge commit alone. The
-      # gate names both cases explicitly rather than relying on a skipped step's outcome:
-      # a skipped step reports 'skipped', which the old `outcome == 'success'` test would
-      # have read as "the bump failed, push nothing" and silently dropped the merge.
+      # Every kind of release that reaches this step now bumps: GA to the next snapshot, a
+      # pre-release back to the current one. So the gate is the bump alone - a merge pushed
+      # without it would leave the branch on the release's versions, and on a pre-release that
+      # is exactly the -M1-left-on-main state this used to produce.
       - name: Commit and push
         id: push
-        if: |
-          steps.bump.outcome == 'success' ||
-          (needs.setup.outputs.prerelease == 'true' &&
-           (steps.merge.outputs.status == 'merged' ||
-            steps.merge.outputs.status == 'already-merged' ||
-            steps.merge.outputs.status == 'no-release-branch'))
+        if: steps.bump.outcome == 'success'
         env:
           REPO: ${{ matrix.repo }}
           BRANCH: ${{ steps.branch.outputs.branch }}
-          NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
-          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
-          MERGE_STATUS: ${{ steps.merge.outputs.status }}
+          BUMP_VERSION: ${{ needs.setup.outputs.prerelease == 'true'
+            && needs.setup.outputs.snapshot-version
+            || format('{0}-SNAPSHOT', needs.setup.outputs.next-version) }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -1126,16 +1150,10 @@ jobs:
           git add -A
           if git diff --cached --quiet; then
             echo "No version changes to commit."
-          elif [[ "$PRERELEASE" == "true" ]]; then
-            # Nothing should have changed the versions on this path, so anything staged here
-            # is unexpected. Commit it with the merge rather than dropping it on the floor,
-            # but say plainly that it is not a version bump.
-            git commit --quiet -m "Merging ${MERGE_STATUS} changes into the release line"
-            echo "::warning::Unexpected working tree changes on a pre-release run - committed alongside the merge."
           else
             # Deliberately no [skip actions] here, unlike most workflows in this repo: the
-            # whole point of pushing the new snapshot versions is to start CI on them.
-            git commit --quiet -m "Updating project versions to ${NEXT_VERSION}-SNAPSHOT"
+            # whole point of pushing the snapshot versions is to start CI on them.
+            git commit --quiet -m "Updating project versions to ${BUMP_VERSION}"
             echo "Committed the version bump."
           fi
 
@@ -1426,8 +1444,8 @@ jobs:
             }
 
             // A dry run merges in the runner's clone and pushes nothing, so the merge status is
-            // a real answer there and the push status is not: the bump is skipped too, because
-            // no snapshot file was committed for it to resolve versions from. Testing the push
+            // a real answer there and the push status is not: on a GA run the bump is skipped
+            // too, because no snapshot file was committed for it to resolve versions from. Testing the push
             // on a dry run would hold back every project on every dry run, which says nothing
             // about what a real one would do.
             if (dryRun) return { ok: true };
@@ -3594,6 +3612,7 @@ jobs:
           HOTFIX: ${{ needs.setup.outputs.hotfix }}
           PRERELEASE: ${{ needs.setup.outputs.prerelease }}
           NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
+          SNAPSHOT_VERSION: ${{ needs.setup.outputs.snapshot-version }}
           PROJECTS_FILTER: ${{ inputs.projects }}
           SKIP_CLOSE_MILESTONES: ${{ inputs.skip_close_milestones }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -3608,6 +3627,7 @@ jobs:
           const commercial = (process.env.COMMERCIAL || 'false') === 'true';
           const releaseVersion = process.env.RELEASE_VERSION || '';
           const nextVersion = process.env.NEXT_VERSION || '';
+          const snapshotVersion = process.env.SNAPSHOT_VERSION || '';
           const filter = (process.env.PROJECTS_FILTER || '').trim();
 
           let all = [];
@@ -3636,11 +3656,12 @@ jobs:
           L.push('');
           L.push(`Release **${releaseVersion}** · ${commercial ? 'commercial' : 'OSS'}` +
             (hotfix ? ' · **hotfix** (no snapshot train, new milestone or merge back)' : '') +
-            // Said plainly, because the absence of a snapshot file and of a version bump is
-            // the single most surprising thing about one of these runs to anyone reading the
-            // summary who has only ever seen a GA release.
+            // Said plainly, because a Bump column that restores the current snapshot rather than
+            // advancing to the next one is the most surprising thing about one of these runs to
+            // anyone reading the summary who has only ever seen a GA release.
             (isPrerelease ? ' · **pre-release** (the train stays on its current snapshot: ' +
-              'no snapshot properties file, no version bump - the merge back still happens)' : '') +
+              'no new snapshot properties file; after the merge back each branch is put back on ' +
+              `\`${snapshotVersion || '<train>-SNAPSHOT'}\`)` : '') +
             (filter ? ` · filtered to \`${filter}\`` : '') +
             (skipCloseMilestones ? ' · **milestones left open** (`skip_close_milestones`)' : ''));
           L.push('');
