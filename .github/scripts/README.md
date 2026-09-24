@@ -78,12 +78,69 @@ on the numeric base of the Spring Boot version in the release's properties file,
 floor set by the *phase* rather than that Boot version verbatim, so the bound does not churn
 on every milestone.
 
+## `version-cmp.js`
+
+`cmp(a, b)`: dotted-numeric version comparison, tolerant of a leading `v` (release tags like
+`v0.4.26`). Shared because this exact comparator used to be implemented three times
+independently — `update-maven-wrapper.yml`'s `versions` job, `maven-wrapper-properties.js`'s
+own `cmp` (now a re-export of this module), and what would otherwise be a fourth copy for the
+Antora UI bundle's release tags in `antora-ui-bundle.js`.
+
+## `gh-cli.js`
+
+`gh(args)`, `ghRetry(args, attempts)`, `ghJson(path, method, payload)`: the `execFileSync('gh',
+...)` wrapper, retry-with-backoff, and write-payload-then-`--input` helpers every workflow
+that fans out `gh api` calls across many repositories needs. `ghJson` writes the payload to
+`payload.json` rather than passing it with repeated `-f` flags, because `-f` cannot express
+the nested `author`/`committer` objects the git data API needs and would mangle newlines in a
+commit message or PR body.
+
+## `git-pr-helpers.js`
+
+The generic git-data-API and pull-request primitives shared by `update-maven-wrapper.yml` and
+`update-antora-ui-bundle.yml`, both of which open a bot PR the same way: `readFileAt(repo,
+path, ref)` (contents API, base64-decoded), `createBranch(repo, headRef, baseBranch)`,
+`commitFilesToRef(repo, ref, files, message, author)` (one commit for every file via the git
+data API's tree/commit/ref-move sequence, rather than the contents API's one-file-one-commit
+shape), `findOpenPrByHeadPrefix(repo, base, headPrefix)` (matched by prefix rather than exact
+head name, so a PR opened for an earlier target is found and bumped in place instead of
+stacking a second PR), and `openPr(repo, { title, head, base, body })`. Built on `gh-cli.js`.
+What differs per workflow — deciding *whether* something changed, and what the branch/PR
+naming and body text say — stays local to each workflow's own script.
+
+## `merge-if-green.js`
+
+`classifyChecks(statusCheckRollup)` and `mergeIfGreen({ repo, pr, method, dryRun })`: reads a
+PR's mergeability and checks, and merges it only when every check has reported and passed,
+and GitHub reports a `CLEAN` merge state (not merely `MERGEABLE`, which also covers a locked
+branch or a pending required review). Checks are read from `statusCheckRollup` rather than
+inferred from `mergeStateStatus`, which conflates failing checks with "needs review" and a
+locked branch — the same distinction `dependabot-report.yml`'s own PR-state classification
+makes independently, in its own `dependabot-scan` action, for Dependabot-authored PRs (a
+close cousin of this module, not yet unified with it). Shared by the "Merge PR if all checks
+pass" step of `update-maven-wrapper.yml` and `update-antora-ui-bundle.yml`.
+
+## `project-branch-matrix.js`
+
+The `config/projects.json` traversal shared by every workflow that fans out across Spring
+Cloud's OSS and commercial repositories: `parseProjectFilter`, `typeKeysFor`, `repoName`,
+`knownProjectKeys`, and the underlying `walkProjects` walk, plus two convenience builders for
+the two matrix shapes already in use across the estate — `buildBranchMatrix` (one entry per
+branch, used by `update-maven-wrapper.yml`, `update-antora-ui-bundle.yml`,
+`ci-status-report.yml` and `rollout-actions-ref.yml`) and `buildRepoMatrix` (one entry per
+repository with its branches comma-joined, used by `dependabot-report.yml`,
+`dependabot-triage.yml` and `lock-unlock-branches.yml`). Before this was extracted, six
+workflows each carried their own copy of the same read-filter-walk logic, differing only in
+how they turned a project's branches into matrix entries — that's the only part left to each
+caller now.
+
 ## `maven-wrapper-properties.js`
 
 The rules by which `update-maven-wrapper.yml` edits `maven-wrapper.properties`. It is shared
 because that workflow edits those files from two different places — through the GitHub
 contents/git APIs in properties-only mode, and against a real checkout in regenerate mode —
-and the two must produce byte-identical results.
+and the two must produce byte-identical results. Version comparison is delegated to
+`version-cmp.js` (`cmp` here is a re-export) rather than duplicated.
 
 It also carries a port of Dependabot's own wrapper-version resolution
 (`maven/lib/dependabot/maven/file_parser/wrapper_mojo.rb`): `wrapperVersion`, then a version
@@ -93,6 +150,16 @@ repository's entire update job — no pull requests at all, not merely no wrappe
 what the workflow's `check_only` mode predicts, and matching Dependabot's logic exactly is
 why it can.
 
+## `antora-ui-bundle.js`
+
+The rules by which `update-antora-ui-bundle.yml` edits `docs/antora-playbook.yml`:
+`PLAYBOOK_PATH`, `extractBundle(text)` (reads the `{ repo, tag, url }` of the UI bundle
+release a playbook currently points at, matched by shape — a GitHub release asset download
+link — rather than by position under `ui:`/`bundle:`/`url:`), and `rewrite(text, { repo, tag
+})` (a textual, non-destructive URL swap — everything else in the file is preserved
+byte-for-byte, the same contract `maven-wrapper-properties.js`'s `rewrite` gives for
+`maven-wrapper.properties`). `cmp` is re-exported from `version-cmp.js` for tag comparison.
+
 ## Tests
 
 ```bash
@@ -101,10 +168,10 @@ npm install
 npm test           # or: npm run test:coverage
 ```
 
-CI runs them in [test-maven-wrapper-properties.yml](../workflows/test-maven-wrapper-properties.yml),
-which also extracts every inline `node` heredoc from `update-maven-wrapper.yml` and
-syntax-checks it — a syntax error inside a YAML heredoc is otherwise invisible until the
-workflow runs against a real repository.
+CI runs them in [test-shared-scripts.yml](../workflows/test-shared-scripts.yml), which also
+extracts every inline `node` heredoc from each consuming workflow and syntax-checks it — a
+syntax error inside a YAML heredoc is otherwise invisible until the workflow runs against a
+real repository.
 
 Every module here is covered; `npm test` runs the lot. A workflow that `require`s one of
 them **must check the repository out first** — these resolve under

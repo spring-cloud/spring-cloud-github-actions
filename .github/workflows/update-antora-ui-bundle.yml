@@ -1,0 +1,528 @@
+name: Update Antora UI Bundle
+
+run-name: "${{ (github.event_name != 'schedule' && inputs.dry_run != false) && 'Check' || 'Update' }} Antora UI Bundle${{ inputs.projects != '' && format(' [{0}]', inputs.projects) || '' }} (${{ inputs.repo_type || 'both' }})"
+
+# Opens a pull request against every maintained repository/branch whose docs/antora-playbook.yml
+# points at an old release of the Antora UI bundle (spring-io/antora-ui-spring), so CI decides
+# whether the bump is safe rather than nobody noticing the docs look stale.
+#
+#   1. versions - resolve the latest spring-io/antora-ui-spring release tag
+#   2. setup    - read config/projects.json and build one matrix entry per repo/branch
+#   3. update   - per repo/branch: compare, and open a PR if it is behind
+#   4. summary  - one report covering every combination, posted to Google Chat when
+#                 anything changed
+#
+# docs/antora-playbook.yml is a per-branch file - content.sources[].branches is HEAD, so it
+# documents its own branch rather than there being one canonical copy on main. Branches that
+# predate Antora adoption have no such file at all, which this discovers rather than assumes
+# (confirmed: spring-cloud-commons's 3.1.x has none, while main/4.2.x/4.3.x/5.0.x do).
+#
+# This is the same shape of problem update-maven-wrapper.yml solves for the Maven wrapper -
+# an upstream artifact versions independently of every project, and nothing else notices when
+# it moves - and shares that workflow's gh-cli.js, git-pr-helpers.js, merge-if-green.js and
+# project-branch-matrix.js rather than reimplementing the same mechanics.
+#
+# See README-update-antora-ui-bundle.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated list of Spring Cloud project names. When empty, every project in projects.json is processed.'
+        required: false
+        type: string
+        default: ''
+      repo_type:
+        description: 'Update commercial, oss, or both?'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      bundle_version:
+        description: 'Target spring-io/antora-ui-spring release tag (e.g. v0.4.26). When empty, the latest release is used.'
+        required: false
+        type: string
+        default: ''
+      auto_merge:
+        description: 'Merge existing UI-bundle PRs whose checks have all passed. Applies to this manual run only - the weekly scheduled run never merges.'
+        required: false
+        type: boolean
+        default: true
+      merge_method:
+        description: 'How to merge a green UI-bundle PR.'
+        required: false
+        type: choice
+        default: 'squash'
+        options:
+          - squash
+          - merge
+          - rebase
+      dry_run:
+        description: 'Dry run, if checked nothing is created, updated or merged, but you can see what would change'
+        required: false
+        type: boolean
+        default: true
+      notify:
+        description: 'Post a Google Chat notification when anything changed. Always on for the scheduled run.'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with contents:write and pull-requests:write on all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+  # Mondays at ~10:00am US Eastern - a few hours after update-maven-wrapper.yml's ~7:00am
+  # schedule, so the two weekly runs don't land on the shared runner pool at the same moment.
+  # GitHub Actions cron is always UTC with no notion of DST, hence the two month-selected
+  # entries (EDT/EST).
+  schedule:
+    - cron: '0 14 * 3-10 1'      # ~10:00am EDT Monday, March-October
+    - cron: '0 15 * 11,12,1,2 1' # ~10:00am EST Monday, November-February
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: Resolve Target Version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve latest UI bundle release
+        id: resolve
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          BUNDLE_VERSION_INPUT: ${{ inputs.bundle_version }}
+        run: |
+          set -euo pipefail
+          TAG="${BUNDLE_VERSION_INPUT:-}"
+          if [[ -z "$TAG" ]]; then
+            TAG=$(gh api repos/spring-io/antora-ui-spring/releases/latest --jq .tag_name)
+          fi
+          if [[ -z "$TAG" ]]; then
+            echo "::error::Could not resolve the latest spring-io/antora-ui-spring release."
+            exit 1
+          fi
+          echo "Target UI bundle release: ${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+      excluded: ${{ steps.build-matrix.outputs.excluded }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type || 'both' }}
+          MATRIX_LIB: ${{ github.workspace }}/.github/scripts/project-branch-matrix.js
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { buildBranchMatrix } = require(process.env.MATRIX_LIB);
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          // One entry per branch: docs/antora-playbook.yml is per-branch (it documents its
+          // own branch via content.sources[].branches: HEAD), so every maintained branch
+          // carries its own copy. `-internal` branches are excluded by default - same
+          // reasoning as update-maven-wrapper.yml's setup job: they are the in-flight
+          // development line for the next train, so an unsolicited change there lands in
+          // the middle of active work rather than on a settled branch.
+          const { entries, excluded } = buildBranchMatrix(projects, {
+            filter: process.env.PROJECTS_FILTER,
+            repoType: process.env.REPO_TYPE,
+          });
+
+          console.log(`Repo/branch combinations to check: ${entries.length}`);
+          for (const e of entries) console.log(`  ${e.repo}@${e.branch}`);
+          console.log(`Excluded (-internal): ${excluded.length}`);
+          for (const e of excluded) console.log(`  ${e}`);
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include: entries })}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `count=${entries.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `excluded=${JSON.stringify(excluded)}\n`);
+          JSEOF
+
+  update:
+    name: "Antora UI Bundle — ${{ matrix.repo }}@${{ matrix.branch }}"
+    needs: [versions, setup]
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      # This repository, for the shared .github/scripts/*.js modules - antora-ui-bundle.js
+      # (the rules this step edits docs/antora-playbook.yml by) and git-pr-helpers.js (the
+      # generic git-data-API/PR mechanics, shared with update-maven-wrapper.yml). Checked out
+      # into a subdirectory on purpose: a checkout at the workspace root would clean the
+      # antora-ui-*.json result file this step writes there.
+      - name: Checkout shared scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci-actions
+
+      - name: Check and update UI bundle
+        id: update
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          BUNDLE_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/antora-ui-bundle.js
+          GIT_PR_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/git-pr-helpers.js
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          PROJECT: ${{ matrix.project }}
+          TYPE: ${{ matrix.type }}
+          TARGET_TAG: ${{ needs.versions.outputs.tag }}
+          # A scheduled run has no inputs, so `inputs.dry_run != false` would be true and the
+          # weekly job would never actually do anything. Schedule therefore acts, while a
+          # manual dispatch still defaults to a dry run so a human can look first - same
+          # convention as update-maven-wrapper.yml.
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          const PR = require(process.env.GIT_PR_LIB);
+          const A = require(process.env.BUNDLE_LIB);
+
+          const REPO = process.env.REPO;
+          const BRANCH = process.env.BRANCH;
+          const TARGET = process.env.TARGET_TAG;
+          const DRY = process.env.DRY_RUN !== 'false';
+
+          const safe = `${REPO}@${BRANCH}`.replace(/[/@]/g, '-');
+          const finish = (status, detail, extra = {}) => {
+            const result = { project: process.env.PROJECT, repo: REPO, type: process.env.TYPE,
+              branch: BRANCH, status, detail, dryRun: DRY, ...extra };
+            fs.writeFileSync(`antora-ui-${safe}.json`, JSON.stringify(result, null, 2));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `safe-name=${safe}\n`);
+            // Only a PR that is already open AND already at the target is a merge
+            // candidate. One just opened, or just moved up, has no finished CI yet.
+            if (status === 'pr-open' && extra.prNumber) {
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `merge-candidate=${extra.prNumber}\n`);
+            }
+            console.log(`${REPO}@${BRANCH}: ${status}${detail ? ` - ${detail}` : ''}`);
+            process.exit(0);
+          };
+
+          // Encoded for query strings; left raw inside a path, where GitHub accepts the
+          // slashes a branch name may contain.
+          const enc = encodeURIComponent(BRANCH);
+
+          // ── Read the playbook at this branch ─────────────────────────────────────────────
+          const got = PR.readFileAt(REPO, A.PLAYBOOK_PATH, enc);
+          if (!got) finish('no-playbook', `no ${A.PLAYBOOK_PATH} on this branch`);
+
+          const bundle = A.extractBundle(got.text);
+          if (!bundle) finish('unparsed', `no UI bundle release-download url in ${A.PLAYBOOK_PATH}`);
+
+          const extras = { current: bundle.tag, target: TARGET };
+
+          // Never walk a file backwards - a manual override, or a target resolved before
+          // this branch was last touched, both leave the branch pinned ahead of the target.
+          const cmpResult = A.cmp(bundle.tag, TARGET);
+          if (cmpResult > 0) finish('ahead', `${bundle.tag} is newer than the target ${TARGET}`, extras);
+          if (cmpResult === 0) finish('up-to-date', `already on ${bundle.tag}`, extras);
+
+          // ── Is there already a PR for this branch? ──────────────────────────────────────
+          // The head name includes the target tag, mirroring update-maven-wrapper.yml's
+          // convention, so a PR opened for an earlier release is found and bumped in place
+          // rather than stacking a second PR on top of it.
+          const slug = BRANCH.replace(/\//g, '-');
+          const PREFIX = 'antora-ui-bundle-update/';
+          const head = `${PREFIX}${slug}-${TARGET}`;
+
+          const authorName = 'spring-builds';
+          const authorEmail = 'spring-builds@users.noreply.github.com';
+          // Spring Cloud repositories run a required DCO check, so the commit needs a
+          // Signed-off-by trailer whose address matches the commit author.
+          const message = `Update Antora UI bundle to ${TARGET}\n\n` +
+            `Signed-off-by: ${authorName} <${authorEmail}>`;
+          const author = { name: authorName, email: authorEmail };
+
+          const prBody = fromTag => [
+            `Updates the Antora UI bundle on \`${BRANCH}\` from **${fromTag}** to **${TARGET}**.`,
+            '',
+            `Release notes: https://github.com/${bundle.repo}/releases/tag/${TARGET}`,
+            '',
+            'Opened automatically by [update-antora-ui-bundle.yml](https://github.com/spring-cloud/spring-cloud-github-actions/blob/main/.github/workflows/update-antora-ui-bundle.yml).',
+          ].join('\n');
+
+          const findPr = PR.findOpenPrByHeadPrefix(REPO, BRANCH, `${PREFIX}${slug}-`);
+          if (!findPr.ok) finish('error', `could not list pull requests: ${findPr.err}`);
+
+          if (findPr.pr) {
+            const pr = findPr.pr;
+            // Read the PR's own head branch: it may already be at the target, or behind it
+            // (a newer release has shipped since it was opened).
+            const headRef = encodeURIComponent(pr.head.ref);
+            const onHead = PR.readFileAt(REPO, A.PLAYBOOK_PATH, headRef);
+            const headBundle = onHead && A.extractBundle(onHead.text);
+
+            if (!headBundle || A.cmp(headBundle.tag, TARGET) >= 0) {
+              finish('pr-open', `#${pr.number} already open for ${TARGET}`,
+                { ...extras, prUrl: pr.html_url, prNumber: pr.number });
+            }
+            if (DRY) {
+              finish('would-update-pr', `#${pr.number} would be moved up to ${TARGET}`,
+                { ...extras, prUrl: pr.html_url });
+            }
+            // Commit onto the existing PR's branch so it updates in place - one UI-bundle
+            // PR per branch, always at the current target, rather than a growing stack.
+            const headUpdated = A.rewrite(onHead.text, { repo: headBundle.repo, tag: TARGET });
+            const bump = PR.commitFilesToRef(REPO, pr.head.ref,
+              [{ path: A.PLAYBOOK_PATH, content: headUpdated }], message, author);
+            if (!bump.ok) finish('error', `could not update #${pr.number}: ${bump.err}`);
+            finish('pr-updated', `#${pr.number} moved up to ${TARGET}`,
+              { ...extras, prUrl: pr.html_url, prNumber: pr.number });
+          }
+
+          if (DRY) finish('would-open', `${bundle.tag} -> ${TARGET}`, extras);
+
+          // ── Create the branch, commit, open the PR ──────────────────────────────────────
+          const madeRef = PR.createBranch(REPO, head, BRANCH);
+          if (!madeRef.ok) finish('error', madeRef.err);
+          // An existing branch with no open PR means a previous PR was closed unmerged.
+          // Leaving it alone is deliberate - reopening it would re-litigate that decision.
+          if (madeRef.alreadyExists) {
+            finish('branch-exists', `${head} exists but no PR is open - left alone`, extras);
+          }
+
+          const updatedText = A.rewrite(got.text, { repo: bundle.repo, tag: TARGET });
+          const put = PR.commitFilesToRef(REPO, head,
+            [{ path: A.PLAYBOOK_PATH, content: updatedText }], message, author);
+          if (!put.ok) finish('error', `could not commit: ${put.err}`);
+
+          const opened = PR.openPr(REPO, {
+            title: `Update Antora UI bundle to ${TARGET}`,
+            head, base: BRANCH, body: prBody(bundle.tag),
+          });
+          if (!opened.ok) finish('error', opened.err);
+
+          finish('pr-opened', `${bundle.tag} -> ${TARGET}`,
+            { ...extras, prUrl: opened.pr.html_url, prNumber: opened.pr.number });
+          JSEOF
+
+      # Only runs when the previous step found a PR that is open and already at the target
+      # release - i.e. one whose CI has had a chance to finish. A PR opened or moved up in
+      # this same run is deliberately not a candidate: its checks have not started yet.
+      #
+      # Auto-merge is switched off for the weekly scheduled run: a human decides when a UI
+      # refresh lands. A manual dispatch still honours the auto_merge input, so merging green
+      # PRs in bulk is one deliberate click away - same convention as update-maven-wrapper.yml.
+      - name: Merge PR if all checks pass
+        if: >-
+          always()
+          && github.event_name != 'schedule'
+          && inputs.auto_merge != false
+          && steps.update.outputs.merge-candidate != ''
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          PR_NUMBER: ${{ steps.update.outputs.merge-candidate }}
+          SAFE_NAME: ${{ steps.update.outputs.safe-name }}
+          MERGE_METHOD: ${{ inputs.merge_method || 'squash' }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
+          MERGE_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/merge-if-green.js
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { mergeIfGreen } = require(process.env.MERGE_LIB);
+
+          const REPO = process.env.REPO;
+          const PR = process.env.PR_NUMBER;
+          const DRY = process.env.DRY_RUN !== 'false';
+          const METHOD = process.env.MERGE_METHOD || 'squash';
+          const FILE = `antora-ui-${process.env.SAFE_NAME}.json`;
+
+          const { status, detail } = mergeIfGreen({ repo: REPO, pr: PR, method: METHOD, dryRun: DRY });
+
+          // Merge outcome is folded back into the result the previous step wrote, so the
+          // summary reports one row per repo/branch rather than two disjoint views.
+          let result = {};
+          try { result = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { /* first write */ }
+          fs.writeFileSync(FILE, JSON.stringify(
+            { ...result, mergeStatus: status, mergeDetail: detail }, null, 2));
+          console.log(`${REPO} #${PR}: ${status}${detail ? ` - ${detail}` : ''}`);
+          JSEOF
+
+      # Guarded on safe-name: if the script died before writing its result, the artifact
+      # name would be a bare "antora-ui-", which GitHub rejects and which would turn a
+      # reporting gap into a job failure.
+      - name: Upload result
+        if: always() && steps.update.outputs.safe-name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: antora-ui-${{ steps.update.outputs.safe-name }}
+          path: antora-ui-${{ steps.update.outputs.safe-name }}.json
+          if-no-files-found: ignore
+
+  summary:
+    name: Summary
+    needs: [versions, setup, update]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: antora-ui-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        id: write-summary
+        env:
+          TARGET_TAG: ${{ needs.versions.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          EXCLUDED: ${{ needs.setup.outputs.excluded }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+
+          let results = [];
+          try {
+            results = fs.readdirSync('results')
+              .filter(f => f.endsWith('.json'))
+              .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+              .sort((a, b) => a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
+          } catch (err) {
+            console.log('No results to summarize.');
+          }
+
+          const dry = results.some(r => r.dryRun);
+          const of = s => results.filter(r => r.status === s);
+          const withMerge = s => results.filter(r => r.mergeStatus === s);
+
+          const md = ['## Update Antora UI Bundle', ''];
+          md.push(`Target release **${process.env.TARGET_TAG}**.`, '');
+          if (dry) {
+            md.push('> **Dry run** — no branches or pull requests were created. ' +
+              'Re-run with `dry_run` unchecked to open them.', '');
+          }
+
+          md.push(`${results.length} repo/branch combination(s) checked — ` +
+            `**${of('pr-opened').length}** PR(s) opened, ` +
+            `**${of('pr-updated').length}** existing PR(s) moved up, ` +
+            `**${of('would-open').length + of('would-update-pr').length}** would change, ` +
+            `**${of('pr-open').length}** already current, ` +
+            `**${of('up-to-date').length}** up to date, ` +
+            `**${of('error').length}** error(s).`, '');
+
+          const merged = withMerge('merged');
+          const wouldMerge = withMerge('would-merge');
+          if (merged.length || wouldMerge.length) {
+            md.push(`**${merged.length}** PR(s) merged` +
+              (wouldMerge.length ? `, **${wouldMerge.length}** would be merged` : '') + '.', '');
+          }
+
+          // Said plainly, so a weekly run with open green PRs and an empty Merge column
+          // reads as a deliberate policy rather than as merging having quietly failed.
+          if (process.env.EVENT_NAME === 'schedule') {
+            md.push('> Auto-merge is off for scheduled runs — open PRs are left for a human. ' +
+              'Run this workflow manually with `auto_merge` checked to merge the green ones.', '');
+          }
+
+          // Named rather than merely counted: an omission nobody can see is one nobody can
+          // question, and these are branches a reader would otherwise assume were covered.
+          let excluded = [];
+          try { excluded = JSON.parse(process.env.EXCLUDED || '[]'); } catch (_) { /* absent */ }
+          if (excluded.length) {
+            md.push('', `### Skipped — \`-internal\` branches (${excluded.length})`, '');
+            md.push('Left alone deliberately: these are the in-flight development line for ' +
+              'the next train, so the UI bundle is not changed under active work.', '');
+            for (const e of excluded) md.push(`- \`${e}\``);
+          }
+
+          const interesting = results.filter(r =>
+            !['up-to-date', 'no-playbook'].includes(r.status));
+
+          // Capped rather than exhaustive: a Google Chat message listing every one of ~79
+          // branches would bury the count it opens with. `chatSection`-style limit,
+          // same convention dependabot-report.yml already uses for its own chat text.
+          const prLines = [];
+          if (!interesting.length) {
+            md.push('', 'Every maintained branch with an Antora playbook is already on the target bundle.');
+          } else {
+            md.push('', '| Repo | Branch | Status | Merge | Detail |', '|---|---|---|---|---|');
+            for (const r of interesting) {
+              const detail = r.prUrl ? `[${r.detail}](${r.prUrl})` : (r.detail || '');
+              const merge = r.mergeStatus
+                ? `${r.mergeStatus}${r.mergeDetail ? ` — ${r.mergeDetail}` : ''}`
+                : '';
+              md.push(`| \`${r.repo}\` | \`${r.branch}\` | ${r.status} | ${merge} | ${detail} |`);
+              if (r.prUrl) prLines.push(`<${r.prUrl}|${r.repo}@${r.branch}>`);
+            }
+          }
+
+          const quiet = of('up-to-date').length + of('no-playbook').length;
+          if (quiet) {
+            md.push('', `<sub>${of('up-to-date').length} branch(es) already current, ` +
+              `${of('no-playbook').length} with no Antora playbook — omitted above.</sub>`);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+          console.log(md.join('\n'));
+
+          // Chat text is only produced when there is something worth a notification for - a
+          // weekly "all clear" only teaches people to ignore the channel, same reasoning
+          // rollout-actions-ref.yml already documents for its own notification.
+          const changedCount = of('pr-opened').length + of('pr-updated').length + merged.length;
+          if (changedCount > 0) {
+            const chat = [`*Update Antora UI Bundle* — target ${process.env.TARGET_TAG}`,
+              `${of('pr-opened').length} opened, ${of('pr-updated').length} moved up, ` +
+              `${merged.length} merged.`];
+            const capped = prLines.slice(0, 15);
+            if (capped.length) chat.push('', ...capped);
+            if (prLines.length > capped.length) chat.push(`…and ${prLines.length - capped.length} more`);
+            const text = chat.join('\n');
+            const delim = `ghadelim_${Date.now()}`;
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `chat-text<<${delim}\n${text}\n${delim}\n`);
+          }
+          JSEOF
+
+      - name: Send Google Chat notification
+        if: always() && (github.event_name == 'schedule' || inputs.notify != false)
+        env:
+          WEBHOOK_URL: ${{ secrets.SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL }}
+          CHAT_TEXT: ${{ steps.write-summary.outputs.chat-text }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${WEBHOOK_URL}" ]]; then
+            echo "SPRING_CLOUD_CORE_CI_GCHAT_WEBHOOK_URL is not set - skipping Google Chat notification."
+            exit 0
+          fi
+
+          if [[ -z "${CHAT_TEXT:-}" ]]; then
+            echo "Nothing to report - skipping Google Chat notification."
+            exit 0
+          fi
+
+          TEXT=$(printf '%s\n\n<%s|View full report>' "$CHAT_TEXT" "$RUN_URL")
+
+          jq -n --arg text "$TEXT" '{text: $text}' > chat-message.json
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'Content-Type: application/json; charset=UTF-8' \
+            -d @chat-message.json \
+            "${WEBHOOK_URL}"

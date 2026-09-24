@@ -874,6 +874,7 @@ See [DESIGN-dependabot-automation.md](../DESIGN-dependabot-automation.md) for th
 |---|---|
 | [`rollout-actions-ref.yml`](../.github/workflows/README-rollout-actions-ref.md) | Repoints every consumer's reference to this repo at a released SHA, via [`resolve-actions-ref`](../.github/actions/resolve-actions-ref/) (latest release → SHA + tag) and [`sync-actions-ref`](../.github/actions/sync-actions-ref/) (idempotent per-branch rewrite). Weekly scheduled run is a **forced dry run** that reports drift only |
 | [`update-maven-wrapper.yml`](../.github/workflows/README-update-maven-wrapper.md) | Weekly wrapper check across every repo/branch, opening a PR where behind. Finds *every* `maven-wrapper.properties` including submodules, because Dependabot aborts a repo's whole update job on one unreadable file |
+| [`update-antora-ui-bundle.yml`](../.github/workflows/README-update-antora-ui-bundle.md) | Weekly check of every repo/branch's `docs/antora-playbook.yml` against the latest `spring-io/antora-ui-spring` release, opening a PR where behind and posting to Chat when anything changed |
 | [`ci-status-report.yml`](../.github/workflows/README-ci-status-report.md) | Two-phase: ~4am reruns failing jobs silently, ~6am rescans, blames the breaking commit, reports to Chat. Always exits 0 |
 | [`retire-branch.yml`](../.github/workflows/README-retire-branch.md) | Removes a branch from `projects.json`, drops its Dependabot entries and playbook entry, locks it permanently via the `Locked Branches` ruleset |
 | [`check-token-permissions.yml`](../.github/workflows/README-check-token-permissions.md) | Probes a token for every permission the automation needs. Run after rotating `GH_ACTIONS_REPO_TOKEN` |
@@ -897,8 +898,10 @@ The topology source of truth. Per project:
 (`spring-cloud-cloudfoundry`, `spring-cloud-sleuth`) are commercial-only legacy.
 
 Read by `determine-matrix`, every `rollout-*` workflow, `update-maven-wrapper`,
-`ci-status-report`, and both Dependabot workflows. Written by `add-branches-projects-json`,
-`update-projects-json`, and `retire-branch-projects-json`.
+`update-antora-ui-bundle`, `ci-status-report`, `lock-unlock-branches`, and both Dependabot
+workflows — via the shared `project-branch-matrix.js` walk in most of those, rather than each
+carrying its own copy. Written by `add-branches-projects-json`, `update-projects-json`, and
+`retire-branch-projects-json`.
 
 ### Release-train action overrides
 
@@ -922,7 +925,7 @@ on every push and pull request to this repository:
 - **`test-*.yml`** — one workflow per action with meaningful logic
   (`test-extract-bom-versions`, `test-update-project-versions`,
   `test-verify-no-snapshot-versions`, `test-spring-release-train-project-ready`,
-  `test-maven-wrapper-properties`), exercising it against fixtures.
+  `test-shared-scripts`), exercising it against fixtures.
 - **[`verify-dist.yml`](../.github/workflows/verify-dist.yml)** — discovers every action with a
   `src/` directory, rebuilds it, and fails if the committed `dist/` does not match the source.
   This gates every release, so a stale bundle can never be tagged.

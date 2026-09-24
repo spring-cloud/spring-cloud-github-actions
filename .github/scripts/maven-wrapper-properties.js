@@ -11,6 +11,8 @@
 // the repository - no pull requests at all, not merely no wrapper PR. Matching its logic is
 // what lets `check_only` predict that failure before Dependabot hits it.
 
+const { cmp } = require('./version-cmp');
+
 const PROPS_SUFFIX = '.mvn/wrapper/maven-wrapper.properties';
 
 // Scripts Dependabot will read a version banner out of, in its own preference order:
@@ -41,14 +43,6 @@ const SCRIPT_VERSION =
 
 const propsPath = dir => (dir === '.' ? PROPS_SUFFIX : `${dir}/${PROPS_SUFFIX}`);
 const scriptPaths = dir => SCRIPTS.map(s => (dir === '.' ? s : `${dir}/${s}`));
-
-const cmp = (a, b) => {
-  const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
-  }
-  return 0;
-};
 
 // Java .properties semantics, matched to Dependabot's get_property_value: line
 // continuations are joined first, `#` and `!` start comments, and either `=` or `:`

@@ -133,15 +133,22 @@ jobs:
       maven: ${{ steps.resolve.outputs.maven }}
       wrapper: ${{ steps.resolve.outputs.wrapper }}
     steps:
+      # For .github/scripts/version-cmp.js, the dotted-numeric comparator shared with
+      # maven-wrapper-properties.js and update-antora-ui-bundle.yml.
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Resolve versions
         id: resolve
         env:
           MAVEN_INPUT: ${{ inputs.maven_version }}
           WRAPPER_INPUT: ${{ inputs.wrapper_version }}
+          VERSION_CMP_LIB: ${{ github.workspace }}/.github/scripts/version-cmp.js
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
           const { execFileSync } = require('child_process');
+          const { cmp } = require(process.env.VERSION_CMP_LIB);
 
           const fetchMeta = url => {
             try {
@@ -154,14 +161,6 @@ jobs:
 
           const versionsIn = xml =>
             [...xml.matchAll(/<version>([^<]+)<\/version>/g)].map(m => m[1]);
-
-          const cmp = (a, b) => {
-            const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
-            for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-              if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
-            }
-            return 0;
-          };
 
           // Maven Central's <latest> is currently a 4.0.0 release candidate, and Dependabot
           // itself stays on the stable line ("Filtered out 33 pre-release versions"), so the
@@ -209,52 +208,26 @@ jobs:
         env:
           PROJECTS_FILTER: ${{ inputs.projects }}
           REPO_TYPE: ${{ inputs.repo_type || 'both' }}
+          MATRIX_LIB: ${{ github.workspace }}/.github/scripts/project-branch-matrix.js
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const { buildBranchMatrix } = require(process.env.MATRIX_LIB);
 
           const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
-
-          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
-          const filter = filterRaw
-            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
-            : new Set();
-
-          const repoType = (process.env.REPO_TYPE || 'both').trim();
-          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
 
           // One entry per branch, not per repository - the wrapper is a file in the tree, so
           // every maintained branch has its own copy and its own PR. docs-build is
           // deliberately absent: it is not in projects.json, and its Dependabot config runs
           // the npm ecosystem rather than maven, so its wrapper is not part of this problem.
-          const entries = [];
-          const excluded = [];
-          for (const [projectKey, config] of Object.entries(projects)) {
-            if (projectKey === 'defaults') continue;
-            if (filter.size > 0 && !filter.has(projectKey)) continue;
-            for (const typeKey of typeKeys) {
-              if (!config[typeKey]) continue;
-              const repo = typeKey === 'commercial'
-                ? `spring-cloud/${projectKey}-commercial`
-                : `spring-cloud/${projectKey}`;
-              for (const branch of config[typeKey]?.branches?.scheduled || []) {
-                // `-internal` branches are left alone: they are the in-flight development
-                // line for the next train, so an unsolicited toolchain change there lands
-                // in the middle of active work rather than on a settled branch. They are
-                // filtered here rather than skipped inside the job so no runner is spent
-                // on them, and they are reported below so the omission stays visible.
-                if (branch.endsWith('-internal')) {
-                  excluded.push(`${repo}@${branch}`);
-                  continue;
-                }
-                entries.push({ project: projectKey, repo, type: typeKey, branch });
-              }
-            }
-          }
-
-          entries.sort((a, b) =>
-            a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
-          excluded.sort();
+          // `-internal` branches are excluded by default (they are the in-flight development
+          // line for the next train, so an unsolicited toolchain change there lands in the
+          // middle of active work rather than on a settled branch) and reported separately so
+          // the omission stays visible, rather than silently spending no runner on them.
+          const { entries, excluded } = buildBranchMatrix(projects, {
+            filter: process.env.PROJECTS_FILTER,
+            repoType: process.env.REPO_TYPE,
+          });
 
           console.log(`Repo/branch combinations to check: ${entries.length}`);
           for (const e of entries) console.log(`  ${e.repo}@${e.branch}`);
@@ -278,8 +251,9 @@ jobs:
       max-parallel: 8
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
-      # This repository, for .github/scripts/maven-wrapper-properties.js - the rules both
-      # this step and the regenerate step below edit properties files by. Checked out into
+      # This repository, for the shared .github/scripts/*.js modules - maven-wrapper-properties.js
+      # (the rules both this step and the regenerate step below edit properties files by),
+      # gh-cli.js and git-pr-helpers.js (the generic gh/git-data-API mechanics). Checked out into
       # a subdirectory on purpose: a checkout at the workspace root would clean the
       # wrapper-*.json result file the steps here write there.
       - name: Checkout shared scripts
@@ -292,6 +266,8 @@ jobs:
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           WRAPPER_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/maven-wrapper-properties.js
+          GH_CLI_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/gh-cli.js
+          GIT_PR_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/git-pr-helpers.js
           REPO: ${{ matrix.repo }}
           BRANCH: ${{ matrix.branch }}
           PROJECT: ${{ matrix.project }}
@@ -308,7 +284,11 @@ jobs:
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
-          const { execFileSync } = require('child_process');
+
+          // The generic gh-CLI and git-data-API/PR mechanics - shared with
+          // update-antora-ui-bundle.yml, which opens bot PRs the same way.
+          const { ghRetry } = require(process.env.GH_CLI_LIB);
+          const PR = require(process.env.GIT_PR_LIB);
 
           // Same rules the regenerate step applies against a real checkout - see the header of that
           // file for why they live outside this workflow.
@@ -325,33 +305,6 @@ jobs:
           const DRY = process.env.DRY_RUN !== 'false';
           // Audit mode: report what Dependabot would fail to parse, and write nothing at all.
           const CHECK = process.env.CHECK_ONLY === 'true';
-
-          const gh = args => {
-            try {
-              return { ok: true, out: execFileSync('gh', args,
-                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 }) };
-            } catch (err) {
-              return { ok: false, out: err.stdout || '',
-                err: (err.stderr || err.message || '').split('\n')[0].trim() };
-            }
-          };
-          const ghRetry = (args, attempts = 3) => {
-            let last;
-            for (let i = 1; i <= attempts; i++) {
-              last = gh(args);
-              if (last.ok) return last;
-              if (i < attempts) execFileSync('sleep', [String(i * 3)]);
-            }
-            return last;
-          };
-
-          // Write requests go through --input with a JSON file rather than repeated -f
-          // flags: -f cannot express the nested author/committer objects the contents API
-          // needs, and it would mangle the newlines in a commit message or PR body.
-          const ghJson = (path, method, payload) => {
-            fs.writeFileSync('payload.json', JSON.stringify(payload));
-            return ghRetry(['api', path, '--method', method, '--input', 'payload.json']);
-          };
 
           const safe = `${REPO}@${BRANCH}`.replace(/[/@]/g, '-');
           const finish = (status, detail, extra = {}) => {
@@ -400,17 +353,10 @@ jobs:
               { truncated });
           }
 
-          const readAt = (path, ref) => {
-            const r = gh(['api', `repos/${REPO}/contents/${path}?ref=${ref}`]);
-            if (!r.ok) return null;
-            const meta = JSON.parse(r.out);
-            return { sha: meta.sha, text: Buffer.from(meta.content, 'base64').toString('utf8') };
-          };
-
           const files = [];
           for (const dir of dirs) {
             const path = W.propsPath(dir);
-            const got = readAt(path, enc);
+            const got = PR.readFileAt(REPO, path, enc);
             if (!got) finish('error', `could not read ${path}`);
             files.push({ dir, path, sha: got.sha, text: got.text });
           }
@@ -424,7 +370,7 @@ jobs:
             for (const f of files) {
               if (W.dependabotWrapperVersion(f.text)) continue;
               const present = W.scriptPaths(f.dir).filter(p => pathSet.has(p));
-              const scripts = present.map(p => readAt(p, enc)).filter(Boolean).map(s => s.text);
+              const scripts = present.map(p => PR.readFileAt(REPO, p, enc)).filter(Boolean).map(s => s.text);
               if (W.dependabotWrapperVersion(f.text, scripts)) continue;
               broken.push({ path: f.path, reason: present.length
                 ? `no wrapperVersion or wrapperUrl, and no version banner in ${present.join(', ')}`
@@ -500,53 +446,23 @@ jobs:
           // explicitly here rather than left to the token's default identity.
           const message = `Update Maven wrapper to ${MAVEN}\n\n` +
             `Signed-off-by: ${authorName} <${authorEmail}>`;
+          const author = { name: authorName, email: authorEmail };
 
-          // One commit for N files. The contents API writes a single file per call and therefore
-          // makes a separate commit for each, so a branch touching nine module wrappers would arrive
-          // as nine commits with the same message. The git data API builds one tree and one commit
-          // instead, which is also the shape the regenerate path produces.
-          const commitFiles = (ref, list) => {
-            const refSha = ghRetry(['api', `repos/${REPO}/git/ref/heads/${ref}`, '--jq', '.object.sha']);
-            if (!refSha.ok) return { ok: false, err: `could not read ${ref}: ${refSha.err}` };
-            const parent = refSha.out.trim();
-
-            const baseTree = ghRetry(['api', `repos/${REPO}/git/commits/${parent}`, '--jq', '.tree.sha']);
-            if (!baseTree.ok) return { ok: false, err: `could not read the tree of ${ref}: ${baseTree.err}` };
-
-            // mode 100644: maven-wrapper.properties is never executable. Everything not listed is
-            // inherited from base_tree, so file modes elsewhere in the repository are untouched.
-            const made = ghJson(`repos/${REPO}/git/trees`, 'POST', {
-              base_tree: baseTree.out.trim(),
-              tree: list.map(f => ({ path: f.path, mode: '100644', type: 'blob', content: f.updated })),
-            });
-            if (!made.ok) return { ok: false, err: `could not build a tree: ${made.err}` };
-
-            const commit = ghJson(`repos/${REPO}/git/commits`, 'POST', {
-              message,
-              tree: JSON.parse(made.out).sha,
-              parents: [parent],
-              author: { name: authorName, email: authorEmail },
-              committer: { name: authorName, email: authorEmail },
-            });
-            if (!commit.ok) return { ok: false, err: `could not create a commit: ${commit.err}` };
-
-            const moved = ghJson(`repos/${REPO}/git/refs/heads/${ref}`, 'PATCH',
-              { sha: JSON.parse(commit.out).sha });
-            if (!moved.ok) return { ok: false, err: `could not move ${ref}: ${moved.err}` };
-            return { ok: true };
-          };
+          // One commit for N files, via git-pr-helpers.js's tree/commit/ref-move sequence -
+          // the contents API writes a single file per call and therefore makes a separate
+          // commit for each, so a branch touching nine module wrappers would arrive as nine
+          // commits with the same message.
+          const commitFiles = (ref, list) => PR.commitFilesToRef(REPO, ref,
+            list.map(f => ({ path: f.path, content: f.updated })), message, author);
 
           // Matched by prefix and base rather than by exact head, so a PR opened for an
           // earlier target version is found too. Otherwise each new Maven release would
           // stack another PR on top of the last one, all editing the same file.
-          const openPrs = ghRetry(['api',
-            `repos/${REPO}/pulls?state=open&base=${enc}&per_page=100`]);
-          if (!openPrs.ok) finish('error', `could not list pull requests: ${openPrs.err}`);
-          const mine = JSON.parse(openPrs.out || '[]')
-            .filter(pr => (pr.head?.ref || '').startsWith(`${PREFIX}${slug}-`));
+          const findPr = PR.findOpenPrByHeadPrefix(REPO, BRANCH, `${PREFIX}${slug}-`);
+          if (!findPr.ok) finish('error', `could not list pull requests: ${findPr.err}`);
 
-          if (mine.length) {
-            const pr = mine[0];
+          if (findPr.pr) {
+            const pr = findPr.pr;
             // Read the PR's own head branch: it may already be at the target (nothing to
             // do), or behind it (a newer Maven has shipped since it was opened). The file list
             // comes from the base branch, so a wrapper added to the base after the PR was opened is
@@ -554,7 +470,7 @@ jobs:
             const headRef = encodeURIComponent(pr.head.ref);
             const onHead = [];
             for (const f of planned) {
-              const got = readAt(f.path, headRef);
+              const got = PR.readFileAt(REPO, f.path, headRef);
               if (got) onHead.push({ ...f, sha: got.sha, text: got.text });
             }
             const headPlan = plan(onHead);
@@ -599,18 +515,11 @@ jobs:
           }
 
           // ── Create the branch ───────────────────────────────────────────────────────────
-          const baseRef = ghRetry(['api', `repos/${REPO}/git/ref/heads/${BRANCH}`, '--jq', '.object.sha']);
-          if (!baseRef.ok) finish('error', `could not read ${BRANCH}: ${baseRef.err}`);
-          const baseSha = baseRef.out.trim();
-
-          const madeRef = ghJson(`repos/${REPO}/git/refs`, 'POST',
-            { ref: `refs/heads/${head}`, sha: baseSha });
-          if (!madeRef.ok && !/already exists/i.test(madeRef.err)) {
-            finish('error', `could not create ${head}: ${madeRef.err}`);
-          }
+          const madeRef = PR.createBranch(REPO, head, BRANCH);
+          if (!madeRef.ok) finish('error', madeRef.err);
           // An existing branch with no open PR means a previous PR was closed unmerged.
           // Leaving it alone is deliberate - reopening it would re-litigate that decision.
-          if (!madeRef.ok) {
+          if (madeRef.alreadyExists) {
             finish('branch-exists', `${head} exists but no PR is open - left alone`, extras);
           }
 
@@ -649,15 +558,14 @@ jobs:
               'repository\'s update job - not merely the wrapper update.');
           }
 
-          const pr = ghJson(`repos/${REPO}/pulls`, 'POST', {
+          const opened = PR.openPr(REPO, {
             title: `Update Maven wrapper to ${MAVEN}`,
             head, base: BRANCH, body: prBody.join('\n'),
           });
-          if (!pr.ok) finish('error', `could not open PR: ${pr.err}`);
+          if (!opened.ok) finish('error', opened.err);
 
-          const created = JSON.parse(pr.out);
-          finish('pr-opened', `#${created.number}: ${versionPhrase(changed)} (${describe(changed)})`,
-            { ...extras, prUrl: created.html_url, prNumber: created.number });
+          finish('pr-opened', `#${opened.pr.number}: ${versionPhrase(changed)} (${describe(changed)})`,
+            { ...extras, prUrl: opened.pr.html_url, prNumber: opened.pr.number });
           JSEOF
 
       # ── Regenerate mode ─────────────────────────────────────────────────────────────
@@ -915,10 +823,11 @@ jobs:
           SAFE_NAME: ${{ steps.update.outputs.safe-name }}
           MERGE_METHOD: ${{ inputs.merge_method || 'squash' }}
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run != false) }}
+          MERGE_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/merge-if-green.js
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
-          const { execFileSync } = require('child_process');
+          const { mergeIfGreen } = require(process.env.MERGE_LIB);
 
           const REPO = process.env.REPO;
           const PR = process.env.PR_NUMBER;
@@ -926,70 +835,15 @@ jobs:
           const METHOD = process.env.MERGE_METHOD || 'squash';
           const FILE = `wrapper-${process.env.SAFE_NAME}.json`;
 
-          const gh = args => {
-            try {
-              return { ok: true, out: execFileSync('gh', args,
-                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 }) };
-            } catch (err) {
-              return { ok: false, out: err.stdout || '',
-                err: (err.stderr || err.message || '').split('\n')[0].trim() };
-            }
-          };
+          const { status, detail } = mergeIfGreen({ repo: REPO, pr: PR, method: METHOD, dryRun: DRY });
 
           // Merge outcome is folded back into the result the previous step wrote, so the
           // summary reports one row per repo/branch rather than two disjoint views.
-          const record = (mergeStatus, mergeDetail) => {
-            let result = {};
-            try { result = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { /* first write */ }
-            fs.writeFileSync(FILE, JSON.stringify({ ...result, mergeStatus, mergeDetail }, null, 2));
-            console.log(`${REPO} #${PR}: ${mergeStatus}${mergeDetail ? ` - ${mergeDetail}` : ''}`);
-            process.exit(0);
-          };
-
-          const view = gh(['pr', 'view', PR, '--repo', REPO, '--json',
-            'mergeable,mergeStateStatus,statusCheckRollup,url']);
-          if (!view.ok) record('error', `could not read PR: ${view.err}`);
-          const pr = JSON.parse(view.out);
-
-          // Checks are read from statusCheckRollup rather than inferred from
-          // mergeStateStatus, which conflates failing checks with "needs review" and a
-          // locked branch - the same distinction dependabot-report.yml makes.
-          const FAILING = new Set(['FAILURE', 'TIMED_OUT', 'ERROR', 'STARTUP_FAILURE', 'CANCELLED']);
-          const PASSING = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
-          const checks = (pr.statusCheckRollup || []).map(c => {
-            if (c.__typename === 'StatusContext' || c.state) {
-              return { name: c.context || 'status', state: (c.state || '').toUpperCase() };
-            }
-            const status = (c.status || '').toUpperCase();
-            if (status && status !== 'COMPLETED') return { name: c.name, state: 'PENDING' };
-            return { name: c.name, state: (c.conclusion || 'PENDING').toUpperCase() };
-          });
-
-          const failing = checks.filter(c => FAILING.has(c.state));
-          const pending = checks.filter(c => !FAILING.has(c.state) && !PASSING.has(c.state));
-
-          if (!checks.length) record('not-merged', 'no checks have reported yet');
-          if (failing.length) {
-            record('not-merged', `failing checks: ${failing.map(c => c.name).join(', ')}`);
-          }
-          if (pending.length) {
-            record('not-merged', `checks still running: ${pending.map(c => c.name).join(', ')}`);
-          }
-          if (pr.mergeable === 'CONFLICTING') record('not-merged', 'conflicts with the base branch');
-          if (pr.mergeable !== 'MERGEABLE') record('not-merged', `mergeable is ${pr.mergeable}`);
-
-          // Green but not CLEAN means branch protection is holding it - a required review,
-          // or a Release Freeze on the base branch. The merge API would refuse anyway, so
-          // this is reported rather than attempted.
-          if (pr.mergeStateStatus !== 'CLEAN') {
-            record('not-merged', `all checks pass but GitHub reports ${pr.mergeStateStatus}`);
-          }
-
-          if (DRY) record('would-merge', `all ${checks.length} check(s) pass`);
-
-          const merged = gh(['pr', 'merge', PR, '--repo', REPO, `--${METHOD}`, '--delete-branch']);
-          if (!merged.ok) record('error', `merge failed: ${merged.err}`);
-          record('merged', `${METHOD}, all ${checks.length} check(s) passed`);
+          let result = {};
+          try { result = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { /* first write */ }
+          fs.writeFileSync(FILE, JSON.stringify(
+            { ...result, mergeStatus: status, mergeDetail: detail }, null, 2));
+          console.log(`${REPO} #${PR}: ${status}${detail ? ` - ${detail}` : ''}`);
           JSEOF
 
       # Guarded on safe-name: if the script died before writing its result, the artifact

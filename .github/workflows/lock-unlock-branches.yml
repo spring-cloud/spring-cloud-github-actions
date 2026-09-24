@@ -125,17 +125,16 @@ jobs:
           PROJECTS_FILTER: ${{ inputs.projects }}
           REPO_TYPE: ${{ inputs.repo_type }}
           UNLOCK: ${{ inputs.unlock }}
+          MATRIX_LIB: ${{ github.workspace }}/.github/scripts/project-branch-matrix.js
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
+          const { parseProjectFilter, knownProjectKeys, buildRepoMatrix } =
+            require(process.env.MATRIX_LIB);
 
           const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
 
-          const filterRaw = (process.env.PROJECTS_FILTER || '').trim();
-          const filter = filterRaw
-            ? new Set(filterRaw.split(',').map(p => p.trim()).filter(Boolean))
-            : new Set();
-
+          const filter = parseProjectFilter(process.env.PROJECTS_FILTER);
           const repoType = (process.env.REPO_TYPE || 'both').trim();
           const unlock = (process.env.UNLOCK || 'false') === 'true';
 
@@ -147,12 +146,11 @@ jobs:
           if (!['both', 'oss', 'commercial'].includes(repoType)) {
             fail(`ERROR: repo_type must be one of both, oss, commercial; got '${repoType}'.`);
           }
-          const typeKeys = repoType === 'both' ? ['oss', 'commercial'] : [repoType];
 
           // A typo in projects would otherwise process nothing and report success, and "no rows"
           // reads as "nothing needed doing" - the last thing you want to believe about a freeze.
           if (filter.size) {
-            const known = Object.keys(projects).filter(k => k !== 'defaults');
+            const known = knownProjectKeys(projects);
             const unknown = [...filter].filter(p => !known.includes(p));
             if (unknown.length) {
               fail(`ERROR: not found in projects.json: ${unknown.join(', ')}`,
@@ -163,38 +161,25 @@ jobs:
 
           // One entry per repository, not per branch. All of a repository's frozen branches live
           // in one ruleset, so a per-branch fan-out would have several legs writing the same
-          // object at once. The branch list rides along as a comma-separated string because a
-          // matrix cannot carry an array without toJson pretty-printing it and breaking the
-          // consuming YAML - the same reason dependabot-report.yml joins its branches.
-          const entries = [];
-          let branchCount = 0;
-          for (const [projectKey, config] of Object.entries(projects)) {
-            if (projectKey === 'defaults') continue;
-            if (filter.size > 0 && !filter.has(projectKey)) continue;
-            for (const typeKey of typeKeys) {
-              if (!config[typeKey]) continue;
-
-              // Everything under branches, not just scheduled: scheduled is the maintained set
-              // and default is the primary branch, and a freeze that let commits through on the
-              // default branch would be worse than no freeze at all. default is a subset of
-              // scheduled throughout projects.json today, but nothing enforces that.
-              const branches = config[typeKey].branches || {};
-              const all = [...new Set([...(branches.scheduled || []), ...(branches.default || [])])];
-              if (!all.length) continue;
-
-              entries.push({
-                project: projectKey,
-                repo: typeKey === 'commercial'
-                  ? `spring-cloud/${projectKey}-commercial`
-                  : `spring-cloud/${projectKey}`,
-                type: typeKey,
-                branches: all.join(','),
-              });
-              branchCount += all.length;
-            }
-          }
-
-          entries.sort((a, b) => a.repo.localeCompare(b.repo));
+          // object at once. Everything under branches, not just scheduled: scheduled is the
+          // maintained set and default is the primary branch, and a freeze that let commits
+          // through on the default branch would be worse than no freeze at all. default is a
+          // subset of scheduled throughout projects.json today, but nothing enforces that. The
+          // branch list rides along as a comma-separated string because a matrix cannot carry
+          // an array without toJson pretty-printing it and breaking the consuming YAML - the
+          // same reason dependabot-report.yml joins its branches.
+          const { entries: all } = buildRepoMatrix(projects, {
+            filter, repoType,
+            branchesOf: section => {
+              const branches = section.branches || {};
+              return [...new Set([...(branches.scheduled || []), ...(branches.default || [])])];
+            },
+          });
+          // A repository with nothing to freeze is dropped rather than kept as an
+          // empty-branches row, which a per-branch fan-out would apply the ruleset to nothing
+          // for - indistinguishable from success in the log.
+          const entries = all.filter(e => e.branches.length > 0);
+          const branchCount = entries.reduce((n, e) => n + e.branches.split(',').length, 0);
 
           console.log(`Repositories to ${unlock ? 'unlock' : 'lock'}: ${entries.length} ` +
             `(${branchCount} branches)`);
