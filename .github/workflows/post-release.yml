@@ -895,10 +895,91 @@ jobs:
             echo "branch=${RESOLVED}" >> "$GITHUB_OUTPUT"
           fi
 
+      # ── 5a'. is the branch frozen? ───────────────────────────────────────────────────
+      # lock-unlock-branches.yml's Release Freeze ruleset has no bypass actors, so it rejects
+      # this workflow's push as well - and forgetting the unlock used to surface only as every
+      # leg failing on push, partway through a real run. The rules endpoint returns every
+      # ruleset rule that applies to the branch (repo-level and org-level alike); an `update`
+      # rule is the one that rejects a push. Classic branch protection is not covered, which
+      # matches what lock-unlock-branches manages.
+      #
+      # A dry run only warns, and still merges in the runner's clone so a conflict shows up
+      # alongside the lock. A real run skips the merge (and so everything after it) and
+      # reports the branch as frozen.
+      #
+      # Never a blocker on its own failure: an API error reports `unknown` and the merge goes
+      # ahead, since the push would still report a real lock.
+      - name: Check the branch is not frozen
+        id: lock
+        if: steps.branch.outputs.status == 'ok'
+        env:
+          GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const repo = process.env.REPO;
+          const branch = process.env.BRANCH;
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+
+          const out = process.env.GITHUB_OUTPUT;
+          const finish = (status, lockedBy) => {
+            fs.appendFileSync(out, `status=${status}\n`);
+            fs.appendFileSync(out, `locked-by=${lockedBy || ''}\n`);
+            process.exit(0);
+          };
+
+          const gh = args => {
+            try {
+              return JSON.parse(execFileSync('gh', args,
+                { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+            } catch (err) {
+              console.log(`  gh failed: ${(err.stderr || err.message || '').split('\n')[0]}`);
+              return null;
+            }
+          };
+
+          // --slurp so a paginated response comes back as one array of pages.
+          const pages = gh(['api', `repos/${repo}/rules/branches/${branch}`, '--paginate', '--slurp']);
+          if (!pages) {
+            console.log(`::notice::Could not read the rules on ${repo}@${branch} - carrying on; ` +
+              'a frozen branch would still show up as a rejected push.');
+            finish('unknown');
+          }
+
+          const updates = pages.flat().filter(r => r.type === 'update');
+          if (!updates.length) {
+            console.log(`${repo}@${branch} is not frozen.`);
+            finish('unlocked');
+          }
+
+          // Named where possible, so the summary can say whether this is the Release Freeze
+          // (lifted by lock-unlock-branches) or something else entirely.
+          const names = [...new Set(updates.map(r => {
+            if (r.ruleset_source_type === 'Repository') {
+              const rs = gh(['api', `repos/${repo}/rulesets/${r.ruleset_id}`]);
+              if (rs && rs.name) return rs.name;
+            }
+            return `ruleset #${r.ruleset_id} (${r.ruleset_source || r.ruleset_source_type})`;
+          }))];
+
+          const msg = `${repo}@${branch} is frozen by ${names.join(', ')} - ` +
+            (dryRun ? 'a real run could not push to it. Unlock it before running for real.'
+                    : 'skipping the merge back. Unlock it, then re-run for this project.');
+          console.log(`::${dryRun ? 'warning' : 'error'}::${msg}`);
+          finish('locked', names.join(', '));
+          JSEOF
+
       # ── 5b. merge release/<version> back into the .x branch ──────────────────────────
       - name: Merge release branch back
         id: merge
-        if: steps.branch.outputs.status == 'ok'
+        if: |
+          steps.branch.outputs.status == 'ok' &&
+          (inputs.dry_run == true || steps.lock.outputs.status != 'locked')
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
           REPO: ${{ matrix.repo }}
@@ -1252,6 +1333,8 @@ jobs:
           MERGE_RESTORED: ${{ steps.merge.outputs.restored }}
           MERGE_AUTO_RESOLVED: ${{ steps.merge.outputs.auto-resolved }}
           MERGE_CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          LOCK_STATUS: ${{ steps.lock.outputs.status }}
+          LOCKED_BY: ${{ steps.lock.outputs.locked-by }}
           BUMP_OUTCOME: ${{ steps.bump.outcome }}
           PUSH_STATUS: ${{ steps.push.outputs.status }}
           RESOLVED_IN: ${{ matrix.resolvedIn }}
@@ -1264,6 +1347,13 @@ jobs:
           SAFE="${REPO//\//-}"
           echo "safe-name=${SAFE}" >> "$GITHUB_OUTPUT"
 
+          # A merge skipped because the branch is frozen is reported as such rather than as
+          # "skipped", which reads like nothing was needed. The release gate keys off this too:
+          # branch-locked is not a landed merge, so the release is held back with the reason.
+          if [[ -z "${MERGE_STATUS:-}" && "${LOCK_STATUS:-}" == "locked" ]]; then
+            MERGE_STATUS="branch-locked"
+          fi
+
           jq -n \
             --arg phase "merge-back-and-update" \
             --arg project "$PROJECT" \
@@ -1275,6 +1365,8 @@ jobs:
             --arg restored "${MERGE_RESTORED:-}" \
             --arg autoResolved "${MERGE_AUTO_RESOLVED:-}" \
             --arg conflicts "${MERGE_CONFLICTS:-}" \
+            --arg lockStatus "${LOCK_STATUS:-}" \
+            --arg lockedBy "${LOCKED_BY:-}" \
             --arg bumpOutcome "${BUMP_OUTCOME:-skipped}" \
             --arg pushStatus "${PUSH_STATUS:-skipped}" \
             --arg resolvedIn "${RESOLVED_IN:-}" \
@@ -1284,6 +1376,7 @@ jobs:
             '{phase: $phase, project: $project, repo: $repo, version: $version,
               branch: $branch, branchStatus: $branchStatus, mergeStatus: $mergeStatus,
               restored: $restored, autoResolved: $autoResolved, conflicts: $conflicts,
+              lockStatus: $lockStatus, lockedBy: $lockedBy,
               bumpOutcome: $bumpOutcome, pushStatus: $pushStatus,
               resolvedIn: $resolvedIn,
               dependabotOpen: $dependabotOpen, dependabotMatched: $dependabotMatched,
@@ -3689,7 +3782,7 @@ jobs:
             'board-listing-incomplete': '❌', 'board-created-elsewhere': '⚠️',
             'not-found': '❔', 'no-tag-oss-fallback': '⏭️', 'no-version': '❔',
             skipped: '⏭️', 'skipped-by-request': '⏭️',
-            'merge-conflict': '❌', 'branch-not-found': '❌',
+            'merge-conflict': '❌', 'branch-not-found': '❌', 'branch-locked': '🔒',
             'clone-failed': '❌', 'branch-fetch-failed': '❌',
             'version-mismatch': '❌', error: '❌', failure: '❌',
             // the checks that gate publishing
@@ -3745,7 +3838,10 @@ jobs:
             L.push('| Project | Branch | Merge | CI files restored | Bump | Push | Dependabot |');
             L.push('|---|---|---|---|---|---|---|');
             for (const r of mb) {
-              const branch = r.branch ? `\`${r.branch}\`` : `${icon(r.branchStatus)} ${r.branchStatus}`;
+              const branch = (r.branch ? `\`${r.branch}\`` : `${icon(r.branchStatus)} ${r.branchStatus}`) +
+                // On a dry run the merge still runs, so the lock would otherwise be invisible
+                // next to a green merge.
+                (r.lockStatus === 'locked' ? ' 🔒 frozen' : '');
               const dep = r.dependabotMatched
                 ? `${r.dependabotCommented}/${r.dependabotMatched} of ${r.dependabotOpen}`
                 : '—';
@@ -3923,6 +4019,52 @@ jobs:
           const noReleaseBranch = mb.filter(r => r.mergeStatus === 'no-release-branch');
           const noTag = mr.filter(r => r.release === 'no-tag');
           const heldBack = mr.filter(r => r.release === 'merge-incomplete');
+          // A branch with a push-blocking ruleset on it. On a real run nothing was merged for
+          // these; on a dry run the merge ran in the clone, but a real run could not push it.
+          const frozen = mb.filter(r => r.lockStatus === 'locked');
+
+          if (frozen.length) {
+            L.push(dryRun
+              ? '### ⚠️ Branches frozen — a real run could not push to these'
+              : '### ❌ Branches frozen — nothing was merged');
+            L.push('');
+            L.push(dryRun
+              ? 'These branches have a ruleset that rejects pushes, this workflow\'s included, ' +
+                'so a real run would merge each one and then fail to push it — and hold back ' +
+                'its release with it. Unlock them before the real run.'
+              : 'These branches have a ruleset that rejects pushes, this workflow\'s included, ' +
+                'so the merge back was skipped rather than attempted, and their releases are ' +
+                'held back until it lands.');
+            L.push('');
+            for (const r of frozen) {
+              L.push(`- \`${r.repo}\` @ \`${r.branch}\` — ${r.lockedBy || 'a ruleset'}`);
+            }
+            L.push('');
+            // Only the Release Freeze is lifted by lock-unlock-branches. Anything else - a
+            // retired branch's Locked Branches ruleset, an org-level ruleset - is not a
+            // release-time freeze, and unlocking is not a decision to make from here.
+            const freeze = frozen.filter(r => (r.lockedBy || '').split(', ').includes('Release Freeze'));
+            const other = frozen.filter(r => !freeze.includes(r));
+            if (freeze.length) {
+              L.push('To lift the `Release Freeze`, run **Lock/Unlock Branches** with `unlock` ' +
+                `checked, \`repo_type\` \`${commercial ? 'commercial' : 'oss'}\`, and:`);
+              L.push('');
+              L.push('```');
+              L.push(`projects: ${[...new Set(freeze.map(r => r.project))].join(',')}`);
+              L.push('```');
+              L.push('');
+              L.push(dryRun
+                ? 'then run this workflow for real.'
+                : 'then re-run this workflow with `projects` set to the same list.');
+              L.push('');
+            }
+            if (other.length) {
+              L.push(`${other.length === 1 ? 'One is' : `${other.length} are`} locked by ` +
+                'something other than the `Release Freeze`, which Lock/Unlock Branches does ' +
+                'not manage — check the ruleset named above before unlocking anything.');
+              L.push('');
+            }
+          }
 
           if (blocked.length) {
             L.push('### ❌ Blocked on a manual merge');
@@ -4043,16 +4185,20 @@ jobs:
           // Counted as distinct repositories rather than summed across the lists, because one
           // project lands in several of them at once by design: a merge conflict blocks the
           // merge, which holds back the release, which is two entries for one thing to fix.
+          // A frozen branch is a problem on a real run - the project was left half-done - but
+          // only a warning on a dry run, where finding it is the point of running one.
           const problemRepos = new Set([
             ...blocked, ...unreachable, ...branchFailed, ...noTag, ...heldBack,
+            ...(dryRun ? [] : frozen),
           ].map(r => r.repo));
           const problems = problemRepos.size;
+          const frozenWarning = dryRun && frozen.length > 0;
           // Called out in the message but deliberately not counted as a problem: nothing is
           // half-done, the run made the right decision, and a train line that has aged off
           // start.spring.io would otherwise turn every one of its releases red.
           const startNeedsAttention = !!start && start.status === 'no-mapping';
           const C = [];
-          C.push(`${problems || startNeedsAttention ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
+          C.push(`${problems || startNeedsAttention || frozenWarning ? '⚠️' : '✅'} *Post Release — ${releaseVersion}* ` +
             `(${commercial ? 'commercial' : 'OSS'}${hotfix ? ', hotfix' : ''})` +
             (filter ? ` · only ${filter}` : '') +
             (skipCloseMilestones ? ' · milestones left open' : ''));
@@ -4071,6 +4217,7 @@ jobs:
             'no-tag-oss-fallback': 'skipped (OSS tag)', 'would-create': 'would publish (dry run)',
             merged: 'merged', 'already-merged': 'already merged',
             'no-release-branch': 'no release branch', 'merge-conflict': 'BLOCKED by a conflict',
+            'branch-locked': 'BRANCH FROZEN - unlock it first',
             'clone-failed': 'COULD NOT CLONE', 'branch-fetch-failed': 'COULD NOT READ the release branch',
             pushed: 'pushed', 'nothing-to-push': 'already up to date',
             'would-push': 'would push (dry run)', 'branch-not-found': 'no branch found',
@@ -4137,7 +4284,7 @@ jobs:
           const nudged = mb.reduce((sum, r) => sum + (Number(r.dependabotCommented) || 0), 0);
           if (nudged) C.push(`Dependabot: ${nudged} PR(s) asked to recreate`);
 
-          if (problems || startNeedsAttention) {
+          if (problems || startNeedsAttention || frozenWarning) {
             C.push('');
             C.push(problems
               ? `*${problems} project(s) need attention:*`
@@ -4146,6 +4293,15 @@ jobs:
               C.push(`• start.spring.io has no mapping for the ` +
                 `${releaseVersion.split('.').slice(0, 2).join('.')} line, so no PR was ` +
                 'opened - adding one means choosing a compatibilityRange by hand');
+            }
+            if (frozenWarning) {
+              C.push(`• ${frozen.length} branch(es) frozen - unlock before the real run: ` +
+                frozen.map(r => `${r.repo}@${r.branch}`).join(', '));
+            } else {
+              for (const r of frozen) {
+                C.push(`• ${r.repo} — ${r.branch} is frozen by ${r.lockedBy || 'a ruleset'}, ` +
+                  'so nothing was merged');
+              }
             }
             for (const r of blocked) {
               C.push(`• ${r.repo} — blocked on a manual merge of release/${r.version} into ${r.branch}`);
@@ -4159,8 +4315,8 @@ jobs:
             }
             // Only the ones not already named above, so a merge conflict is one bullet about
             // the conflict rather than two about the same project.
-            const named = new Set([...blocked, ...unreachable, ...branchFailed, ...noTag]
-              .map(r => r.repo));
+            const named = new Set([...blocked, ...unreachable, ...branchFailed, ...noTag,
+              ...(dryRun ? [] : frozen)].map(r => r.repo));
             for (const r of heldBack.filter(r => !named.has(r.repo))) {
               C.push(`• ${r.repo} — the merge back did not land, so ${r.tag} was not published`);
             }

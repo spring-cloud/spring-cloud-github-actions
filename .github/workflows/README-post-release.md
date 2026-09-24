@@ -90,7 +90,7 @@ Post Release - 2025.1.2 [spring-cloud-config,spring-cloud-build] - Dry Run
 
 **Defaults to a dry run.** Set `dry_run` to `false` to actually close, create, commit and push.
 
-**The workflow exits non-zero** if any project hit a merge conflict, could not be reached by git at all, had no usable branch to update, had its release held back because the merge back did not land, or could not be published because its tag never reached the repo, since those leave a project half-done. The count is of distinct repositories, not of findings — one merge conflict blocks the merge *and* holds back the release, and that is one thing to go and fix. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
+**The workflow exits non-zero** if any project hit a merge conflict, had its branch frozen on a real run (a dry run only warns), could not be reached by git at all, had no usable branch to update, had its release held back because the merge back did not land, or could not be published because its tag never reached the repo, since those leave a project half-done. The count is of distinct repositories, not of findings — one merge conflict blocks the merge *and* holds back the release, and that is one thing to go and fix. Milestones that were not found, releases that already existed, and projects with no release branch are all reported without failing the run.
 
 ## Inputs
 
@@ -359,7 +359,21 @@ The commit each tag points at lives on a `release/<version>` branch, which has t
 - **No `release/<version>` branch** → nothing to merge; the run continues to the version bump. Expected for carried-over versions, OSS-fallback entries, and branches already merged and deleted.
 - **Already merged** → reported as such, no commit. The merge check is `git merge-base --is-ancestor`, so this is naturally idempotent.
 - **Conflict** → the merge is aborted, and **the version bump, the push and the Dependabot pass are all skipped for that project**. Other projects continue. The summary flags it under **Blocked on a manual merge** and the run exits non-zero. Resolve it by hand, then re-run with `projects` set to just the affected projects. **The GitHub release is held back too**, since the tagged commit stays unreachable until the merge lands — see [Releases wait for the merge back](#releases-wait-for-the-merge-back).
+- **Branch frozen** → see [Frozen branches](#frozen-branches) below.
 - **Git could not reach the repository** → `clone-failed` or `branch-fetch-failed`, reported under **Could not reach the repository**, counted as a problem, and nothing else is done for that project. See below.
+
+### Frozen branches
+
+The `Release Freeze` ruleset that [Lock/Unlock Branches](README-lock-branches.md) applies has no bypass actors, so it rejects this workflow's push too. Forgetting the unlock used to surface only as every project failing on push, partway through a real run. So **before merging, each project checks its target branch** with `GET repos/{repo}/rules/branches/{branch}`, which returns every ruleset rule that applies to it, repo-level and org-level alike. A rule of type `update` is the one that rejects a push, and the branch is reported as frozen, with the ruleset's name.
+
+| | What happens | Run |
+|---|---|---|
+| dry run | a warning; the merge still runs in the clone so a conflict shows up alongside it | stays green |
+| real run | the merge is skipped (`branch-locked`), and so the bump, the push and the Dependabot pass. The release is held back | red |
+
+Both list the branches under **Branches frozen**. When the lock is the `Release Freeze`, they also give the exact `projects` list to pass to Lock/Unlock Branches with `unlock` checked. A lock from anything else (a retired branch's `Locked Branches` ruleset, an org ruleset) is named, not given an unlock hint, since lifting it is not a release-time decision.
+
+The check never blocks on its own failure: if the rules can't be read, the project is reported as `unknown` and the merge goes ahead, since the push would still report a real lock. **Classic branch protection is not checked**, which matches what Lock/Unlock Branches manages.
 
 ### Remote reads are retried, and always end in a status
 
@@ -666,7 +680,7 @@ The job summary has one table per phase. Because most steps are no-ops when thei
 - ❔ nothing found — no milestone to close, no version for this project
 - ❌ needs attention — merge conflict, no usable branch
 
-Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — a **start.spring.io PR** section, a **Release board** section, and then explicit sections for anything that needs a human: **Blocked on a manual merge**, **Could not reach the repository**, **Releases held back**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
+Followed by a **Website PR** section — the PR link, the blog post path, how many `documentation.json` files were touched, which properties file the module list was compared against on an OSS run, any entry whose `ref` had to be cloned from a pre-Antora one on a commercial run, and a pointer to the [full diff](#seeing-the-changes) in the Website PR job's own summary — a **start.spring.io PR** section, a **Release board** section, and then explicit sections for anything that needs a human: **Branches frozen**, **Blocked on a manual merge**, **Could not reach the repository**, **Releases held back**, **No branch to update**, **No milestone found to close**, **Satisfied by the OSS tag**, and **No release branch to merge**.
 
 ### Google Chat notification
 

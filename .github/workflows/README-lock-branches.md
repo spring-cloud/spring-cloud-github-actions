@@ -55,7 +55,7 @@ The workflow is also **callable** (`workflow_call`), so the unlock can be wired 
 
 No `bypass_actors` is set, so a frozen branch rejects **every** push, including the one `GH_ACTIONS_REPO_TOKEN` makes. [post-release](README-post-release.md) cannot merge the release branch back, push the version bump, or push the tag to a frozen branch — and since publishing the GitHub release now depends on that tag arriving, a forgotten unfreeze stops the release, visibly.
 
-**So the unlock has to run before post-release**, not after it. The summary of a successful lock says so explicitly.
+**So the unlock has to run before post-release**, not after it. The summary of a successful lock says so explicitly. Post-release checks each branch before merging and lists any still-frozen ones under **Branches frozen**, with the `projects` list to unlock. A dry run warns about them, so running one first catches a forgotten unlock.
 
 ## Which branches
 
