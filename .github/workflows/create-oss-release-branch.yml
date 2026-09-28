@@ -34,9 +34,11 @@ run-name: "Create OSS Release Branch - ${{ inputs.oss_repo }} - ${{ inputs.sprin
 #   asynchronously while the rest of this workflow continues.
 #
 #   The -internal branch is created only once per minor line.  On later releases in the
-#   same line (5.0.1, 5.0.2 …) creation is skipped and the existing branch is re-stamped
-#   for the new release train.  It is deregistered from projects.json by retire-branch.yml
-#   when the line is retired, not at the end of each release.
+#   same line (5.0.1, 5.0.2 …) creation is skipped; instead the existing branch is synced
+#   onto the OSS branch's current tip (carrying forward ci-release.yml and
+#   release-ci-settings.xml by content rather than by replaying old commits) before it is
+#   re-stamped for the new release train.  It is deregistered from projects.json by
+#   retire-branch.yml when the line is retired, not at the end of each release.
 #
 # Stage 2 — the release/ branch (per release, disposable)
 #   release/<version> is cut from the -internal branch tip, where <version> is the root
@@ -277,38 +279,105 @@ jobs:
 
   # Full clone of the OSS branch (preserving history) and push to the commercial repo as
   # the -internal branch.  No orphan — history is kept so the branch can be merged back
-  # into the OSS repo after the release.  Skipped when the branch already exists, which is
-  # the normal case for every release after the first in a minor line.
+  # into the OSS repo after the release.  When the branch already exists, which is the
+  # normal case for every release after the first in a minor line, it is instead synced
+  # onto the OSS branch's current tip: the internal-only files (ci-release.yml,
+  # release-ci-settings.xml) are carried forward by copying their current content onto the
+  # new OSS tip, not by replaying old commits as patches, so nothing OSS changed since the
+  # last sync can put them in conflict.
   create-internal-branch:
     name: Create Internal Branch - ${{ needs.derive.outputs.internal_branch }}
     needs: derive
     runs-on: ubuntu-latest
     steps:
-      - name: Create internal branch in commercial repo
+      - name: Create or sync internal branch in commercial repo
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
           oss_repo="spring-cloud/${{ inputs.oss_repo }}"
           commercial_repo="${{ needs.derive.outputs.commercial_repo }}"
           internal_branch="${{ needs.derive.outputs.internal_branch }}"
+          oss_branch="${{ needs.derive.outputs.oss_branch }}"
 
-          if gh api "repos/${commercial_repo}/git/ref/heads/${internal_branch}" --silent 2>/dev/null; then
-            echo "${internal_branch} already exists in ${commercial_repo} — skipping creation."
-            echo "It will be re-stamped for this release train by the next job."
+          # The clone below and the fetch further down each cross an org boundary (OSS ->
+          # commercial), which fails on a blip often enough to be worth retrying rather than
+          # failing the whole job on the first bad response.
+          ATTEMPTS=3
+          retry() {
+            local what="$1"; shift
+            local attempt
+            for attempt in $(seq 1 $ATTEMPTS); do
+              if "$@"; then
+                return 0
+              fi
+              if [[ $attempt -lt $ATTEMPTS ]]; then
+                echo "${what}: failed, attempt ${attempt}/${ATTEMPTS} - waiting $((attempt * 10))s..."
+                sleep $((attempt * 10))
+              fi
+            done
+            echo "::error::${what}: failed ${ATTEMPTS} times."
+            return 1
+          }
+
+          clone_oss() {
+            rm -rf source-repo
+            git clone --quiet --branch "${oss_branch}" \
+              "https://x-access-token:${GH_TOKEN}@github.com/${oss_repo}.git" source-repo
+          }
+          retry "Cloning ${oss_repo}@${oss_branch}" clone_oss
+
+          cd source-repo
+          git config user.name  "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+          git remote add commercial \
+            "https://x-access-token:${GH_TOKEN}@github.com/${commercial_repo}.git"
+
+          if ! gh api "repos/${commercial_repo}/git/ref/heads/${internal_branch}" --silent 2>/dev/null; then
+            echo "${internal_branch} does not exist in ${commercial_repo} — creating it from ${oss_repo}@${oss_branch}."
+            git push commercial "HEAD:refs/heads/${internal_branch}"
+            echo "Branch ${internal_branch} created in ${commercial_repo} at $(git rev-parse HEAD)."
             exit 0
           fi
 
-          echo "Cloning ${oss_repo}@${{ needs.derive.outputs.oss_branch }} (full history)..."
-          git clone --branch "${{ needs.derive.outputs.oss_branch }}" \
-            "https://x-access-token:${GH_TOKEN}@github.com/${oss_repo}.git" source-repo
+          echo "${internal_branch} already exists in ${commercial_repo} — syncing it with ${oss_repo}@${oss_branch}."
 
-          echo "Pushing to ${commercial_repo} as ${internal_branch}..."
-          cd source-repo
-          git remote add commercial \
-            "https://x-access-token:${GH_TOKEN}@github.com/${commercial_repo}.git"
-          git push commercial "HEAD:refs/heads/${internal_branch}"
+          fetch_internal() {
+            git fetch --quiet commercial \
+              "refs/heads/${internal_branch}:refs/remotes/commercial/${internal_branch}"
+          }
+          retry "Fetching ${internal_branch} from ${commercial_repo}" fetch_internal
 
-          echo "Branch ${internal_branch} created in ${commercial_repo} at $(git rev-parse HEAD)."
+          if git merge-base --is-ancestor HEAD "commercial/${internal_branch}"; then
+            echo "${internal_branch} is already up to date with ${oss_branch} — nothing to sync."
+            exit 0
+          fi
+
+          oss_sha=$(git rev-parse --short HEAD)
+
+          # Carry forward the internal-only files by copying their current content onto the
+          # new OSS tip, rather than replaying the commits that created them as patches —
+          # a byte-for-byte copy can't conflict with anything OSS changed in the meantime.
+          # A tailored ci-release.yml (e.g. spring-cloud-kubernetes delegates to its own
+          # sharded maven.yaml) survives the sync untouched.
+          CARRIED=()
+          for f in .github/workflows/ci-release.yml release-ci-settings.xml; do
+            if git cat-file -e "commercial/${internal_branch}:${f}" 2>/dev/null; then
+              mkdir -p "$(dirname "$f")"
+              git show "commercial/${internal_branch}:${f}" > "$f"
+              git add "$f"
+              CARRIED+=("$f")
+            fi
+          done
+
+          if git diff --cached --quiet; then
+            echo "No internal-only files to carry forward — pushing ${oss_branch}'s tip directly."
+          else
+            git commit -m "Sync ${internal_branch} with ${oss_repo}@${oss_branch} (${oss_sha})"
+            echo "Carried forward: ${CARRIED[*]}"
+          fi
+
+          git push --force-with-lease commercial "HEAD:refs/heads/${internal_branch}"
+          echo "Synced ${internal_branch} in ${commercial_repo} to ${oss_repo}@${oss_branch} at $(git rev-parse HEAD)."
 
   # Initialise the -internal branch: commercial release CI files, projects.json
   # registration, and the -INTERNAL-SNAPSHOT version stamp.  All steps are idempotent so
