@@ -55,7 +55,7 @@ on:
           - oss
           - commercial
       maven_version:
-        description: 'Target Maven version (e.g. 3.9.16). When empty, the newest stable 3.9.x on Maven Central is used.'
+        description: 'Target Maven version (e.g. 3.9.16). When empty, the newest stable 3.x on Maven Central is used.'
         required: false
         type: string
         default: ''
@@ -164,12 +164,12 @@ jobs:
 
           // Maven Central's <latest> is currently a 4.0.0 release candidate, and Dependabot
           // itself stays on the stable line ("Filtered out 33 pre-release versions"), so the
-          // target is the newest stable 3.9.x rather than whatever <latest> happens to say.
+          // target is the newest stable 3.x rather than whatever <latest> happens to say.
           let maven = (process.env.MAVEN_INPUT || '').trim();
           if (!maven) {
             const all = versionsIn(fetchMeta(
               'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml'));
-            const stable = all.filter(v => /^3\.9\.\d+$/.test(v)).sort(cmp);
+            const stable = all.filter(v => /^3\.\d+\.\d+$/.test(v)).sort(cmp);
             maven = stable[stable.length - 1] || '';
           }
 

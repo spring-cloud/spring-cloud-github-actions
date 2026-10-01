@@ -284,9 +284,9 @@ prefix is preserved, so a repository pointing at a mirror keeps pointing at it.
 
 ## Target version selection
 
-With `maven_version` empty, the target is the **newest stable 3.9.x** on Maven Central, not
+With `maven_version` empty, the target is the **newest stable 3.x** on Maven Central, not
 Central's `<latest>` — which is currently `4.0.0-rc-6`. Dependabot itself stays on the stable
-line (its logs show *"Filtered out 33 pre-release versions"*), so tracking 3.9.x is what
+line (its logs show *"Filtered out 33 pre-release versions"*), so tracking the stable 3.x line is what
 actually keeps it quiet. Set `maven_version` explicitly to move to a 4.x line deliberately.
 
 > Verify any version you pin by hand actually exists. `3.9.19` looks plausible and does not
@@ -313,7 +313,7 @@ together or DCO fails.
 |-------|-------------|----------|---------|
 | `projects` | Comma-separated project names. Empty processes all of them. | No | `''` |
 | `repo_type` | `both`, `oss`, or `commercial` | No | `both` |
-| `maven_version` | Target Maven version. Empty uses the newest stable 3.9.x. | No | `''` |
+| `maven_version` | Target Maven version. Empty uses the newest stable 3.x. | No | `''` |
 | `wrapper_version` | Target `maven-wrapper` version. Empty uses the newest stable release. | No | `''` |
 | `auto_merge` | Merge existing wrapper PRs whose checks have all passed. **Manual runs only** — see [Auto-merge](#auto-merge) | No | `true` |
 | `merge_method` | `squash`, `merge`, or `rebase` | No | `squash` |
@@ -332,7 +332,7 @@ expressions decide rather than to the `default:` shown above. In full:
 | Mode | **Regenerates** the full wrapper | `regenerate` as chosen (on by default) |
 | Merges green PRs? | **No** | Yes, if `auto_merge` is left checked |
 | Scope | Every project, `oss` and `commercial` | As chosen |
-| Target versions | Newest stable 3.9.x and newest `maven-wrapper` | As chosen |
+| Target versions | Newest stable 3.x and newest `maven-wrapper` | As chosen |
 | `-internal` branches | Skipped | Skipped |
 
 So the weekly run regenerates wrappers across the estate and leaves the PRs for a human.
