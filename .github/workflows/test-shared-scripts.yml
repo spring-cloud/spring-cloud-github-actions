@@ -75,7 +75,8 @@ jobs:
           - workflow: update-maven-wrapper.yml
             min-blocks: 5
             exports: >-
-              gh-cli.js:ghRetry|
+              gh-cli.js:gh,ghRetry|
+              dependabot-ignore.js:pickMavenTarget|
               git-pr-helpers.js:readFileAt,createBranch,commitFilesToRef,findOpenPrByHeadPrefix,openPr|
               merge-if-green.js:mergeIfGreen|
               project-branch-matrix.js:buildBranchMatrix|

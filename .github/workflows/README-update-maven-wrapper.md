@@ -289,6 +289,41 @@ Central's `<latest>` — which is currently `4.0.0-rc-6`. Dependabot itself stay
 line (its logs show *"Filtered out 33 pre-release versions"*), so tracking the stable 3.x line is what
 actually keeps it quiet. Set `maven_version` explicitly to move to a 4.x line deliberately.
 
+### Respecting Dependabot ignores
+
+The newest 3.x is not always right for every branch: a branch can depend on a plugin that breaks on
+a newer Maven (Maven 3.10 made Maven Resolver reject cached artifacts whose origin repository is
+not in the request, which breaks `kotlin-maven-plugin` 1.6.x). The usual fix is an `ignore` for
+`org.apache.maven:apache-maven` under that branch's `target-branch` in `.github/dependabot.yml`,
+and this workflow reads the same rule so it does not open a PR Dependabot would never raise:
+
+```yaml
+- package-ecosystem: maven
+  directory: /
+  target-branch: 3.2.x
+  ignore:
+    - dependency-name: "org.apache.maven:apache-maven"
+      versions: [">=3.10.0"]
+```
+
+For each branch the workflow reads `dependabot.yml` from the repository's **default branch** (where
+Dependabot reads it), keeps the `maven` entries whose `target-branch` is that branch (or, with none
+set, the default branch) and whose `directory`/`directories` cover `/`, and moves the branch to the
+**newest stable 3.x that is not ignored**. In the example, `3.2.x` goes to the newest 3.9.x while
+every other branch goes to 3.10.0. If every version is ignored the branch is reported as
+`ignored-by-dependabot` and nothing is opened.
+
+Supported in `versions`: comparators (`>=3.10.0`, `>3`, `<4`, `<=3.9.9`, `=3.9.1`, `~> 3.9`, several
+joined by commas), Maven intervals (`[3.10,)`, `(,4.0)`), and wildcards (`3.x`, `3.10.*`).
+`update-types` (`version-update:semver-major|minor|patch`) is judged against the root wrapper's
+current Maven, and a rule with neither field ignores everything. A range in any other form is
+logged and ignored.
+
+It fails open. A missing `dependabot.yml`, an API failure, or a file that will not parse means no
+restriction, so the branch is updated as before. An already-open wrapper PR for an ignored version
+is left as it is and reported as `ignored-by-dependabot` — close it by hand. An explicit
+`maven_version` still goes through the same check.
+
 > Verify any version you pin by hand actually exists. `3.9.19` looks plausible and does not
 > exist — pointing `distributionUrl` at it would 404 on every build.
 
@@ -398,6 +433,7 @@ Set `auto_merge` to false to only open and update PRs and leave merging to a hum
 | `branch-exists` | The branch exists with no open PR — a previous PR was closed unmerged, so it is **left alone** rather than reopened |
 | `up-to-date` | Already on the target |
 | `ahead` | Newer than the target; never walked backwards |
+| `ignored-by-dependabot` | `dependabot.yml` ignores the newer Maven version(s) for this branch, so it stays where it is (or every version is ignored); an open PR for an ignored version is left for a human to close — see [Respecting Dependabot ignores](#respecting-dependabot-ignores) |
 | `no-wrapper` | No `maven-wrapper.properties` in any directory with a `pom.xml` |
 | `unparsed` | No `distributionUrl` on the branch matched the expected shape — needs a look |
 | `check-ok` | `check_only` — every wrapper file is readable by Dependabot |

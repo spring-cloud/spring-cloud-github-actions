@@ -86,6 +86,16 @@ independently — `update-maven-wrapper.yml`'s `versions` job, `maven-wrapper-pr
 own `cmp` (now a re-export of this module), and what would otherwise be a fourth copy for the
 Antora UI bundle's release tags in `antora-ui-bundle.js`.
 
+## `dependabot-ignore.js`
+
+Reads the `ignore` rules of a parsed `.github/dependabot.yml` so `update-maven-wrapper.yml` can
+hold a branch on the Maven versions Dependabot has been told to leave alone.
+`pickMavenTarget(config, { branch, defaultBranch, current, candidates, warn })` returns the newest
+candidate (ascending list) not ignored for that branch plus the newer ones it skipped and why;
+`findMavenIgnore` answers the same for one version, and `parseRange` turns a `versions` string
+(comparators, Maven intervals, `3.x` wildcards) into a predicate. Pure functions — fetching and
+YAML parsing (`yq`) stay in the workflow — and anything unreadable matches nothing.
+
 ## `gh-cli.js`
 
 `gh(args)`, `ghRetry(args, attempts)`, `ghJson(path, method, payload)`: the `execFileSync('gh',
