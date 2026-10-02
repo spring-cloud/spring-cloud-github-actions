@@ -131,6 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       maven: ${{ steps.resolve.outputs.maven }}
+      maven-candidates: ${{ steps.resolve.outputs.maven-candidates }}
       wrapper: ${{ steps.resolve.outputs.wrapper }}
     steps:
       # For .github/scripts/version-cmp.js, the dotted-numeric comparator shared with
@@ -165,12 +166,15 @@ jobs:
           // Maven Central's <latest> is currently a 4.0.0 release candidate, and Dependabot
           // itself stays on the stable line ("Filtered out 33 pre-release versions"), so the
           // target is the newest stable 3.x rather than whatever <latest> happens to say.
+          // Every stable 3.x is kept, not just the newest: a branch Dependabot is told to hold
+          // back (an ignore in dependabot.yml) moves to the newest one it has not ignored.
           let maven = (process.env.MAVEN_INPUT || '').trim();
+          let candidates = maven ? [maven] : [];
           if (!maven) {
             const all = versionsIn(fetchMeta(
               'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml'));
-            const stable = all.filter(v => /^3\.\d+\.\d+$/.test(v)).sort(cmp);
-            maven = stable[stable.length - 1] || '';
+            candidates = all.filter(v => /^3\.\d+\.\d+$/.test(v)).sort(cmp);
+            maven = candidates[candidates.length - 1] || '';
           }
 
           let wrapper = (process.env.WRAPPER_INPUT || '').trim();
@@ -189,6 +193,7 @@ jobs:
           console.log(`Target Maven: ${maven}`);
           console.log(`Target maven-wrapper: ${wrapper}`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `maven=${maven}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `maven-candidates=${JSON.stringify(candidates)}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `wrapper=${wrapper}\n`);
           JSEOF
 
@@ -268,11 +273,13 @@ jobs:
           WRAPPER_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/maven-wrapper-properties.js
           GH_CLI_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/gh-cli.js
           GIT_PR_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/git-pr-helpers.js
+          DEPENDABOT_IGNORE_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/dependabot-ignore.js
           REPO: ${{ matrix.repo }}
           BRANCH: ${{ matrix.branch }}
           PROJECT: ${{ matrix.project }}
           TYPE: ${{ matrix.type }}
           MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
+          MAVEN_CANDIDATES: ${{ needs.versions.outputs.maven-candidates }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
           # A scheduled run has no inputs, so `inputs.dry_run != false` would be true and the
           # weekly job would never actually do anything. Schedule therefore acts, while a
@@ -287,8 +294,13 @@ jobs:
 
           // The generic gh-CLI and git-data-API/PR mechanics - shared with
           // update-antora-ui-bundle.yml, which opens bot PRs the same way.
-          const { ghRetry } = require(process.env.GH_CLI_LIB);
+          const { gh, ghRetry } = require(process.env.GH_CLI_LIB);
           const PR = require(process.env.GIT_PR_LIB);
+          const { execFileSync } = require('child_process');
+
+          // The ignore rules in the repository's dependabot.yml, so a branch Dependabot has been
+          // told to hold on an older Maven is held here too.
+          const { pickMavenTarget } = require(process.env.DEPENDABOT_IGNORE_LIB);
 
           // Same rules the regenerate step applies against a real checkout - see the header of that
           // file for why they live outside this workflow.
@@ -296,7 +308,10 @@ jobs:
 
           const REPO = process.env.REPO;
           const BRANCH = process.env.BRANCH;
-          const MAVEN = process.env.MAVEN_VERSION;
+          // The newest stable Maven. `MAVEN`, below, is what *this branch* moves to, which is
+          // lower when dependabot.yml ignores the newest for it.
+          const NEWEST_MAVEN = process.env.MAVEN_VERSION;
+          let MAVEN = NEWEST_MAVEN;
           // In regenerate mode this step only decides *whether* work is needed and hands the
           // branch name to the steps below - the files are produced by the wrapper plugin
           // against a real checkout, which the contents API cannot do.
@@ -384,6 +399,64 @@ jobs:
             finish('check-ok', `all ${files.length} wrapper file(s) readable by Dependabot`, extra);
           }
 
+          // ── Which Maven does dependabot.yml let this branch have? ───────────────────────
+          // Read from the default branch (no ref), which is where Dependabot reads it from - a
+          // `target-branch` entry there is what pins an older branch. Any failure to read it
+          // means no restriction: the workflow's job is to keep wrappers current, so it fails
+          // open rather than stalling a branch on a flaky API call or an unparseable file.
+          const fetchRaw = path => {
+            const args = ['api', '-H', 'Accept: application/vnd.github.raw+json',
+              `repos/${REPO}/contents/${path}`];
+            let r = gh(args);
+            if (!r.ok && !/404|Not Found/i.test(r.err)) r = ghRetry(args);
+            return r;
+          };
+          const loadDependabotConfig = () => {
+            for (const path of ['.github/dependabot.yml', '.github/dependabot.yaml']) {
+              const r = fetchRaw(path);
+              if (r.ok) {
+                try {
+                  return JSON.parse(execFileSync('yq', ['-o=json', '.'],
+                    { input: r.out, encoding: 'utf8', maxBuffer: 1 << 26 }));
+                } catch (err) {
+                  console.log(`Could not parse ${path}: ${(err.message || '').split('\n')[0]}`);
+                  return null;
+                }
+              }
+              if (!/404|Not Found/i.test(r.err)) {
+                console.log(`Could not read ${path}: ${r.err}`);
+                return null;
+              }
+            }
+            return null;
+          };
+
+          let candidates = [];
+          try { candidates = JSON.parse(process.env.MAVEN_CANDIDATES || '[]'); } catch (e) { /* none */ }
+          let heldBack = null;
+          const dependabotConfig = candidates.length ? loadDependabotConfig() : null;
+          if (dependabotConfig) {
+            const def = ghRetry(['api', `repos/${REPO}`, '--jq', '.default_branch']);
+            const pick = pickMavenTarget(dependabotConfig, {
+              branch: BRANCH,
+              defaultBranch: def.ok ? def.out.trim() : '',
+              current: W.currentMaven((files.find(f => f.dir === '.') || files[0]).text),
+              candidates,
+              warn: msg => console.log(`dependabot.yml: ${msg}`),
+            });
+            if (pick.skipped.length) {
+              const why = `${pick.skipped.map(s => s.version).join(', ')} ignored by ${pick.skipped[0].reason}`;
+              if (!pick.target) {
+                finish('ignored-by-dependabot', why,
+                  { target: null, newest: NEWEST_MAVEN, truncated });
+              }
+              heldBack = { versions: pick.skipped.map(s => s.version), why };
+              console.log(`${REPO}@${BRANCH}: Maven ${pick.target} instead of ${NEWEST_MAVEN} - ${why}`);
+            }
+            MAVEN = pick.target;
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `maven-target=${MAVEN}\n`);
+
           // ── Work out what each file should become ───────────────────────────────────────
           // Per file, not per branch: a repository can be current at the root and years behind in a
           // submodule, which is exactly the state the estate was found in.
@@ -401,7 +474,7 @@ jobs:
           const changed = planned.filter(f => f.changed);
           const rootFile = planned.find(f => f.dir === '.') || planned[0];
           const current = rootFile.current;
-          const extras = { current, target: MAVEN, wrappers: planned.length,
+          const extras = { current, target: MAVEN, newest: NEWEST_MAVEN, heldBack, wrappers: planned.length,
             changedPaths: changed.map(f => f.path), truncated };
 
           // How the work reads in the summary and the PR title/body: one file names itself, several
@@ -424,6 +497,11 @@ jobs:
             }
             if (planned.some(f => f.ahead)) {
               finish('ahead', `Maven ${current} is newer than the target ${MAVEN}`, extras);
+            }
+            if (heldBack) {
+              finish('ignored-by-dependabot',
+                `Maven ${current} is the newest release allowed for this branch (latest is ${NEWEST_MAVEN}); ` +
+                heldBack.why, extras);
             }
             finish('up-to-date',
               `Maven ${current}` + (planned.length > 1 ? ` (${planned.length} wrapper files)` : ''),
@@ -476,6 +554,14 @@ jobs:
             const headPlan = plan(onHead);
             const headChanged = headPlan.filter(f => f.changed);
 
+            // A PR opened before the ignore existed (for the version now ignored) is already past
+            // this branch's target. It is left alone - closing it is a human decision - but it must
+            // not read as current, nor be offered for auto-merge.
+            if (heldBack && headPlan.some(f => f.ahead)) {
+              finish('ignored-by-dependabot',
+                `#${pr.number} is open for a Maven the branch is held below (${heldBack.why}) - close it`,
+                { ...extras, prUrl: pr.html_url });
+            }
             if (!headChanged.length) {
               finish('pr-open', `#${pr.number} already open for ${MAVEN}`,
                 { ...extras, prUrl: pr.html_url, prNumber: pr.number });
@@ -551,6 +637,10 @@ jobs:
             'resolve an unpublished SNAPSHOT parent POM, and it cannot parse the older ' +
             'wrapper formats.',
           ];
+          if (heldBack) {
+            prBody.push('',
+              `Maven ${heldBack.versions.join(', ')} is not used for \`${BRANCH}\`: ${heldBack.why}.`);
+          }
           if (moduleChanged.length) {
             prBody.push('',
               'Module wrappers are included because Dependabot reads the wrapper in the directory ' +
@@ -615,7 +705,8 @@ jobs:
           EXISTING_PR: ${{ steps.update.outputs.regenerate-pr }}
           CURRENT: ${{ steps.update.outputs.regenerate-current }}
           SAFE_NAME: ${{ steps.update.outputs.safe-name }}
-          MAVEN_VERSION: ${{ needs.versions.outputs.maven }}
+          # Per branch: lower than the newest when dependabot.yml ignores the newest for it.
+          MAVEN_VERSION: ${{ steps.update.outputs.maven-target || needs.versions.outputs.maven }}
           WRAPPER_VERSION: ${{ needs.versions.outputs.wrapper }}
           WRAPPER_TYPE: ${{ inputs.wrapper_type || 'bin' }}
           WRAPPER_LIB: ${{ github.workspace }}/ci-actions/.github/scripts/maven-wrapper-properties.js
@@ -964,6 +1055,10 @@ jobs:
           // ── Update mode ───────────────────────────────────────────────────────────────────
           md.push(`Target Maven **${process.env.MAVEN_VERSION}**, ` +
             `maven-wrapper **${process.env.WRAPPER_VERSION}**.`, '');
+          if (of('ignored-by-dependabot').length) {
+            md.push('Branches marked `ignored-by-dependabot` are held below the target because ' +
+              'the repository\'s `dependabot.yml` ignores that Maven version for them.', '');
+          }
           if (dry) {
             md.push('> **Dry run** — no branches or pull requests were created. ' +
               'Re-run with `dry_run` unchecked to open them.', '');
@@ -977,6 +1072,7 @@ jobs:
             `**${of('would-open').length + of('would-update-pr').length}** would change, ` +
             `**${of('pr-open').length}** already current, ` +
             `**${of('up-to-date').length}** up to date, ` +
+            `**${of('ignored-by-dependabot').length}** held by Dependabot ignores, ` +
             `**${of('error').length}** error(s).`, '');
 
           // Module wrappers are the whole reason this workflow stopped being a one-file edit, so how
