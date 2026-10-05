@@ -43,6 +43,17 @@ rather than there being one canonical file on the default branch. Branches that 
 Antora adoption have no such file at all; those are reported as `no-playbook` rather than an
 error.
 
+## The `docs-build` playbook
+
+Every Antora project also keeps a repo-wide `docs-build` branch whose root
+`antora-playbook.yml` pins the same UI bundle URL. It is one branch per repository (not one
+per maintained branch), so `setup` adds one extra matrix entry per repository —
+`branch: docs-build`, `playbook_path: antora-playbook.yml` — and the `update` job handles it
+through the same PR flow, statuses, auto-merge and notification as the per-branch playbooks.
+The PR head is `antora-ui-bundle-update/docs-build-<tag>`. Either `.yml` or `.yaml` is accepted (`.yml` first), for both kinds of playbook. A repository with no
+playbook on `docs-build` is reported as `no-playbook`. The `-internal` exclusion
+does not apply.
+
 ### What is out of scope
 
 - **`-internal` branches are skipped**, for the same reason

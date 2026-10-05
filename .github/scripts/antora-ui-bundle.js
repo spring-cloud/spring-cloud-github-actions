@@ -8,12 +8,25 @@ const { cmp } = require('./version-cmp');
 // such file at all.
 const PLAYBOOK_PATH = 'docs/antora-playbook.yml';
 
+// Every Antora project also keeps a repo-wide `docs-build` branch whose root
+// antora-playbook.yml pins the same UI bundle URL (same shape, so extractBundle/rewrite apply
+// unchanged). It is one branch per repository rather than one per maintained branch.
+const DOCS_BUILD_BRANCH = 'docs-build';
+const DOCS_BUILD_PLAYBOOK_PATH = 'antora-playbook.yml';
+
 // Matches the UI bundle download URL wherever it appears in the file - matched by shape (a
 // GitHub release asset download link) rather than by indentation under ui:/bundle:/url:,
 // the same way currentMaven() in maven-wrapper-properties.js matches distributionUrl by
 // shape rather than by position.
 const BUNDLE_URL =
   /https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/releases\/download\/([^/\s]+)\/([^\s'"]+)/;
+
+// The path itself, then the same path with the other YAML extension - a playbook may be
+// named either antora-playbook.yml or antora-playbook.yaml.
+function playbookCandidates(path) {
+  const alt = path.endsWith('.yml') ? path.replace(/\.yml$/, '.yaml') : path.replace(/\.yaml$/, '.yml');
+  return alt === path ? [path] : [path, alt];
+}
 
 // { repo, tag, url } for the UI bundle release this playbook currently points at, or null
 // when no release-download URL is present at all.
@@ -33,4 +46,4 @@ function rewrite(text, { repo, tag }) {
   return text.replace(current.url, newUrl);
 }
 
-module.exports = { PLAYBOOK_PATH, extractBundle, rewrite, cmp };
+module.exports = { PLAYBOOK_PATH, DOCS_BUILD_BRANCH, DOCS_BUILD_PLAYBOOK_PATH, playbookCandidates, extractBundle, rewrite, cmp };
