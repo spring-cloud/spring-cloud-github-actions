@@ -581,27 +581,43 @@ The merge-back still runs: `release/<version>` merges into the commercial `.x` l
 ## Hotfixes
 
 **[`create-hotfix-release-branch.yml`](../.github/workflows/README-create-hotfix-branch.md)**
-cuts a commercial hotfix directly from an **OSS tag**.
+cuts a commercial hotfix release branch. By default it forks the **`-internal` branch**,
+preserving real git history; setting `use_tag` falls back to the workflow's original
+behaviour of branching from an **OSS tag** as an orphan copy.
 
-| | Normal release | Hotfix |
-|---|---|---|
-| Source | a branch (`main`, `4.2.x`) | a **tag** (`v5.0.1`) |
-| Branch | `release/<pom-version>` | `release/<version>.1` (`v5.0.1` → `release/5.0.1.1`) |
-| Mechanism | full-history `-internal` branch, then refs-API cut | orphan branch via `initialize-commercial-branch`, no `-internal` branch |
-| History | preserved | discarded — `trigger-ci` squashes to a single root commit and force-pushes |
-| Version stamping | stays `-INTERNAL-SNAPSHOT` until readiness | explicit `<current>.1-SNAPSHOT` immediately, before join |
-| `deployment-destination` | `Maven Central` or `Spring Enterprise` | always `Spring Enterprise` |
-| Milestone | OSS repo | commercial repo |
+The hotfix version is never passed in — it's looked up from this project's own
+`releaser.fixed-versions[<project>]` entry in the `release_train_version`'s properties file
+(`spring-cloud-release-commercial@jenkins-releaser-config`), the same file
+[`create-oss-release-branch.yml`](#the-oss-release-end-to-end) reads for a normal release.
+
+| | Normal release | Hotfix (default) | Hotfix (`use_tag`) |
+|---|---|---|---|
+| Source | a branch (`main`, `4.2.x`) | the commercial repo's `-internal` branch | an OSS **tag** (`v5.0.4`) |
+| Branch | `release/<pom-version>` | `release/<hotfix-version>` (`5.0.4.1` → `release/5.0.4.1`) | `release/<hotfix-version>` |
+| Mechanism | full-history `-internal` branch, then refs-API cut | refs-API cut from `-internal`, same mechanism as a normal release | orphan branch via `initialize-commercial-branch`, no `-internal` branch |
+| History | preserved | preserved | discarded — `trigger-ci` squashes to a single root commit and force-pushes |
+| Pre-flight check | — | `-internal`'s pom.xml must already be at `<major>.<minor>.<patch>-INTERNAL-SNAPSHOT`, or the job fails | — |
+| Commercial customisation | full `initialize-commercial-branch` suite | only `add-commercial-release-files` (retargeted `ci-release.yml`) + license headers — `-internal` doesn't carry the rest, but `ci-release.yml`/`release-ci-settings.xml` already cover the deploy target | full `initialize-commercial-branch` suite |
+| `config/projects.json` | scheduled (`-internal`), not registered (`release/<version>`) | registered — a hotfix branch's CI can fail independently of `-internal`'s; removed by `spring-release-train-project-ready` once the hotfix ships | registered (as it always has been) |
+| Version stamping | stays `-INTERNAL-SNAPSHOT` until readiness | explicit `<hotfix-version>-SNAPSHOT` immediately, before join | explicit `<hotfix-version>-SNAPSHOT` immediately, before join |
+| `deployment-destination` | `Maven Central` or `Spring Enterprise` | always `Spring Enterprise` | always `Spring Enterprise` |
+| Milestone | OSS repo | commercial repo | commercial repo |
 
 ```mermaid
 flowchart TD
-    TAG(["<b>OSS tag</b><br/>v5.0.1"]) --> DERIVE
+    TRAIN(["<b>release_train_version</b><br/>2025.1.2"]) --> DERIVE
 
-    DERIVE["<b>derive</b><br/>version 5.0.1 → release/5.0.1.1<br/>always a .1 patch suffix"] --> INIT
+    DERIVE["<b>derive</b><br/>releaser.fixed-versions[project] → 5.0.4.1<br/>→ release/5.0.4.1, 5.0.x-internal,<br/>expected 5.0.4-INTERNAL-SNAPSHOT"] --> VALIDATE
+
+    VALIDATE{"<b>validate-internal-branch</b><br/>-internal pom.xml ==<br/>5.0.4-INTERNAL-SNAPSHOT?<br/><i>skipped when use_tag</i>"} -->|no, use_tag| INIT
+    VALIDATE -->|yes| CIRB
+    VALIDATE -->|no, fails| FAIL(["Workflow fails —<br/>-internal is out of date"])
 
     INIT["<b>initialize</b><br/>calls initialize-commercial-branch<br/>with oss_tag<br/><i>orphan branch — no history</i>"] --> UV
 
-    UV["<b>update-versions</b><br/>stamp 5.0.1.1-SNAPSHOT now,<br/><i>not INTERNAL-SNAPSHOT later</i>"] --> MS
+    CIRB["<b>create-internal-release-branch</b><br/>refs-API cut from -internal tip,<br/>retarget ci-release.yml,<br/>license headers, projects.json"] --> UV
+
+    UV["<b>update-versions</b><br/>stamp 5.0.4.1-SNAPSHOT now,<br/><i>not INTERNAL-SNAPSHOT later</i>"] --> MS
 
     MS["<b>create-milestone</b><br/>in the <b>commercial</b> repo"] --> EW
 
@@ -609,7 +625,7 @@ flowchart TD
 
     JOIN["<b>release-train-join</b> (generated)<br/><b>deployment-destination =<br/>Spring Enterprise</b> — always"] --> TCI
 
-    TCI["<b>trigger-ci</b><br/>squash all [skip actions] commits<br/>into one root commit,<br/><i>force-push --force-with-lease</i>"] --> MR
+    TCI["<b>trigger-ci</b><br/>use_tag: re-orphan, force-push<br/>default: soft-reset to fork point,<br/>squash on top, force-push"] --> MR
 
     MR["<b>spring-io/release-train</b><br/>meta-release: build, tag, deploy"] --> PRH
 
@@ -619,10 +635,10 @@ flowchart TD
     classDef ext fill:#fee2e2,stroke:#ef4444,color:#7f1d1d
     classDef warn fill:#fef9c3,stroke:#eab308,color:#713f12
     classDef term fill:#f1f5f9,stroke:#64748b,color:#0f172a
-    class DERIVE,INIT,UV,MS,EW,PRH here
+    class DERIVE,VALIDATE,INIT,CIRB,UV,MS,EW,PRH here
     class JOIN,MR ext
     class TCI warn
-    class TAG,DONE term
+    class TRAIN,DONE,FAIL term
 ```
 
 ### Inputs
@@ -630,51 +646,52 @@ flowchart TD
 | Input | Required | Notes |
 |---|---|---|
 | `oss_repo` | yes | e.g. `spring-cloud-stream` — the commercial repo is always this plus `-commercial` |
-| `oss_tag` | yes | e.g. `v5.0.1` |
+| `release_train_version` | yes | e.g. `2025.1.2` — its `jenkins-releaser-config` properties file names this project's hotfix version and supplies dependency versions |
+| `use_tag` | no | Branch from an OSS tag (`v<major>.<minor>.<patch>`) instead of the `-internal` branch. Default `false` |
 | `spring_release_train` | no | The Spring release train this hotfix joins. Supplying it joins that train; leave it empty to prepare the branch without joining |
-| `project_version` | no | Override the auto-computed `<current>.1-SNAPSHOT` |
-| `release_train_version` | no | When set, dependency versions are pulled from that Spring Cloud train's properties file |
-| `versions` | no | JSON map of explicit dependency versions, e.g. `{"spring-boot":"3.3.0"}`. **Mutually exclusive** with `release_train_version` |
+| `versions` | no | JSON map of dependency versions applied on top of the release train's, e.g. `{"spring-boot":"3.3.0"}` |
 | `sha` | no | Commit of *this* repo to copy release-train action files from |
 
-### The seven jobs
+### The jobs
 
 | Job | Line | What it does |
 |---|---|---|
-| `derive` | `:109` | Strip the leading `v`, append `.1`, prefix `release/` — `v5.0.1` → `release/5.0.1.1`. Done in shell because Actions expressions have no string-replace function |
-| `initialize` | `:138` | Calls `initialize-commercial-branch.yml` with `oss_tag` (not `oss_branch`) and `set_default_branch: false`, `secrets: inherit`. Produces an **orphan** branch carrying the commercial setup — Broadcom license headers, commercial Artifactory repositories and `<distributionManagement>`, restricted CI/PR workflows, `.settings.xml`, Antora playbook and `projects.json` entries — and none of the OSS history |
-| `update-versions` | `:149` | Clone the new branch, read the root pom version with Python's `ElementTree` (handles optional XML namespace prefixes), compute `<current>.1-SNAPSHOT`. If `release_train_version` was given, first apply that train's dependency versions with `commercial: 'true'`; then **always** stamp the project version, since that first pass would otherwise leave the train's version on the project. Commit `[skip actions]` |
-| `create-milestone` | `:237` | Milestone in the **commercial** repo — not the OSS repo, unlike every other flow |
-| `ensure-workflows` | `:251` | Check the branch with the shared [`check-release-train-workflows`](../.github/actions/check-release-train-workflows/) action; run the generator only if it reports something missing. Also resolves the primary JDK from `projects.json` — looking up `commercial.jdkVersions[release/<version>]`, which `initialize` populated — falling back to the commercial default, then the global default, warning at each step |
-| `trigger-release-train-join` | `:329` | Always `deployment-destination=Spring Enterprise`, then `gh run watch --exit-status` |
-| `trigger-ci` | `:364` | Re-orphan, commit the whole tree as `Initialize hotfix branch`, force-push |
+| `derive` | `:104` | Reads the OSS repo's root `pom.xml` `artifactId` to detect the project name, fetches `releaser.fixed-versions[<project>]` from the release train's properties file to get the hotfix version (e.g. `5.0.4.1`), and splits it into `release/<version>`, `<major>.<minor>.x-internal`, the expected `-INTERNAL-SNAPSHOT` version, and (for `use_tag`) `v<major>.<minor>.<patch>` |
+| `validate-internal-branch` | `:212` | Fetches `pom.xml` from the `-internal` branch via the contents API and fails the workflow if its version doesn't exactly match `derive`'s expected `-INTERNAL-SNAPSHOT` version. A no-op when `use_tag` is set |
+| `initialize` | `:250` | `use_tag` only. Calls `initialize-commercial-branch.yml` with `oss_tag` (not `oss_branch`) and `set_default_branch: false`, `secrets: inherit`. Produces an **orphan** branch carrying the commercial setup — Broadcom license headers, commercial Artifactory repositories and `<distributionManagement>`, restricted CI/PR workflows, `.settings.xml`, Antora playbook and `projects.json` entries — and none of the OSS history |
+| `create-internal-release-branch` | `:273` | Default path only. Forks `release/<version>` from the `-internal` branch's tip via the same refs-API cut `create-oss-release-branch.yml` uses, preserving history. Then runs only `add-commercial-release-files` (retargeting the inherited `ci-release.yml`), `update-license-headers`, and `update-projects-json` — no settings.xml/workflow-rewrite/distribution-management, since `ci-release.yml`/`release-ci-settings.xml` already cover the commercial deploy target |
+| `update-versions` | `:334` | Clone the new branch. If `release_train_version` was given, first apply that train's dependency versions with `commercial: 'true'`; then **always** stamp the project version to `derive`'s pre-computed `<hotfix-version>-SNAPSHOT`, since that first pass would otherwise leave the train's version on the project. Commit `[skip actions]` |
+| `create-milestone` | `:390` | Milestone in the **commercial** repo — not the OSS repo, unlike every other flow |
+| `ensure-workflows` | `:404` | Check the branch with the shared [`check-release-train-workflows`](../.github/actions/check-release-train-workflows/) action; run the generator only if it reports something missing. Also resolves the primary JDK from `projects.json` — looking up `commercial.jdkVersions[release/<version>]`, which branch creation populated — falling back to the commercial default, then the global default, warning at each step |
+| `trigger-release-train-join` | `:482` | Always `deployment-destination=Spring Enterprise`, then `gh run watch --exit-status` |
+| `trigger-ci` | `:512` | `use_tag`: re-orphan, commit the whole tree as `Initialize hotfix branch`, force-push. Default: soft-reset to the `-internal` fork point, squash only the initialisation commits on top, force-push — history at and before the fork point is untouched |
 
 ### Two jobs worth a closer look
 
-**`initialize` produces an orphan branch.** A hotfix carries none of the project's git history —
-`git log` on `release/5.0.1.1` shows a single commit. The diff against the tag it came from is
-the entire branch. This is inherited from `create-commercial-branch`, which orphans deliberately
-so OSS history never lands in a commercial repo.
+**`use_tag`'s `initialize` produces an orphan branch.** A hotfix created this way carries none
+of the project's git history — `git log` on `release/5.0.4.1` shows a single commit. The diff
+against the tag it came from is the entire branch. This is inherited from
+`create-commercial-branch`, which orphans deliberately so OSS history never lands in a
+commercial repo.
 
-**`trigger-ci` rewrites history.** It re-orphans the branch to collapse the `[skip actions]`
-setup commits into one root commit, then force-pushes with
+**`trigger-ci` rewrites history differently per path.** For `use_tag`, it re-orphans the branch
+to collapse the `[skip actions]` setup commits into one root commit, then force-pushes with
 `--force-with-lease="<branch>:<captured-sha>"`
-([`create-hotfix-release-branch.yml:385-392`](../.github/workflows/create-hotfix-release-branch.yml)),
-so a concurrent update to the branch aborts the push rather than being silently overwritten. The
+([`create-hotfix-release-branch.yml:519-550`](../.github/workflows/create-hotfix-release-branch.yml)),
+so a concurrent update to the branch aborts the push rather than being silently overwritten. For
+the default path, it instead does `git reset --soft "$BASE_SHA"` to the SHA `-internal` was
+forked at, squashing only the commits added on top and leaving `-internal`'s own history intact
+underneath — exactly `create-oss-release-branch.yml`'s `trigger-ci` job for a normal release —
+so `release/<version>` can later be rebased onto an updated `-internal` branch. Either way the
 push deliberately omits `[skip actions]`, which is what starts CI.
 
 ### Version stamping is the real difference
 
 A normal release leaves versions alone until `spring-release-train-project-ready` stamps them.
-A hotfix stamps immediately, in `update-versions`, before the train is even joined. Three ways
-to control what it stamps:
-
-- **Default** — `<current pom version>.1-SNAPSHOT`. So a branch cut from `v5.0.1` whose pom says
-  `5.0.1` becomes `5.0.1.1-SNAPSHOT`.
-- **`project_version`** — an explicit override, replacing the computed value.
-- **`release_train_version` or `versions`** — update *dependency* versions too, either from a
-  train's properties file or from an inline JSON map. The project version is stamped afterward
-  either way, so a train pass cannot leave the train's version on the project.
+A hotfix stamps immediately, in `update-versions`, before the train is even joined, always to
+the version `derive` computed from the release train's properties file (`<hotfix-version>-SNAPSHOT`).
+`versions` can still supply additional dependency version overrides on top, applied in the same
+pass as the project-version stamp.
 
 ### Post-release for a hotfix
 

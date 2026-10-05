@@ -135,5 +135,5 @@ retired and frozen stays locked when the freeze is lifted.
 ## Related workflows
 
 - [`create-commercial-branch.yml`](README-create-commercial-branch.md) — creates a new commercial branch
-- [`create-hotfix-release-branch.yml`](README-create-hotfix-branch.md) — creates a hotfix branch from an OSS tag
+- [`create-hotfix-release-branch.yml`](README-create-hotfix-branch.md) — creates a hotfix branch, by default forked from the `-internal` branch
 - [`lock-unlock-branches.yml`](README-lock-branches.md) — temporarily freezes branches during a release, via a separate ruleset

@@ -1,15 +1,31 @@
 name: Create Hotfix Release Branch
 
-# Creates a commercial hotfix release branch directly from an OSS tag.
+# Creates a commercial hotfix release branch. By default it is cut from the tip of the
+# commercial repo's <major>.<minor>.x-internal branch, preserving its full git history so
+# the hotfix branch can later be rebased onto an updated -internal branch. Setting use_tag
+# instead creates it from an OSS tag, as an orphan branch with no shared history (today's
+# original behaviour) — full commercial customisation, squashed to a single commit.
 #
-# The commercial repo is always the OSS repo with -commercial appended.
-# The release branch is named release/<version>.1, derived from the tag by
-# stripping the leading 'v' and appending '.1'  (e.g. v5.0.1 -> release/5.0.1.1).
+# The commercial repo is always the OSS repo with -commercial appended. The hotfix version
+# (e.g. 5.0.4.1) is looked up from this project's own entry in the release train's
+# jenkins-releaser-config properties file (releaser.fixed-versions[<project>]), keyed by
+# release_train_version. That release train is always still unfinalized when a hotfix
+# branch is cut, so the looked-up value always carries a -SNAPSHOT qualifier (e.g.
+# 5.0.4.1-SNAPSHOT) - derive strips it before validating and using the version. From that
+# version:
+#   - the release branch is release/<version>                       (e.g. release/5.0.4.1)
+#   - the internal branch is <major>.<minor>.x-internal              (e.g. 5.0.x-internal)
+#   - the internal branch's pom.xml is expected to already be at
+#     <major>.<minor>.<patch>-INTERNAL-SNAPSHOT                      (e.g. 5.0.4-INTERNAL-SNAPSHOT)
+#   - the OSS tag, used only when use_tag is set, is v<major>.<minor>.<patch> (e.g. v5.0.4)
 #
-# After the branch is initialised, the project version is stamped to
-# <current-version>.1-SNAPSHOT (e.g. 5.0.1 -> 5.0.1.1-SNAPSHOT).
-# Optionally, dependency versions can be updated from a release train or an
-# explicit project-version override can be supplied.
+# Before branching from -internal, the workflow validates that the -internal branch's
+# pom.xml version matches the expected -INTERNAL-SNAPSHOT version above. If it doesn't, the
+# -internal branch is out of date and the workflow fails before making any changes.
+#
+# After the branch is initialised, the project version is stamped to <version>-SNAPSHOT
+# (e.g. 5.0.4.1-SNAPSHOT), and dependency versions are updated from the release train.
+# Optionally, an explicit versions override can be supplied on top.
 # Finally, release-train-join.yml is triggered in the commercial repo, when a
 # spring_release_train is supplied — leaving that input empty prepares the branch
 # and stops short of joining.
@@ -21,27 +37,22 @@ on:
         description: 'Open source repository name in the spring-cloud org (e.g. spring-cloud-stream)'
         required: true
         type: string
-      oss_tag:
-        description: 'OSS tag to create the hotfix branch from (e.g. v5.0.1)'
+      release_train_version:
+        description: "Release train version (e.g. 2025.1.2) whose jenkins-releaser-config properties file names this project's hotfix version and supplies dependency versions"
         required: true
         type: string
+      use_tag:
+        description: 'Create the branch from an OSS tag (v<major>.<minor>.<patch>) instead of the <major>.<minor>.x-internal branch'
+        required: false
+        type: boolean
+        default: false
       spring_release_train:
         description: 'Spring release train this hotfix is part of (e.g. 2026.1). Supplying it joins that train once the branch is prepared; leave it empty to prepare the branch without joining.'
         required: false
         type: string
         default: ''
-      project_version:
-        description: 'Override the auto-computed hotfix project version (default: <current-version>.1-SNAPSHOT)'
-        required: false
-        type: string
-        default: ''
-      release_train_version:
-        description: 'Release train version (e.g. 2025.0.1) — when supplied, dependency versions are updated from the Spring Cloud release train'
-        required: false
-        type: string
-        default: ''
       versions:
-        description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0","spring-cloud-commons":"4.1.1"}). Mutually exclusive with release_train_version.'
+        description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0","spring-cloud-commons":"4.1.1"}), applied on top of the release train dependency versions'
         required: false
         type: string
         default: ''
@@ -57,27 +68,22 @@ on:
         description: 'Open source repository name in the spring-cloud org (e.g. spring-cloud-stream)'
         required: true
         type: string
-      oss_tag:
-        description: 'OSS tag to create the hotfix branch from (e.g. v5.0.1)'
+      release_train_version:
+        description: "Release train version (e.g. 2025.1.2) whose jenkins-releaser-config properties file names this project's hotfix version and supplies dependency versions"
         required: true
         type: string
+      use_tag:
+        description: 'Create the branch from an OSS tag (v<major>.<minor>.<patch>) instead of the <major>.<minor>.x-internal branch'
+        required: false
+        type: boolean
+        default: false
       spring_release_train:
         description: 'Spring release train this hotfix is part of (e.g. 2026.1). Supplying it joins that train once the branch is prepared; leave it empty to prepare the branch without joining.'
         required: false
         type: string
         default: ''
-      project_version:
-        description: 'Override the auto-computed hotfix project version (default: <current-version>.1-SNAPSHOT)'
-        required: false
-        type: string
-        default: ''
-      release_train_version:
-        description: 'Release train version (e.g. 2025.0.1) — when supplied, dependency versions are updated from the Spring Cloud release train'
-        required: false
-        type: string
-        default: ''
       versions:
-        description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0"}). Mutually exclusive with release_train_version.'
+        description: 'JSON map of dependency versions to apply (e.g. {"spring-boot":"3.3.0"}), applied on top of the release train dependency versions'
         required: false
         type: string
         default: ''
@@ -95,59 +101,255 @@ permissions:
   contents: read
 
 jobs:
-  # Strip the leading 'v' from the tag, append '.1', and prefix with 'release/'
-  # to form the commercial release branch name (e.g. v5.0.1 -> release/5.0.1.1).
-  # GitHub Actions expressions have no replace/substring function so this needs
-  # a shell step.
+  # Looks up this project's hotfix version from the release train's releaser config, and
+  # derives every other branch/version name from it. GitHub Actions expressions have no
+  # replace/substring/split function so this needs a shell step.
   derive:
     runs-on: ubuntu-latest
     outputs:
-      commercial_repo:    ${{ steps.derive.outputs.commercial_repo }}
-      commercial_branch:  ${{ steps.derive.outputs.commercial_branch }}
-      commercial_project: ${{ steps.derive.outputs.commercial_project }}
-      commercial_version: ${{ steps.derive.outputs.commercial_version }}
+      commercial_repo:           ${{ steps.derive.outputs.commercial_repo }}
+      commercial_branch:         ${{ steps.derive.outputs.commercial_branch }}
+      commercial_project:        ${{ steps.derive.outputs.commercial_project }}
+      commercial_version:        ${{ steps.derive.outputs.commercial_version }}
+      internal_branch:           ${{ steps.derive.outputs.internal_branch }}
+      expected_internal_version: ${{ steps.derive.outputs.expected_internal_version }}
+      oss_tag:                   ${{ steps.derive.outputs.oss_tag }}
+      auto_version:              ${{ steps.derive.outputs.auto_version }}
     steps:
-      - name: Derive commercial repo and branch from tag
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Look up hotfix version and derive branch names
         id: derive
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
         run: |
           OSS_REPO="spring-cloud/${{ inputs.oss_repo }}"
-          OSS_TAG="${{ inputs.oss_tag }}"
           COMMERCIAL_REPO="${OSS_REPO}-commercial"
           COMMERCIAL_PROJECT="${COMMERCIAL_REPO#spring-cloud/}"
-          # strip leading 'v', append '.1', prefix with 'release/'  (v5.0.1 -> release/5.0.1.1)
-          COMMERCIAL_BRANCH="release/${OSS_TAG#v}.1"
-          COMMERCIAL_VERSION="${COMMERCIAL_BRANCH#release/}"
-          echo "commercial_repo=${COMMERCIAL_REPO}"         >> "$GITHUB_OUTPUT"
-          echo "commercial_branch=${COMMERCIAL_BRANCH}"     >> "$GITHUB_OUTPUT"
-          echo "commercial_project=${COMMERCIAL_PROJECT}"   >> "$GITHUB_OUTPUT"
-          echo "commercial_version=${COMMERCIAL_VERSION}"   >> "$GITHUB_OUTPUT"
-          echo "OSS repo:           $OSS_REPO"
-          echo "OSS tag:            $OSS_TAG"
-          echo "Commercial repo:    $COMMERCIAL_REPO"
-          echo "Commercial project: $COMMERCIAL_PROJECT"
-          echo "Commercial branch:  $COMMERCIAL_BRANCH"
+          RELEASE_TRAIN_VERSION="${{ inputs.release_train_version }}"
+
+          # Detect the project name from the OSS repo's root pom.xml artifactId, the same
+          # way update-project-versions/src/index.js's detectProjectName does.
+          ARTIFACT_ID=$(gh api "repos/${OSS_REPO}/contents/pom.xml" --jq '.content' | base64 -d | python3 -c "
+          import xml.etree.ElementTree as ET, sys
+          root = ET.parse('/dev/stdin').getroot()
+          ns = (root.tag.split('}')[0] + '}') if '}' in root.tag else ''
+          a = root.find(f'{ns}artifactId')
+          print(a.text.strip() if a is not None else '', end='')
+          ")
+          if [[ -z "$ARTIFACT_ID" ]]; then
+            echo "ERROR: could not read artifactId from ${OSS_REPO}'s root pom.xml."
+            exit 1
+          fi
+          PROJECT_NAME=$(echo "$ARTIFACT_ID" | sed -E 's/-dependencies$//; s/-parent$//')
+          echo "Artifact ID:  $ARTIFACT_ID"
+          echo "Project name: $PROJECT_NAME"
+
+          # Fetch this project's fixed version for the release train from
+          # spring-cloud-release-commercial@jenkins-releaser-config.
+          CONFIG_FILE=$(node .github/scripts/releaser-config-file.js "$RELEASE_TRAIN_VERSION")
+          CONFIG_URL="https://raw.githubusercontent.com/spring-cloud/spring-cloud-release-commercial/jenkins-releaser-config/${CONFIG_FILE}"
+          echo "Fetching releaser config from ${CONFIG_URL}"
+          HTTP_STATUS=$(curl -s -o /tmp/releaser-config.properties -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" "$CONFIG_URL")
+          if [[ "$HTTP_STATUS" != "200" ]]; then
+            echo "ERROR: failed to fetch releaser config from ${CONFIG_URL} (HTTP ${HTTP_STATUS})."
+            exit 1
+          fi
+
+          HOTFIX_VERSION=$(PROJECT_NAME="$PROJECT_NAME" python3 -c "
+          import os, re
+          project = os.environ['PROJECT_NAME']
+          with open('/tmp/releaser-config.properties') as f:
+              content = f.read()
+          for line in content.split('\n'):
+              m = re.match(r'^releaser\.fixed-versions\[([^\]]+)\]=(.+)\$', line)
+              if m and m.group(1).strip() == project:
+                  print(m.group(2).strip(), end='')
+                  break
+          ")
+          if [[ -z "$HOTFIX_VERSION" ]]; then
+            echo "ERROR: project '${PROJECT_NAME}' was not found in the releaser config for release train ${RELEASE_TRAIN_VERSION}."
+            echo "Ensure the root pom.xml artifactId matches a key in the properties file."
+            exit 1
+          fi
+          echo "Hotfix version: $HOTFIX_VERSION"
+
+          # The releaser config is for a release train that hasn't been finalized yet, so
+          # every fixed version in it - including this project's - still carries a
+          # -SNAPSHOT qualifier (e.g. 5.0.4.1-SNAPSHOT). That is the expected shape for a
+          # hotfix branch creation, not an error: strip it before validating the remaining
+          # major.minor.patch.hotfix segments are numeric.
+          HOTFIX_VERSION="${HOTFIX_VERSION%-SNAPSHOT}"
+
+          # A hotfix version has exactly 4 numeric segments: major.minor.patch.hotfix
+          IFS='.' read -r MAJOR MINOR PATCH HOTFIX_NUM EXTRA <<< "$HOTFIX_VERSION"
+          if [[ -z "$MAJOR" || -z "$MINOR" || -z "$PATCH" || -z "$HOTFIX_NUM" || -n "$EXTRA" \
+                || ! "${MAJOR}${MINOR}${PATCH}${HOTFIX_NUM}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: '${HOTFIX_VERSION}' is not a 4-segment hotfix version (major.minor.patch.hotfix)."
+            exit 1
+          fi
+
+          INTERNAL_BRANCH="${MAJOR}.${MINOR}.x-internal"
+          EXPECTED_INTERNAL_VERSION="${MAJOR}.${MINOR}.${PATCH}-INTERNAL-SNAPSHOT"
+          OSS_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          COMMERCIAL_BRANCH="release/${HOTFIX_VERSION}"
+          AUTO_VERSION="${HOTFIX_VERSION}-SNAPSHOT"
+
+          echo "commercial_repo=${COMMERCIAL_REPO}"                     >> "$GITHUB_OUTPUT"
+          echo "commercial_branch=${COMMERCIAL_BRANCH}"                 >> "$GITHUB_OUTPUT"
+          echo "commercial_project=${COMMERCIAL_PROJECT}"               >> "$GITHUB_OUTPUT"
+          echo "commercial_version=${HOTFIX_VERSION}"                   >> "$GITHUB_OUTPUT"
+          echo "internal_branch=${INTERNAL_BRANCH}"                     >> "$GITHUB_OUTPUT"
+          echo "expected_internal_version=${EXPECTED_INTERNAL_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "oss_tag=${OSS_TAG}"                                     >> "$GITHUB_OUTPUT"
+          echo "auto_version=${AUTO_VERSION}"                           >> "$GITHUB_OUTPUT"
+
+          echo "OSS repo:                  $OSS_REPO"
+          echo "Commercial repo:           $COMMERCIAL_REPO"
+          echo "Commercial project:        $COMMERCIAL_PROJECT"
+          echo "Commercial branch:         $COMMERCIAL_BRANCH"
+          echo "Internal branch:           $INTERNAL_BRANCH"
+          echo "Expected internal version: $EXPECTED_INTERNAL_VERSION"
+          echo "OSS tag (use_tag only):    $OSS_TAG"
+          echo "Auto version:              $AUTO_VERSION"
+
+  # Fails before any branch is touched if the -internal branch's pom.xml version doesn't
+  # match the base version this hotfix is built on — i.e. the -internal branch is out of
+  # date. A no-op when use_tag is set.
+  validate-internal-branch:
+    needs: derive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate -internal branch pom.xml version
+        if: ${{ !inputs.use_tag }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
+          INTERNAL_BRANCH="${{ needs.derive.outputs.internal_branch }}"
+          EXPECTED_VERSION="${{ needs.derive.outputs.expected_internal_version }}"
+
+          CONTENT=$(gh api "repos/${COMMERCIAL_REPO}/contents/pom.xml" -X GET -f ref="$INTERNAL_BRANCH" --jq '.content') || {
+            echo "ERROR: could not read pom.xml from '${INTERNAL_BRANCH}' in ${COMMERCIAL_REPO}. Does the branch exist?"
+            exit 1
+          }
+
+          ACTUAL_VERSION=$(echo "$CONTENT" | base64 -d | python3 -c "
+          import xml.etree.ElementTree as ET, sys
+          root = ET.parse('/dev/stdin').getroot()
+          ns = (root.tag.split('}')[0] + '}') if '}' in root.tag else ''
+          v = root.find(f'{ns}version')
+          print(v.text.strip() if v is not None else '', end='')
+          ")
+
+          echo "Internal branch:  $INTERNAL_BRANCH"
+          echo "Expected version: $EXPECTED_VERSION"
+          echo "Actual version:   $ACTUAL_VERSION"
+
+          if [[ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "ERROR: '${INTERNAL_BRANCH}' in ${COMMERCIAL_REPO} has version '${ACTUAL_VERSION}' but expected '${EXPECTED_VERSION}'."
+            echo "The -internal branch is out of date — update it before creating the hotfix branch."
+            exit 1
+          fi
+          echo "-internal branch version matches. OK to proceed."
 
   initialize:
-    needs: derive
+    needs: [derive, validate-internal-branch]
+    if: ${{ inputs.use_tag }}
     uses: ./.github/workflows/initialize-commercial-branch.yml
     with:
       oss_repo:           ${{ format('spring-cloud/{0}', inputs.oss_repo) }}
-      oss_tag:            ${{ inputs.oss_tag }}
+      oss_tag:            ${{ needs.derive.outputs.oss_tag }}
       commercial_repo:    ${{ needs.derive.outputs.commercial_repo }}
       commercial_branch:  ${{ needs.derive.outputs.commercial_branch }}
       set_default_branch: false
     secrets: inherit
 
+  # Cuts release/<version> from the tip of the -internal branch, preserving its full git
+  # history (so the hotfix branch can later be rebased onto an updated -internal branch),
+  # then layers on only what -internal doesn't already have: a retargeted ci-release.yml
+  # (mirrors create-oss-release-branch.yml's release/<version>-from-internal flow —
+  # distribution-management/workflow-rewrite/settings.xml are redundant here, since
+  # ci-release.yml + release-ci-settings.xml already point the build at the commercial
+  # deploy target), Broadcom license headers (and checkstyle-header.txt in the same
+  # commit), and a config/projects.json registration — a hotfix branch carries real changes
+  # on top of -internal and can fail its own CI independently of it, unlike a GA
+  # release/<version>, so it needs its own scheduled CI entry. The entry is removed again
+  # by spring-release-train-project-ready once the hotfix ships. A no-op when use_tag is set.
+  create-internal-release-branch:
+    needs: [derive, validate-internal-branch]
+    if: ${{ !inputs.use_tag }}
+    runs-on: ubuntu-latest
+    outputs:
+      base_sha: ${{ steps.create.outputs.base_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
+      - name: Create release branch from internal branch
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
+          COMMERCIAL_BRANCH="${{ needs.derive.outputs.commercial_branch }}"
+          INTERNAL_BRANCH="${{ needs.derive.outputs.internal_branch }}"
+
+          if gh api "repos/${COMMERCIAL_REPO}/git/ref/heads/${COMMERCIAL_BRANCH}" --silent 2>/dev/null; then
+            echo "ERROR: ${COMMERCIAL_BRANCH} already exists in ${COMMERCIAL_REPO}."
+            exit 1
+          fi
+
+          BASE_SHA=$(gh api "repos/${COMMERCIAL_REPO}/git/ref/heads/${INTERNAL_BRANCH}" --jq '.object.sha')
+          echo "Creating ${COMMERCIAL_BRANCH} in ${COMMERCIAL_REPO} from ${INTERNAL_BRANCH} at ${BASE_SHA}..."
+
+          gh api "repos/${COMMERCIAL_REPO}/git/refs" \
+            --method POST \
+            --field ref="refs/heads/${COMMERCIAL_BRANCH}" \
+            --field sha="${BASE_SHA}"
+
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Branch ${COMMERCIAL_BRANCH} created."
+
+      - name: Add commercial release CI files
+        uses: ./.github/actions/add-commercial-release-files
+        with:
+          repository:               ${{ needs.derive.outputs.commercial_repo }}
+          branch:                   ${{ needs.derive.outputs.commercial_branch }}
+          retarget-ci-release-from: ${{ needs.derive.outputs.internal_branch }}
+          token:                    ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update license headers
+        uses: ./.github/actions/update-license-headers
+        with:
+          repository: ${{ needs.derive.outputs.commercial_repo }}
+          branch:     ${{ needs.derive.outputs.commercial_branch }}
+          token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Update projects.json
+        uses: ./.github/actions/update-projects-json
+        with:
+          oss-repo:           ${{ format('spring-cloud/{0}', inputs.oss_repo) }}
+          oss-branch:         ''
+          commercial-branch:  ${{ needs.derive.outputs.commercial_branch }}
+          set-default-branch: false
+          token:              ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
   update-versions:
-    needs: [derive, initialize]
+    needs: [derive, initialize, create-internal-release-branch]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Clone commercial branch and compute hotfix version
-        id: setup
+      - name: Clone commercial branch
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
@@ -161,41 +363,10 @@ jobs:
           git -C _version_repo config user.name  "Spring Builds"
           git -C _version_repo config user.email "svc.spring-builds@broadcom.com"
 
-          # Read the project version from the root pom.xml using Python for
-          # reliable XML parsing (handles optional namespace prefixes).
-          CURRENT_VERSION=$(python3 - <<'PYEOF'
-          import xml.etree.ElementTree as ET, sys
-          tree = ET.parse('_version_repo/pom.xml')
-          root = tree.getroot()
-          ns = (root.tag.split('}')[0] + '}') if '}' in root.tag else ''
-          v = root.find(f'{ns}version')
-          print(v.text.strip() if v is not None else '', end='')
-          PYEOF
-          )
-
-          if [[ -z "$CURRENT_VERSION" ]]; then
-            echo "ERROR: could not read project version from _version_repo/pom.xml"
-            exit 1
-          fi
-
-          AUTO_VERSION="${CURRENT_VERSION}.1-SNAPSHOT"
-          EFFECTIVE_VERSION="${{ inputs.project_version }}"
-          if [[ -z "$EFFECTIVE_VERSION" ]]; then
-            EFFECTIVE_VERSION="$AUTO_VERSION"
-          fi
-
-          echo "current_version=${CURRENT_VERSION}"     >> "$GITHUB_OUTPUT"
-          echo "effective_version=${EFFECTIVE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Current version:   $CURRENT_VERSION"
-          echo "Auto version:      $AUTO_VERSION"
-          echo "Effective version: $EFFECTIVE_VERSION"
-
-      # When release-train-version is provided, update dependency version
-      # properties from the release train first.  This also stamps the project
-      # version to the release train value; the next step overwrites that with
+      # Updates dependency version properties from the release train. This also stamps the
+      # project version to the release train's value; the next step overwrites that with
       # the correct hotfix snapshot.
       - name: Update dependency versions from release train
-        if: ${{ inputs.release_train_version != '' }}
         uses: ./.github/actions/update-project-versions
         with:
           release-train-version: ${{ inputs.release_train_version }}
@@ -203,14 +374,13 @@ jobs:
           directory:             _version_repo
           commercial:            'true' # use release config from commercial repo
 
-      # Always stamp the project version to the hotfix snapshot (or the
-      # explicit override).  When versions is supplied it also updates
-      # dependency properties in the same pass; otherwise versions:'{}' ensures
-      # only the project version is touched.
+      # Always stamp the project version to the hotfix snapshot. When versions is supplied
+      # it also updates dependency properties in the same pass; otherwise versions:'{}'
+      # ensures only the project version is touched.
       - name: Stamp hotfix project version
         uses: ./.github/actions/update-project-versions
         with:
-          project-version: ${{ steps.setup.outputs.effective_version }}
+          project-version: ${{ needs.derive.outputs.auto_version }}
           versions:        ${{ inputs.versions || '{}' }}
           directory:       _version_repo
 
@@ -223,7 +393,7 @@ jobs:
             echo "No version changes to commit."
             exit 0
           fi
-          git commit -m "Updating project version to ${{ steps.setup.outputs.effective_version }} [skip actions]"
+          git commit -m "Updating project version to ${{ needs.derive.outputs.auto_version }} [skip actions]"
           git push origin "${{ needs.derive.outputs.commercial_branch }}"
           echo "Version updates committed."
 
@@ -349,16 +519,15 @@ jobs:
           fi
           exit $watch_exit_code
 
-  # Collapse all [skip actions] initialization commits into a single commit and
-  # force push it (without [skip actions]) so the hotfix branch starts from one
-  # clean snapshot and CI is triggered now that the branch is fully initialised.
-  # The branch is an orphan (no OSS history to preserve), so the entire history
-  # is rewritten to a single root commit.
   trigger-ci:
-    needs: [derive, trigger-release-train-join]
+    needs: [derive, initialize, create-internal-release-branch, trigger-release-train-join]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Squash initialization commits and push to trigger CI
+      # The tag path is an orphan branch with no history worth keeping, so its
+      # initialization commits are collapsed into a single root commit.
+      - name: Squash initialization commits into an orphan root commit and push to trigger CI
+        if: ${{ inputs.use_tag }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
@@ -385,3 +554,35 @@ jobs:
           git push --force-with-lease="${BRANCH}:${REMOTE_SHA}" \
             origin "HEAD:refs/heads/${BRANCH}"
           echo "Squashed initialization commits into a single commit on ${COMMERCIAL_REPO}@${BRANCH}."
+
+      # The -internal path preserves real history, so only the initialization commits
+      # added on top of the fork point are squashed — everything at and before base_sha
+      # (the -internal branch's history) is left untouched, so the branch can later be
+      # rebased onto an updated -internal branch.
+      - name: Squash initialization commits onto the internal branch fork point and push to trigger CI
+        if: ${{ !inputs.use_tag }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
+          BRANCH="${{ needs.derive.outputs.commercial_branch }}"
+          BASE_SHA="${{ needs.create-internal-release-branch.outputs.base_sha }}"
+
+          git clone --single-branch --branch "$BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${COMMERCIAL_REPO}.git" _trigger_repo
+
+          cd _trigger_repo
+          git config user.name  "Spring Builds"
+          git config user.email "svc.spring-builds@broadcom.com"
+
+          if [[ "$(git rev-parse HEAD)" != "$BASE_SHA" ]]; then
+            git reset --soft "$BASE_SHA"
+            git commit -m "Initialize hotfix release branch"
+            git push --force-with-lease origin "$BRANCH"
+            echo "Squashed initialization commits into a single commit on ${COMMERCIAL_REPO}@${BRANCH}."
+          else
+            git commit --allow-empty -m "Initialize hotfix release branch"
+            git push origin "$BRANCH"
+            echo "No initialization commits to squash; pushed empty commit to trigger CI on ${COMMERCIAL_REPO}@${BRANCH}."
+          fi

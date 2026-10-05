@@ -199,6 +199,17 @@ runs:
         fi
         exit $watch_exit_code
 
+    # A hotfix release/<version> branch is registered in config/projects.json for its own
+    # scheduled CI entry (create-hotfix-release-branch.yml); a GA release/<version> branch
+    # never is. This runs for both — retire-branch-projects-json is a no-op (logs and
+    # returns without committing) when the branch isn't registered in the first place.
+    - name: Remove release branch from projects.json
+      uses: ./.github/actions/retire-branch-projects-json
+      with:
+        repo: spring-cloud/${{ inputs.project }}
+        branch: release/${{ steps.version.outputs.version }}
+        token: ${{ inputs.token }}
+
     - name: Remove release branch from Antora playbook
       uses: ./.github/actions/update-antora-playbook
       with:
