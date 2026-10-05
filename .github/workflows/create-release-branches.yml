@@ -1,0 +1,155 @@
+name: Create Release Branches
+
+run-name: "Create Release Branches - ${{ inputs.mode }} - ${{ inputs.spring_cloud_release_train }}"
+
+# Runs one of the single-project branch-creation workflows for every project in a release
+# train that does not have its release branch yet.
+#
+#   create-oss-release-branch         OSS release; reads <train>-INTERNAL-SNAPSHOT
+#   create-commercial-release-branch  commercial-only release; reads <train>
+#   create-hotfix-release-branch      hotfix; reads <train>, the 4-segment (x.y.z.h) projects only
+#
+# The projects and their versions come from the same jenkins-releaser-config properties file
+# the chosen workflow reads (spring-cloud-release-commercial@jenkins-releaser-config). For
+# each project the branch that workflow would create is derived, and looked up in
+# <project>-commercial; projects whose branch already exists are skipped, so re-running after
+# a partial failure only picks up what is left. The plan logic is
+# .github/scripts/release-branch-plan.js.
+#
+# Each child run is dispatched and waited on. A failing child fails this run, but does not
+# stop the others.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Which branch-creation workflow to run for each project'
+        required: true
+        type: choice
+        options:
+          - create-oss-release-branch
+          - create-commercial-release-branch
+          - create-hotfix-release-branch
+      spring_cloud_release_train:
+        description: 'Spring Cloud release train version (e.g. 2026.1.0, 2026.0.0-M1 or 2026.0.0-RC2 for OSS; 2025.1.2 for a hotfix)'
+        required: true
+        type: string
+      spring_release_train:
+        description: 'Spring release train every project joins (e.g. 2026.1)'
+        required: true
+        type: string
+      use_tag:
+        description: 'Hotfix only: create each branch from its OSS tag instead of the -internal branch'
+        required: false
+        type: boolean
+        default: false
+      sha:
+        description: 'Commit SHA of this repo to copy release-train action files from (OSS and hotfix only). Defaults to the commit that triggered this workflow.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:   ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Work out which projects need a release branch
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          MODE: ${{ inputs.mode }}
+          TRAIN: ${{ inputs.spring_cloud_release_train }}
+        run: node .github/scripts/release-branch-plan.js "$MODE" "$TRAIN"
+
+  create:
+    name: ${{ inputs.mode }} - ${{ matrix.project }} (${{ matrix.branch }})
+    needs: plan
+    if: ${{ needs.plan.outputs.has_work == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        if: ${{ inputs.mode == 'create-commercial-release-branch' }}
+        uses: actions/checkout@v4
+
+      # The commercial workflow takes the branch to cut from as an input; the other two
+      # derive it themselves. Same resolution create-oss-release-branch uses, against the
+      # commercial repo, which has no main to fall back on.
+      - name: Resolve the commercial source branch
+        id: source
+        if: ${{ inputs.mode == 'create-commercial-release-branch' }}
+        uses: ./.github/actions/resolve-release-branch
+        with:
+          repo: spring-cloud/${{ matrix.project }}-commercial
+          version: ${{ matrix.version }}
+          commercial: 'true'
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Dispatch ${{ inputs.mode }} and wait
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          MODE: ${{ inputs.mode }}
+          PROJECT: ${{ matrix.project }}
+          TRAIN: ${{ inputs.spring_cloud_release_train }}
+          SPRING_TRAIN: ${{ inputs.spring_release_train }}
+          USE_TAG: ${{ inputs.use_tag }}
+          SHA: ${{ inputs.sha }}
+          SOURCE_BRANCH: ${{ steps.source.outputs.branch }}
+          SOURCE_STATUS: ${{ steps.source.outputs.status }}
+          SOURCE_MESSAGE: ${{ steps.source.outputs.message }}
+        run: |
+          set -euo pipefail
+
+          args=()
+          case "$MODE" in
+            create-oss-release-branch)
+              args+=(-f "oss_repo=${PROJECT}" -f "spring_cloud_release_train=${TRAIN}"
+                     -f "spring_release_train=${SPRING_TRAIN}")
+              [[ -n "$SHA" ]] && args+=(-f "sha=${SHA}")
+              ;;
+            create-hotfix-release-branch)
+              args+=(-f "oss_repo=${PROJECT}" -f "release_train_version=${TRAIN}"
+                     -f "spring_release_train=${SPRING_TRAIN}" -f "use_tag=${USE_TAG}")
+              [[ -n "$SHA" ]] && args+=(-f "sha=${SHA}")
+              ;;
+            create-commercial-release-branch)
+              if [[ "$SOURCE_STATUS" != "ok" ]]; then
+                echo "::error::Could not resolve the source branch for ${PROJECT}-commercial: ${SOURCE_MESSAGE}"
+                exit 1
+              fi
+              args+=(-f "project=${PROJECT}-commercial" -f "branch=${SOURCE_BRANCH}"
+                     -f "release-train=${SPRING_TRAIN}")
+              ;;
+          esac
+
+          echo "Dispatching ${MODE}.yml for ${PROJECT}..."
+          run_url=$(gh workflow run "${MODE}.yml" \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            "${args[@]}")
+          echo "Dispatched. Waiting for ${run_url} to complete."
+          run_id=${run_url##*/}
+
+          watch_exit_code=0
+          gh run watch "$run_id" --repo "${{ github.repository }}" --exit-status --interval=10 \
+            > /dev/null 2>&1 || watch_exit_code=$?
+
+          if [[ $watch_exit_code -eq 0 ]]; then
+            echo "### ${PROJECT}: succeeded - ${run_url}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ${PROJECT}: FAILED - ${run_url}" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::${MODE} failed for ${PROJECT}: ${run_url}"
+          fi
+          exit $watch_exit_code
