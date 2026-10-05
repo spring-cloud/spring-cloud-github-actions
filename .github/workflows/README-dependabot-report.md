@@ -155,6 +155,12 @@ OSS mapping is never overwritten. Commercial-only trains are skipped — titles 
 adopted. Their version keys (`5.0.2.1-SNAPSHOT`, `5.0.3-INTERNAL-SNAPSHOT`) cannot collide
 with an OSS branch version anyway.
 
+A commercial patch train can still claim an OSS version: `2025_1_4_1-snapshot.properties`
+carries `5.0.4-SNAPSHOT` forward for projects it did not re-release, alongside
+`2025_1_4-snapshot.properties`. Picking the highest train first and filtering afterwards
+would choose `2025.1.4.1`, discard it, and leave the version unmapped. The fallback
+therefore ranks only plain trains, so such a version still resolves to `2025.1.4`.
+
 The fallback lives in the shared [`releaser-map`](../actions/releaser-map/action.yml)
 action rather than inline in this workflow. It was inline at first, and
 `dependabot-triage.yml` carried its own copy of the same script — so the fix reached the

@@ -89,9 +89,16 @@ runs:
           return a;
         };
 
+        // Only plain YYYY.N.N trains are boards on the OSS side. Commercial-only trains
+        // (2025.1.2.1, 2025.1.3-INTERNAL) have no OSS project board.
+        const OSS_TRAIN = /^\d{4}\.\d+\.\d+$/;
+
         // Reads one repository's jenkins-releaser-config branch into
-        // {project: {version: train}}. Returns null if the branch cannot be listed at
-        // all, so a missing fallback source is distinguishable from an empty one.
+        // {map, plain}, each {project: {version: train}}. `map` takes the highest train
+        // for a version; `plain` takes the highest among OSS_TRAIN trains only, which
+        // differs when a patch train claims the same version (see the gap-fill below).
+        // Returns null if the branch cannot be listed at all, so a missing fallback
+        // source is distinguishable from an empty one.
         const readMap = (label, repo) => {
           const listing = gh(['api', `repos/${repo}/contents/?ref=jenkins-releaser-config`]);
           if (!listing) {
@@ -103,6 +110,7 @@ runs:
             .filter(n => n.endsWith('-snapshot.properties'));
 
           const map = {};
+          const plain = {};
           for (const name of files) {
             const raw = gh(['api',
               `repos/${repo}/contents/${name}?ref=jenkins-releaser-config`, '--jq', '.content']);
@@ -123,16 +131,23 @@ runs:
             for (const [project, version] of Object.entries(versions)) {
               map[project] = map[project] || {};
               map[project][version] = higherTrain(map[project][version], train);
+              if (OSS_TRAIN.test(train)) {
+                plain[project] = plain[project] || {};
+                plain[project][version] = higherTrain(plain[project][version], train);
+              }
             }
           }
           console.log(`${label}: ${files.length} snapshot file(s), ` +
             `${Object.keys(map).length} project(s) mapped`);
-          return map;
+          return { map, plain };
         };
 
         const out = {};
+        const plainTrains = {};
         for (const [type, repo] of Object.entries(SOURCES)) {
-          out[type] = readMap(type, repo) || {};
+          const r = readMap(type, repo);
+          out[type] = r ? r.map : {};
+          plainTrains[type] = r ? r.plain : {};
         }
 
         // Gap-fill the OSS map from the commercial one. Commercial is where a train's
@@ -150,12 +165,13 @@ runs:
         // Commercial-only trains are skipped: their titles (2025.1.2.1,
         // 2025.1.3-INTERNAL) have no OSS project board, so adopting one would turn
         // "could not resolve project" into a confident pointer at a board that does not
-        // exist. Only plain YYYY.N.N trains are boards on the OSS side.
-        const OSS_TRAIN = /^\d{4}\.\d+\.\d+$/;
+        // exist. So the fill reads the commercial map restricted to plain trains, not
+        // out.commercial: a patch train that carries a version forward (2025.1.4.1 also
+        // claims 5.0.4-SNAPSHOT) would otherwise win the highest-train rule there, be
+        // skipped here, and take the real 2025.1.4 mapping down with it.
         let filled = 0, repointed = 0;
-        for (const [project, versions] of Object.entries(out.commercial || {})) {
+        for (const [project, versions] of Object.entries(plainTrains.commercial || {})) {
           for (const [version, train] of Object.entries(versions)) {
-            if (!OSS_TRAIN.test(train)) continue;
             out.oss[project] = out.oss[project] || {};
             const current = out.oss[project][version];
             const winner = higherTrain(current, train);
