@@ -1,4 +1,4 @@
-const { PLAYBOOK_PATH, extractBundle, rewrite, cmp } = require('../antora-ui-bundle');
+const { PLAYBOOK_PATH, DOCS_BUILD_BRANCH, DOCS_BUILD_PLAYBOOK_PATH, playbookCandidates, extractBundle, rewrite, cmp } = require('../antora-ui-bundle');
 
 // The exact shape confirmed live on spring-cloud-commons's main, 4.2.x, 4.3.x and 5.0.x
 // branches (and their -commercial counterparts).
@@ -25,6 +25,41 @@ const PLAYBOOK = [
 describe('PLAYBOOK_PATH', () => {
   it('is the per-branch playbook path', () => {
     expect(PLAYBOOK_PATH).toBe('docs/antora-playbook.yml');
+  });
+});
+
+describe('docs-build playbook', () => {
+  const DOCS_BUILD = [
+    'content:',
+    '  sources:',
+    '    - url: https://github.com/spring-cloud/spring-cloud-function',
+    '      branches: [ main, 4.3.x, 4.2.x ]',
+    'ui:',
+    '  bundle:',
+    '    url: https://github.com/spring-io/antora-ui-spring/releases/download/v0.4.18/ui-bundle.zip',
+    '    snapshot: true',
+    '',
+  ].join('\n');
+
+  it('has the repo-wide branch and root playbook path', () => {
+    expect(DOCS_BUILD_BRANCH).toBe('docs-build');
+    expect(DOCS_BUILD_PLAYBOOK_PATH).toBe('antora-playbook.yml');
+  });
+
+  it('extracts and rewrites the bundle url without touching the rest', () => {
+    expect(extractBundle(DOCS_BUILD).tag).toBe('v0.4.18');
+    const out = rewrite(DOCS_BUILD, { repo: 'spring-io/antora-ui-spring', tag: 'v0.4.26' });
+    expect(out).toContain('releases/download/v0.4.26/ui-bundle.zip');
+    expect(out.replace('v0.4.26', 'v0.4.18')).toBe(DOCS_BUILD);
+  });
+});
+
+describe('playbookCandidates', () => {
+  it('tries .yml then .yaml, whichever the configured path uses', () => {
+    expect(playbookCandidates('antora-playbook.yml'))
+      .toEqual(['antora-playbook.yml', 'antora-playbook.yaml']);
+    expect(playbookCandidates('docs/antora-playbook.yaml'))
+      .toEqual(['docs/antora-playbook.yaml', 'docs/antora-playbook.yml']);
   });
 });
 

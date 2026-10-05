@@ -17,6 +17,10 @@ run-name: "${{ (github.event_name != 'schedule' && inputs.dry_run != false) && '
 # predate Antora adoption have no such file at all, which this discovers rather than assumes
 # (confirmed: spring-cloud-commons's 3.1.x has none, while main/4.2.x/4.3.x/5.0.x do).
 #
+# Each repository's repo-wide docs-build branch keeps its own antora-playbook.yml (at the
+# root) pinning the same bundle, so it gets one extra matrix entry per repository and is
+# bumped through exactly the same PR flow.
+#
 # This is the same shape of problem update-maven-wrapper.yml solves for the Maven wrapper -
 # an upstream artifact versions independently of every project, and nothing else notices when
 # it moves - and shares that workflow's gh-cli.js, git-pr-helpers.js, merge-if-green.js and
@@ -129,10 +133,12 @@ jobs:
           PROJECTS_FILTER: ${{ inputs.projects }}
           REPO_TYPE: ${{ inputs.repo_type || 'both' }}
           MATRIX_LIB: ${{ github.workspace }}/.github/scripts/project-branch-matrix.js
+          BUNDLE_LIB: ${{ github.workspace }}/.github/scripts/antora-ui-bundle.js
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
-          const { buildBranchMatrix } = require(process.env.MATRIX_LIB);
+          const { buildBranchMatrix, walkProjects } = require(process.env.MATRIX_LIB);
+          const A = require(process.env.BUNDLE_LIB);
 
           const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
 
@@ -146,6 +152,18 @@ jobs:
             filter: process.env.PROJECTS_FILTER,
             repoType: process.env.REPO_TYPE,
           });
+
+          // Plus one docs-build entry per repository: that branch is repo-wide (not one per
+          // maintained branch) and keeps its playbook at the root, so the entry carries its
+          // own path. A repo with no docs-build playbook is reported as no-playbook.
+          walkProjects(projects, {
+            filter: process.env.PROJECTS_FILTER,
+            repoType: process.env.REPO_TYPE,
+          }, ({ projectKey, typeKey, repo }) => {
+            entries.push({ project: projectKey, repo, type: typeKey,
+              branch: A.DOCS_BUILD_BRANCH, playbook_path: A.DOCS_BUILD_PLAYBOOK_PATH });
+          });
+          entries.sort((a, b) => a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
 
           console.log(`Repo/branch combinations to check: ${entries.length}`);
           for (const e of entries) console.log(`  ${e.repo}@${e.branch}`);
@@ -189,6 +207,7 @@ jobs:
           BRANCH: ${{ matrix.branch }}
           PROJECT: ${{ matrix.project }}
           TYPE: ${{ matrix.type }}
+          PLAYBOOK_PATH: ${{ matrix.playbook_path }}
           TARGET_TAG: ${{ needs.versions.outputs.tag }}
           # A scheduled run has no inputs, so `inputs.dry_run != false` would be true and the
           # weekly job would never actually do anything. Schedule therefore acts, while a
@@ -206,6 +225,10 @@ jobs:
           const BRANCH = process.env.BRANCH;
           const TARGET = process.env.TARGET_TAG;
           const DRY = process.env.DRY_RUN !== 'false';
+          // docs/antora-playbook.yml on a maintained branch; antora-playbook.yml at the root
+          // of the repo-wide docs-build branch (the matrix entry says which).
+          // Either extension is accepted (.yml preferred), as update-antora-playbook does.
+          const CONFIGURED = process.env.PLAYBOOK_PATH || A.PLAYBOOK_PATH;
 
           const safe = `${REPO}@${BRANCH}`.replace(/[/@]/g, '-');
           const finish = (status, detail, extra = {}) => {
@@ -227,11 +250,16 @@ jobs:
           const enc = encodeURIComponent(BRANCH);
 
           // ── Read the playbook at this branch ─────────────────────────────────────────────
-          const got = PR.readFileAt(REPO, A.PLAYBOOK_PATH, enc);
-          if (!got) finish('no-playbook', `no ${A.PLAYBOOK_PATH} on this branch`);
+          let PLAYBOOK = CONFIGURED;
+          let got = null;
+          for (const candidate of A.playbookCandidates(CONFIGURED)) {
+            got = PR.readFileAt(REPO, candidate, enc);
+            if (got) { PLAYBOOK = candidate; break; }
+          }
+          if (!got) finish('no-playbook', `no ${CONFIGURED} (or .yaml) on this branch`);
 
           const bundle = A.extractBundle(got.text);
-          if (!bundle) finish('unparsed', `no UI bundle release-download url in ${A.PLAYBOOK_PATH}`);
+          if (!bundle) finish('unparsed', `no UI bundle release-download url in ${PLAYBOOK}`);
 
           const extras = { current: bundle.tag, target: TARGET };
 
@@ -273,7 +301,7 @@ jobs:
             // Read the PR's own head branch: it may already be at the target, or behind it
             // (a newer release has shipped since it was opened).
             const headRef = encodeURIComponent(pr.head.ref);
-            const onHead = PR.readFileAt(REPO, A.PLAYBOOK_PATH, headRef);
+            const onHead = PR.readFileAt(REPO, PLAYBOOK, headRef);
             const headBundle = onHead && A.extractBundle(onHead.text);
 
             if (!headBundle || A.cmp(headBundle.tag, TARGET) >= 0) {
@@ -288,7 +316,7 @@ jobs:
             // PR per branch, always at the current target, rather than a growing stack.
             const headUpdated = A.rewrite(onHead.text, { repo: headBundle.repo, tag: TARGET });
             const bump = PR.commitFilesToRef(REPO, pr.head.ref,
-              [{ path: A.PLAYBOOK_PATH, content: headUpdated }], message, author);
+              [{ path: PLAYBOOK, content: headUpdated }], message, author);
             if (!bump.ok) finish('error', `could not update #${pr.number}: ${bump.err}`);
             finish('pr-updated', `#${pr.number} moved up to ${TARGET}`,
               { ...extras, prUrl: pr.html_url, prNumber: pr.number });
@@ -307,7 +335,7 @@ jobs:
 
           const updatedText = A.rewrite(got.text, { repo: bundle.repo, tag: TARGET });
           const put = PR.commitFilesToRef(REPO, head,
-            [{ path: A.PLAYBOOK_PATH, content: updatedText }], message, author);
+            [{ path: PLAYBOOK, content: updatedText }], message, author);
           if (!put.ok) finish('error', `could not commit: ${put.err}`);
 
           const opened = PR.openPr(REPO, {
