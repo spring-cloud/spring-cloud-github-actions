@@ -8,6 +8,12 @@
 // the name is derived here the same way and looked up in the commercial repo: a project whose
 // branch already exists is left alone, the rest go into the matrix.
 //
+// A v<version> tag in either the OSS or the commercial repo means that version has already
+// been released, so the project is skipped whatever its branch state - the same guard
+// create-commercial-release-branch applies. This covers a project the train is not releasing,
+// whose entry still names its previous release, and a release branch that has since been
+// deleted.
+//
 //   create-oss-release-branch         reads <train>-INTERNAL-SNAPSHOT, creates release/<x.y.z>[-M1|-RC2]
 //   create-commercial-release-branch  reads <train>,                   creates release/<x.y.z>
 //   create-hotfix-release-branch      reads <train>,                   creates release/<x.y.z.h>
@@ -29,7 +35,7 @@ const MODES = [
 // deliberately absent: it is a project like any other and needs its own release branch.
 const NON_PROJECT_KEYS = new Set(['spring-boot']);
 
-const COMMERCIAL_ORG = 'spring-cloud';
+const ORG = 'spring-cloud';
 
 // Which properties file a mode reads, and the milestone/RC phase of the train.
 //
@@ -71,8 +77,9 @@ const branchFor = (mode, rawVersion, qualifier) => {
   return { version: stripped, branch: `release/${stripped}` };
 };
 
-// Pure: entries in, plan out. `exists(repo, branch)` is injected so tests need no network.
-const buildPlan = ({ mode, train, entries, exists }) => {
+// Pure: entries in, plan out. `branchExists(repo, branch)` and `tagExists(repo, tag)` are
+// injected so tests need no network.
+const buildPlan = ({ mode, train, entries, branchExists, tagExists }) => {
   if (!MODES.includes(mode)) throw new Error(`unknown mode '${mode}'`);
   const { qualifier } = parseTrain(mode, train);
 
@@ -85,8 +92,13 @@ const buildPlan = ({ mode, train, entries, exists }) => {
       skipped.push({ project: key, reason: hit.skip });
       continue;
     }
-    const repo = `${COMMERCIAL_ORG}/${key}-commercial`;
-    if (exists(repo, hit.branch)) {
+    const ossRepo = `${ORG}/${key}`;
+    const commercialRepo = `${ossRepo}-commercial`;
+    const tag = `v${hit.version}`;
+    const taggedIn = [ossRepo, commercialRepo].find(repo => tagExists(repo, tag));
+    if (taggedIn) {
+      skipped.push({ project: key, branch: hit.branch, reason: `already released (tag ${tag} in ${taggedIn})` });
+    } else if (branchExists(commercialRepo, hit.branch)) {
       skipped.push({ project: key, branch: hit.branch, reason: 'branch already exists' });
     } else {
       todo.push({ project: key, version: hit.version, branch: hit.branch });
@@ -97,17 +109,19 @@ const buildPlan = ({ mode, train, entries, exists }) => {
 
 // 404 is the answer "no", anything else (auth, rate limit) is a failure that must not be
 // read as "the branch is missing" - that would try to create branches that may be there.
-const branchExists = (repo, branch) => {
+const refExists = (repo, ref) => {
   try {
-    execFileSync('gh', ['api', `repos/${repo}/git/ref/heads/${branch}`, '--silent'],
+    execFileSync('gh', ['api', `repos/${repo}/git/ref/${ref}`, '--silent'],
       { stdio: ['ignore', 'pipe', 'pipe'] });
     return true;
   } catch (err) {
     const stderr = String(err.stderr || '');
     if (/404|Not Found/i.test(stderr)) return false;
-    throw new Error(`could not check ${repo}@${branch}: ${stderr.trim() || err.message}`);
+    throw new Error(`could not check ${repo} ${ref}: ${stderr.trim() || err.message}`);
   }
 };
+const ghBranchExists = (repo, branch) => refExists(repo, `heads/${branch}`);
+const ghTagExists = (repo, tag) => refExists(repo, `tags/${tag}`);
 
 const summarize = ({ mode, train, file, todo, skipped }) => {
   const lines = [
@@ -144,7 +158,7 @@ if (require.main === module) {
   try {
     const { configTrain } = parseTrain(mode, train);
     const { file, entries } = fetchReleaserConfig(configTrain);
-    const plan = buildPlan({ mode, train, entries, exists: branchExists });
+    const plan = buildPlan({ mode, train, entries, branchExists: ghBranchExists, tagExists: ghTagExists });
     const report = summarize({ mode, train, file, ...plan });
 
     process.stdout.write(report + '\n');
