@@ -4,7 +4,11 @@ jest.mock('@actions/core');
 jest.mock('@actions/exec');
 
 const core = require('@actions/core');
-const { isHotfixBranch, parentBranch, resolveJdkVersions, dumpsPretty, updateProjects } = require('../src/index');
+const exec = require('@actions/exec');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { isHotfixBranch, parentBranch, resolveJdkVersions, dumpsPretty, updateProjects, run } = require('../src/index');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -309,5 +313,76 @@ describe('updateProjects', () => {
     expect(data['spring-cloud-config'].commercial.jdkVersions['release/5.0.0']).toEqual(['17', '21', '25']);
     // OSS branch should NOT be removed for a release/ branch
     expect(data['spring-cloud-config'].oss.branches.scheduled).toContain('4.2.x');
+  });
+});
+
+// ── run: push retry ─────────────────────────────────────────────────────────
+
+describe('run', () => {
+  const repoDir = path.join(os.tmpdir(), '_projects_json_repo');
+  const projectsFile = path.join(repoDir, 'config', 'projects.json');
+
+  const project = scheduled => ({
+    oss: { branches: { default: ['main'], scheduled: ['4.3.x'] }, jdkVersions: { '4.3.x': ['17'] } },
+    commercial: { branches: { default: ['4.3.x'], scheduled }, jdkVersions: { '4.3.x': ['17', '21'] } },
+  });
+  const writeMain = data => {
+    fs.mkdirSync(path.dirname(projectsFile), { recursive: true });
+    fs.writeFileSync(projectsFile, JSON.stringify(data));
+  };
+
+  let pushCodes;
+  let calls;
+  beforeEach(() => {
+    calls = [];
+    process.env.GITHUB_REPOSITORY = 'spring-cloud/spring-cloud-github-actions';
+    core.getInput.mockImplementation(name => ({
+      'oss-repo': 'spring-cloud/spring-cloud-stream-commercial',
+      'oss-branch': '4.3.x',
+      'commercial-branch': 'release/4.3.5',
+      'set-default-branch': 'false',
+      'remove-oss-branch': 'false',
+      token: 'x',
+    })[name] || '');
+    jest.spyOn(global, 'setTimeout').mockImplementation(fn => { fn(); return 0; });
+    exec.exec.mockImplementation(async (cmd, args) => {
+      const sub = args[0] === '-C' ? args[2] : args[0];
+      calls.push(sub);
+      if (sub === 'clone') {
+        writeMain({ 'spring-cloud-stream': project(['4.3.x']) });
+      } else if (sub === 'reset') {
+        // Another run landed on main in the meantime.
+        writeMain({ 'spring-cloud-stream': project(['4.3.x']), 'spring-cloud-config': project(['release/4.3.6']) });
+      } else if (sub === 'diff') {
+        return 1;
+      } else if (sub === 'push') {
+        return pushCodes.shift();
+      }
+      return 0;
+    });
+  });
+  afterEach(() => {
+    global.setTimeout.mockRestore();
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  test('re-applies its change on the latest main when the push is rejected', async () => {
+    pushCodes = [1, 0];
+    await run();
+
+    expect(core.setFailed).not.toHaveBeenCalled();
+    expect(calls.filter(c => c === 'push')).toHaveLength(2);
+    expect(calls).toContain('fetch');
+    const pushed = JSON.parse(fs.readFileSync(projectsFile, 'utf-8'));
+    expect(pushed['spring-cloud-config'].commercial.branches.scheduled).toEqual(['release/4.3.6']);
+    expect(pushed['spring-cloud-stream'].commercial.branches.scheduled).toContain('release/4.3.5');
+  });
+
+  test('fails after the last attempt is rejected', async () => {
+    pushCodes = [1, 1, 1, 1, 1];
+    await run();
+
+    expect(calls.filter(c => c === 'push')).toHaveLength(5);
+    expect(core.setFailed).toHaveBeenCalledWith(expect.stringMatching(/rejected 5 times/));
   });
 });

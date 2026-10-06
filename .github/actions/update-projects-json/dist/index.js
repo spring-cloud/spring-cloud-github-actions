@@ -25861,6 +25861,8 @@ function updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault, 
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
+const MAX_PUSH_ATTEMPTS = 5;
+
 async function run() {
   try {
     const ossRepo = core.getInput('oss-repo', { required: true });
@@ -25898,33 +25900,56 @@ async function run() {
     await exec.exec('git', ['-C', repoDir, 'config', 'user.email', 'svc.spring-builds@broadcom.com']);
 
     const projectsFile = path.join(repoDir, 'config', 'projects.json');
-    const data = JSON.parse(fs.readFileSync(projectsFile, 'utf-8'));
 
-    const changed = updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault, removeOssBranch);
+    // Several runs can update projects.json at once (create-release-branches dispatches one
+    // per project), so a push can be rejected because main moved after the clone. On a
+    // rejection, reset to the new main and apply the change again to the fresh file rather
+    // than rebasing: two runs touching neighbouring lines of the JSON would conflict as text
+    // even though their changes don't overlap.
+    for (let attempt = 1; ; attempt++) {
+      const data = JSON.parse(fs.readFileSync(projectsFile, 'utf-8'));
 
-    if (!changed) {
-      core.info('No changes required.');
-      return;
+      const changed = updateProjects(data, ossRepo, ossBranch, commercialBranch, setDefault, removeOssBranch);
+
+      if (!changed) {
+        core.info('No changes required.');
+        return;
+      }
+
+      fs.writeFileSync(projectsFile, dumpsPretty(data) + '\n', 'utf-8');
+
+      await exec.exec('git', ['-C', repoDir, 'add', 'config/projects.json']);
+
+      const diffCode = await exec.exec(
+        'git', ['-C', repoDir, 'diff', '--cached', '--quiet'],
+        { ignoreReturnCode: true }
+      );
+      if (diffCode === 0) {
+        core.info('projects.json is unchanged — nothing to commit.');
+        return;
+      }
+
+      await exec.exec('git', [
+        '-C', repoDir, 'commit', '-m',
+        `Update projects.json: add ${ossRepo.split('/').pop()} commercial branch ${commercialBranch}`,
+      ]);
+      const pushCode = await exec.exec(
+        'git', ['-C', repoDir, 'push', 'origin', 'main'],
+        { ignoreReturnCode: true }
+      );
+      if (pushCode === 0) break;
+
+      if (attempt >= MAX_PUSH_ATTEMPTS) {
+        throw new Error(`push to main was rejected ${MAX_PUSH_ATTEMPTS} times`);
+      }
+      // Jittered, so runs that collided once don't collide again in lockstep.
+      const delayMs = 2000 * attempt + Math.floor(Math.random() * 3000);
+      core.warning(`Push to main rejected (attempt ${attempt}/${MAX_PUSH_ATTEMPTS}); ` +
+        `retrying on the latest main in ${Math.round(delayMs / 1000)}s.`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      await exec.exec('git', ['-C', repoDir, 'fetch', 'origin', 'main']);
+      await exec.exec('git', ['-C', repoDir, 'reset', '--hard', 'origin/main']);
     }
-
-    fs.writeFileSync(projectsFile, dumpsPretty(data) + '\n', 'utf-8');
-
-    await exec.exec('git', ['-C', repoDir, 'add', 'config/projects.json']);
-
-    const diffCode = await exec.exec(
-      'git', ['-C', repoDir, 'diff', '--cached', '--quiet'],
-      { ignoreReturnCode: true }
-    );
-    if (diffCode === 0) {
-      core.info('projects.json is unchanged — nothing to commit.');
-      return;
-    }
-
-    await exec.exec('git', [
-      '-C', repoDir, 'commit', '-m',
-      `Update projects.json: add ${ossRepo.split('/').pop()} commercial branch ${commercialBranch}`,
-    ]);
-    await exec.exec('git', ['-C', repoDir, 'push', 'origin', 'main']);
 
     core.info('projects.json committed and pushed.');
   } catch (err) {
@@ -25932,7 +25957,7 @@ async function run() {
   }
 }
 
-module.exports = { isHotfixBranch, parentBranch, resolveJdkVersions, dumpsPretty, updateProjects };
+module.exports = { isHotfixBranch, parentBranch, resolveJdkVersions, dumpsPretty, updateProjects, run };
 
 if (require.main === require.cache[eval('__filename')]) {
   run();
