@@ -58,10 +58,11 @@ describe('buildPlan', () => {
     expect(() => buildPlan({ mode: 'nope', train: '1', entries: [], ...noTags })).toThrow(/unknown mode/);
   });
 
-  it('skips spring-boot but includes spring-cloud-release', () => {
+  it('skips spring-boot and spring-vault but includes spring-cloud-release', () => {
     const { todo } = buildPlan({
       mode: COMMERCIAL, train: '2026.1.0', ...noTags,
-      entries: entries([['spring-boot', '4.0.0'], ['spring-cloud-release', '2026.1.0'],
+      entries: entries([['spring-boot', '4.0.0'], ['spring-vault', '4.0.0'],
+        ['spring-cloud-release', '2026.1.0'],
         ['spring-cloud-config', '5.1.0']]),
     });
     expect(todo.map(t => t.project)).toEqual(['spring-cloud-release', 'spring-cloud-config']);

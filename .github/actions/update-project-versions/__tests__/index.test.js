@@ -440,6 +440,32 @@ describe('updatePomFile', () => {
     expect(updatedProperties).toContain('spring-boot.version: 3.2.3');
   });
 
+  it('updates spring-vault.version from a releaser config entry', () => {
+    const config = parseReleaserConfig(
+      'releaser.fixed-versions[spring-vault]=4.1.0-SNAPSHOT\n' +
+      'releaser.fixed-versions[spring-boot]=3.2.3\n');
+    const dest = path.join(tmpDir, 'pom.xml');
+    fs.writeFileSync(dest, `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <artifactId>spring-cloud-vault</artifactId>
+  <version>4.0.0</version>
+  <properties>
+    <spring-vault.version>3.1.0</spring-vault.version>
+    <spring-boot.version>3.2.0</spring-boot.version>
+  </properties>
+</project>
+`);
+
+    const { changed, updatedProperties } = updatePomFile(dest, true, '4.0.1', config);
+
+    const written = fs.readFileSync(dest, 'utf-8');
+    expect(changed).toBe(true);
+    expect(written).toContain('<spring-vault.version>4.1.0-SNAPSHOT</spring-vault.version>');
+    expect(written).toContain('<spring-boot.version>3.2.3</spring-boot.version>');
+    expect(updatedProperties).toContain('spring-vault.version: 4.1.0-SNAPSHOT');
+  });
+
   it('does not update project version in a child module pom (isRoot=false)', () => {
     const src = fixturePath('maven-multi', 'spring-cloud-config-server', 'pom.xml');
     const dest = path.join(tmpDir, 'pom.xml');

@@ -19,7 +19,7 @@ The plan logic is [`release-branch-plan.js`](../scripts/release-branch-plan.js).
 | `create-commercial-release-branch` | `<train>` | `release/<x.y.z>` | every project; the source branch is resolved per project with `resolve-release-branch` |
 | `create-hotfix-release-branch` | `<train>` | `release/<x.y.z.h>` | only projects with a 4-segment version (e.g. `5.0.4.1-SNAPSHOT`) |
 
-Every key in the file is a project except `spring-boot`. `spring-cloud-release` is a project like the rest.
+Every key in the file is a project except `spring-boot` and `spring-vault`. `spring-cloud-release` is a project like the rest.
 
 ## Inputs
 

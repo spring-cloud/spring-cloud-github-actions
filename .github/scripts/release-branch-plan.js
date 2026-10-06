@@ -33,7 +33,7 @@ const MODES = [
 
 // Entries in the releaser config that are not spring-cloud projects. spring-cloud-release is
 // deliberately absent: it is a project like any other and needs its own release branch.
-const NON_PROJECT_KEYS = new Set(['spring-boot']);
+const NON_PROJECT_KEYS = new Set(['spring-boot', 'spring-vault']);
 
 const ORG = 'spring-cloud';
 
