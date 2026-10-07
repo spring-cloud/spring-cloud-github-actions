@@ -343,7 +343,7 @@ jobs:
 
   update-versions:
     needs: [derive, initialize, create-internal-release-branch]
-    if: ${{ !cancelled() }}
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -413,6 +413,7 @@ jobs:
 
   ensure-workflows:
     needs: [derive, update-versions]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -491,6 +492,7 @@ jobs:
 
   trigger-release-train-join:
     needs: [derive, ensure-workflows, create-milestone]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -514,7 +516,7 @@ jobs:
 
   trigger-ci:
     needs: [derive, initialize, create-internal-release-branch, trigger-release-train-join]
-    if: ${{ !cancelled() }}
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       # The tag path is an orphan branch with no history worth keeping, so its
