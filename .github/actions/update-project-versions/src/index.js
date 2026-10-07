@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const { releaserConfigFileName } = require('../../../scripts/releaser-config-file');
+const { PROJECT_NAME_SUBSTITUTIONS } = require('../../../scripts/project-name-substitutions');
 const { XMLParser } = require('fast-xml-parser');
 const fs = require('fs');
 const path = require('path');
@@ -24,7 +25,7 @@ async function run() {
     let projectVersion;
 
     const substitutionsInput = core.getInput('project-version-substitutions');
-    let substitutions = {};
+    let substitutions = PROJECT_NAME_SUBSTITUTIONS;
     if (substitutionsInput) {
       try {
         substitutions = JSON.parse(substitutionsInput);

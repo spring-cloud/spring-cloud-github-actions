@@ -144,6 +144,14 @@ jobs:
             exit 1
           fi
           PROJECT_NAME=$(echo "$ARTIFACT_ID" | sed -E 's/-dependencies$//; s/-parent$//')
+
+          # A handful of root artifactIds don't match the project key the releaser config
+          # uses (most notably spring-cloud-release's root pom.xml artifactId is the
+          # historical spring-cloud-starter-build, not spring-cloud-release) — resolved
+          # through the same map update-project-versions's project-version-substitutions
+          # input defaults to, shared here rather than reimplemented.
+          PROJECT_NAME=$(node .github/scripts/project-name-substitutions.js "$PROJECT_NAME")
+
           echo "Artifact ID:  $ARTIFACT_ID"
           echo "Project name: $PROJECT_NAME"
 
