@@ -179,25 +179,15 @@ runs:
         fi
 
     - name: Trigger release-train-ready workflow
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-      run: |
-        run_url=$(gh workflow run release-train-ready.yml \
-          --repo spring-cloud/${{ inputs.project }} \
-          --ref release/${{ steps.version.outputs.version }} \
-          --field release-train=${{ inputs.spring-release-train-version }} \
-          --field release-train-repository=spring-io/release-train)
-        echo "Dispatched workflow run. Waiting for $run_url to complete."
-        run_id=${run_url##*/}
-        watch_exit_code=0
-        gh run watch $run_id --repo spring-cloud/${{ inputs.project }} --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
-        if [[ $watch_exit_code -eq 0 ]]; then
-          echo "Workflow run succeeded."
-        else
-          echo "Workflow run failed."
-        fi
-        exit $watch_exit_code
+      uses: ./.github/actions/dispatch-and-wait
+      with:
+        repo:     spring-cloud/${{ inputs.project }}
+        workflow: release-train-ready.yml
+        ref:      release/${{ steps.version.outputs.version }}
+        inputs: |
+          release-train=${{ inputs.spring-release-train-version }}
+          release-train-repository=spring-io/release-train
+        token:    ${{ inputs.token }}
 
     # A hotfix release/<version> branch is registered in config/projects.json for its own
     # scheduled CI entry (create-hotfix-release-branch.yml); a GA release/<version> branch

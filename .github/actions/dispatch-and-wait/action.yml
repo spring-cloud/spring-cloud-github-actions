@@ -1,0 +1,104 @@
+name: 'Dispatch and Wait'
+description: >
+  Dispatches a workflow_dispatch workflow, waits for the run to complete, and fails unless
+  the run's conclusion is success.
+
+inputs:
+  repo:
+    description: 'Full repository path of the workflow to run (e.g. spring-cloud/spring-cloud-config-commercial)'
+    required: true
+  workflow:
+    description: 'Workflow file name (e.g. release-train-join.yml)'
+    required: true
+  ref:
+    description: 'Branch or tag to run the workflow on'
+    required: true
+  inputs:
+    description: >
+      Workflow inputs, one key=value per line. Everything after the first = is the value,
+      passed as a raw string, so values may contain spaces or further = signs. Blank lines
+      are ignored.
+    required: false
+    default: ''
+  summary-title:
+    description: >
+      When set, a line "<summary-title>: succeeded|FAILED (<conclusion>) - <run url>" is
+      appended to the job's step summary.
+    required: false
+    default: ''
+  interval:
+    description: 'Seconds between status checks'
+    required: false
+    default: '10'
+  token:
+    description: 'GitHub token allowed to dispatch and read workflow runs in repo'
+    required: true
+
+outputs:
+  run-url:
+    description: 'URL of the dispatched run'
+    value: ${{ steps.run.outputs.run-url }}
+  conclusion:
+    description: 'Conclusion of the run (success, failure, cancelled, ...)'
+    value: ${{ steps.run.outputs.conclusion }}
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch ${{ inputs.workflow }} and wait
+      id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        WORKFLOW: ${{ inputs.workflow }}
+        REF: ${{ inputs.ref }}
+        WORKFLOW_INPUTS: ${{ inputs.inputs }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+        INTERVAL: ${{ inputs.interval }}
+      run: |
+        set -euo pipefail
+
+        args=()
+        while IFS= read -r line; do
+          line="${line%$'\r'}"
+          [[ -z "${line//[[:space:]]/}" ]] && continue
+          if [[ "$line" != *=* ]]; then
+            echo "::error::Workflow input '${line}' is not key=value."
+            exit 1
+          fi
+          args+=(-f "$line")
+        done <<< "$WORKFLOW_INPUTS"
+
+        echo "Dispatching ${WORKFLOW} in ${REPO} on ${REF}..."
+        run_url=$(gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$REF" "${args[@]}")
+        run_id="${run_url##*/}"
+        if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+          echo "::error::Could not read the run id from gh workflow run's output: '${run_url}'"
+          exit 1
+        fi
+        echo "run-url=${run_url}" >> "$GITHUB_OUTPUT"
+        echo "Dispatched. Waiting for ${run_url} to complete."
+
+        # gh run watch's exit status is not the run's result: right after dispatch it can
+        # exit non-zero before the run has any jobs, while the run goes on to succeed. So
+        # the watch is only used to wait, and the run's own conclusion decides the outcome,
+        # re-watching until the run has actually completed.
+        while :; do
+          gh run watch "$run_id" --repo "$REPO" --interval="$INTERVAL" > /dev/null \
+            || echo "gh run watch exited early; checking the run's status."
+          status=$(gh run view "$run_id" --repo "$REPO" --json status --jq .status) || status=""
+          [[ "$status" == "completed" ]] && break
+          sleep "$INTERVAL"
+        done
+        conclusion=$(gh run view "$run_id" --repo "$REPO" --json conclusion --jq .conclusion)
+        echo "conclusion=${conclusion}" >> "$GITHUB_OUTPUT"
+
+        if [[ "$conclusion" == "success" ]]; then
+          echo "${WORKFLOW} succeeded: ${run_url}"
+          [[ -n "$SUMMARY_TITLE" ]] && echo "### ${SUMMARY_TITLE}: succeeded - ${run_url}" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        [[ -n "$SUMMARY_TITLE" ]] && echo "### ${SUMMARY_TITLE}: FAILED (${conclusion}) - ${run_url}" >> "$GITHUB_STEP_SUMMARY"
+        echo "::error::${WORKFLOW} in ${REPO} finished with conclusion '${conclusion}': ${run_url}"
+        exit 1
