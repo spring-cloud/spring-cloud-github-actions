@@ -81,7 +81,6 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout
-        if: ${{ inputs.mode == 'create-commercial-release-branch' }}
         uses: actions/checkout@v4
 
       # The commercial workflow takes the branch to cut from as an input; the other two
@@ -97,9 +96,9 @@ jobs:
           commercial: 'true'
           token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
-      - name: Dispatch ${{ inputs.mode }} and wait
+      - name: Build the ${{ inputs.mode }} inputs
+        id: inputs
         env:
-          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
           MODE: ${{ inputs.mode }}
           PROJECT: ${{ matrix.project }}
           TRAIN: ${{ inputs.spring_cloud_release_train }}
@@ -112,44 +111,40 @@ jobs:
         run: |
           set -euo pipefail
 
-          args=()
+          lines=()
           case "$MODE" in
             create-oss-release-branch)
-              args+=(-f "oss_repo=${PROJECT}" -f "spring_cloud_release_train=${TRAIN}"
-                     -f "spring_release_train=${SPRING_TRAIN}")
-              [[ -n "$SHA" ]] && args+=(-f "sha=${SHA}")
+              lines+=("oss_repo=${PROJECT}" "spring_cloud_release_train=${TRAIN}"
+                      "spring_release_train=${SPRING_TRAIN}")
+              [[ -n "$SHA" ]] && lines+=("sha=${SHA}")
               ;;
             create-hotfix-release-branch)
-              args+=(-f "oss_repo=${PROJECT}" -f "release_train_version=${TRAIN}"
-                     -f "spring_release_train=${SPRING_TRAIN}" -f "use_tag=${USE_TAG}")
-              [[ -n "$SHA" ]] && args+=(-f "sha=${SHA}")
+              lines+=("oss_repo=${PROJECT}" "release_train_version=${TRAIN}"
+                      "spring_release_train=${SPRING_TRAIN}" "use_tag=${USE_TAG}")
+              [[ -n "$SHA" ]] && lines+=("sha=${SHA}")
               ;;
             create-commercial-release-branch)
               if [[ "$SOURCE_STATUS" != "ok" ]]; then
                 echo "::error::Could not resolve the source branch for ${PROJECT}-commercial: ${SOURCE_MESSAGE}"
                 exit 1
               fi
-              args+=(-f "project=${PROJECT}-commercial" -f "branch=${SOURCE_BRANCH}"
-                     -f "release-train=${SPRING_TRAIN}")
+              lines+=("project=${PROJECT}-commercial" "branch=${SOURCE_BRANCH}"
+                      "release-train=${SPRING_TRAIN}")
               ;;
           esac
 
-          echo "Dispatching ${MODE}.yml for ${PROJECT}..."
-          run_url=$(gh workflow run "${MODE}.yml" \
-            --repo "${{ github.repository }}" \
-            --ref "${{ github.ref_name }}" \
-            "${args[@]}")
-          echo "Dispatched. Waiting for ${run_url} to complete."
-          run_id=${run_url##*/}
+          {
+            echo "inputs<<INPUTS_EOF"
+            printf '%s\n' "${lines[@]}"
+            echo "INPUTS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
-          watch_exit_code=0
-          gh run watch "$run_id" --repo "${{ github.repository }}" --exit-status --interval=10 \
-            > /dev/null 2>&1 || watch_exit_code=$?
-
-          if [[ $watch_exit_code -eq 0 ]]; then
-            echo "### ${PROJECT}: succeeded - ${run_url}" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### ${PROJECT}: FAILED - ${run_url}" >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::${MODE} failed for ${PROJECT}: ${run_url}"
-          fi
-          exit $watch_exit_code
+      - name: Dispatch ${{ inputs.mode }} and wait
+        uses: ./.github/actions/dispatch-and-wait
+        with:
+          repo:          ${{ github.repository }}
+          workflow:      ${{ inputs.mode }}.yml
+          ref:           ${{ github.ref_name }}
+          inputs:        ${{ steps.inputs.outputs.inputs }}
+          summary-title: ${{ matrix.project }}
+          token:         ${{ secrets.GH_ACTIONS_REPO_TOKEN }}

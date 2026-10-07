@@ -210,25 +210,13 @@ jobs:
       # evaluate falsy and skip the join rather than fail visibly.
       - name: Trigger release-train-join workflow and wait
         if: ${{ inputs['release-train'] != '' }}
-        env:
-          GH_TOKEN: ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-        run: |
-          commercial_project="${{ steps.setup.outputs.commercial-project }}"
-          release_branch="release/${{ steps.setup.outputs.release-version }}"
-
-          run_url=$(gh workflow run release-train-join.yml \
-            --repo "spring-cloud/${commercial_project}" \
-            --ref "${release_branch}" \
-            --field "deployment-destination=Spring Enterprise" \
-            --field "release-train=${{ inputs.release-train }}" \
-            --field "release-train-repository=spring-io/release-train")
-          echo "Dispatched workflow run. Waiting for $run_url to complete."
-          run_id=${run_url##*/}
-          watch_exit_code=0
-          gh run watch $run_id --repo "spring-cloud/${commercial_project}" --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
-          if [[ $watch_exit_code -eq 0 ]]; then
-            echo "Workflow run succeeded."
-          else
-            echo "Workflow run failed."
-          fi
-          exit $watch_exit_code
+        uses: ./.github/actions/dispatch-and-wait
+        with:
+          repo:     spring-cloud/${{ steps.setup.outputs.commercial-project }}
+          workflow: release-train-join.yml
+          ref:      release/${{ steps.setup.outputs.release-version }}
+          inputs: |
+            deployment-destination=Spring Enterprise
+            release-train=${{ inputs['release-train'] }}
+            release-train-repository=spring-io/release-train
+          token:    ${{ inputs.token || secrets.token || secrets.GH_ACTIONS_REPO_TOKEN }}

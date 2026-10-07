@@ -621,31 +621,24 @@ jobs:
     needs: [derive, ensure-workflows, create-milestone]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        if: ${{ inputs.spring_release_train != '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+
       - name: Trigger release-train-join workflow and wait
         if: ${{ inputs.spring_release_train != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
-        run: |
-          commercial_project="${{ needs.derive.outputs.commercial_project }}"
-          commercial_branch="${{ needs.derive.outputs.commercial_branch }}"
-
-          echo "Triggering release-train-join.yml in spring-cloud/${commercial_project} on ${commercial_branch}..."
-          run_url=$(gh workflow run release-train-join.yml \
-            --repo "spring-cloud/${commercial_project}" \
-            --ref "${commercial_branch}" \
-            --field "deployment-destination=Maven Central" \
-            --field "release-train=${{ inputs.spring_release_train }}" \
-            --field "release-train-repository=spring-io/release-train")
-          echo "Dispatched workflow run. Waiting for $run_url to complete."
-          run_id=${run_url##*/}
-          watch_exit_code=0
-          gh run watch $run_id --repo "spring-cloud/${commercial_project}" --exit-status --interval=3 > /dev/null 2>&1 || watch_exit_code=$?
-          if [[ $watch_exit_code -eq 0 ]]; then
-            echo "Workflow run succeeded."
-          else
-            echo "Workflow run failed."
-          fi
-          exit $watch_exit_code
+        uses: ./.github/actions/dispatch-and-wait
+        with:
+          repo:     spring-cloud/${{ needs.derive.outputs.commercial_project }}
+          workflow: release-train-join.yml
+          ref:      ${{ needs.derive.outputs.commercial_branch }}
+          inputs: |
+            deployment-destination=Maven Central
+            release-train=${{ inputs.spring_release_train }}
+            release-train-repository=spring-io/release-train
+          token:    ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
   # Squash all [skip actions] initialization commits into a single commit and
   # push it (without [skip actions]) to trigger the CI pipeline on the newly
