@@ -12,7 +12,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/2.1.12", "release/3.2.5", "release/3.3.5", "5.1.x-internal", "5.0.x-internal", "3.3.x", "3.2.x", "2.1.x"],
+        "scheduled": ["release/5.0.4.1", "release/2.1.12", "release/3.2.5", "release/3.3.5", "5.1.x-internal", "5.0.x-internal", "3.3.x", "3.2.x", "2.1.x"],
         "default": ["3.3.x"]
       },
       "jdkVersions": {
@@ -23,7 +23,8 @@
         "5.1.x-internal": ["17", "21", "25"],
         "release/3.3.5": ["17", "21", "25"],
         "release/3.2.5": ["17", "21"],
-        "release/2.1.12": ["8", "11", "17"]
+        "release/2.1.12": ["8", "11", "17"],
+        "release/5.0.4.1": ["17", "21", "25"]
       }
     }
   },
@@ -142,7 +143,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/3.1.15", "release/4.2.11", "release/4.3.7", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.1.x"],
+        "scheduled": ["release/5.0.4.1", "release/3.1.15", "release/4.2.11", "release/4.3.7", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.1.x"],
         "default": ["4.3.x"]
       },
       "jdkVersions": {
@@ -153,7 +154,8 @@
         "5.1.x-internal": ["17", "21", "25"],
         "release/4.3.7": ["17", "21"],
         "release/4.2.11": ["17", "21"],
-        "release/3.1.15": ["8", "11", "17"]
+        "release/3.1.15": ["8", "11", "17"],
+        "release/5.0.4.1": ["17", "21", "25"]
       }
     }
   },
@@ -170,7 +172,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/3.2.13", "release/4.2.8", "release/4.3.5", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.2.x"],
+        "scheduled": ["release/5.0.4.1", "release/3.2.13", "release/4.2.8", "release/4.3.5", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.2.x"],
         "default": ["4.3.x"]
       },
       "jdkVersions": {
@@ -181,7 +183,8 @@
         "5.1.x-internal": ["17", "21", "25"],
         "release/4.3.5": ["17", "21"],
         "release/4.2.8": ["17", "21"],
-        "release/3.2.13": ["8", "11", "17"]
+        "release/3.2.13": ["8", "11", "17"],
+        "release/5.0.4.1": ["17", "21", "25"]
       }
     }
   },
@@ -306,7 +309,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/3.1.16", "release/4.2.10", "release/4.3.6", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.1.x"],
+        "scheduled": ["release/5.0.6.1", "release/3.1.16", "release/4.2.10", "release/4.3.6", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.1.x"],
         "default": ["4.3.x"]
       },
       "jdkVersions": {
@@ -317,7 +320,8 @@
         "5.1.x-internal": ["17", "21", "25"],
         "release/4.3.6": ["17", "21", "25"],
         "release/4.2.10": ["17", "21"],
-        "release/3.1.16": ["8", "11", "17"]
+        "release/3.1.16": ["8", "11", "17"],
+        "release/5.0.6.1": ["17", "21", "25"]
       }
     }
   },
@@ -334,7 +338,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/3.1.10", "release/4.2.6", "release/4.3.5", "5.0.x-internal", "5.1.x-internal", "4.3.x", "4.2.x", "3.1.x"],
+        "scheduled": ["release/5.0.3.1", "release/3.1.10", "release/4.2.6", "release/4.3.5", "5.0.x-internal", "5.1.x-internal", "4.3.x", "4.2.x", "3.1.x"],
         "default": ["4.3.x"]
       },
       "jdkVersions": {
@@ -345,7 +349,8 @@
         "5.0.x-internal": ["17", "21", "25"],
         "release/4.3.5": ["17", "21", "25"],
         "release/4.2.6": ["17", "21"],
-        "release/3.1.10": ["8", "11", "17"]
+        "release/3.1.10": ["8", "11", "17"],
+        "release/5.0.3.1": ["17", "21", "25"]
       }
     }
   },
@@ -439,7 +444,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/3.1.6", "release/4.2.6", "release/4.3.5", "5.0.x-internal", "5.1.x-internal", "4.3.x", "4.2.x", "3.1.x"],
+        "scheduled": ["release/5.0.3.1", "release/3.1.6", "release/4.2.6", "release/4.3.5", "5.0.x-internal", "5.1.x-internal", "4.3.x", "4.2.x", "3.1.x"],
         "default": ["4.3.x"]
       },
       "jdkVersions": {
@@ -450,7 +455,8 @@
         "5.0.x-internal": ["17", "21", "25"],
         "release/4.3.5": ["17", "21", "25"],
         "release/4.2.6": ["17", "21"],
-        "release/3.1.6": ["8", "11", "17"]
+        "release/3.1.6": ["8", "11", "17"],
+        "release/5.0.3.1": ["17", "21", "25"]
       }
     }
   },
