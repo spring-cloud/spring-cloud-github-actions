@@ -93,7 +93,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/2021.0.16", "release/2024.0.9", "release/2025.0.5", "2026.0.x-internal", "2025.1.x-internal", "2025.0.x", "2024.0.x", "2021.0.x"],
+        "scheduled": ["release/2025.1.4.1", "release/2021.0.16", "release/2024.0.9", "release/2025.0.5", "2026.0.x-internal", "2025.1.x-internal", "2025.0.x", "2024.0.x", "2021.0.x"],
         "default": ["2025.0.x"]
       },
       "jdkVersions": {
@@ -104,7 +104,8 @@
         "2026.0.x-internal": ["17", "21", "25"],
         "release/2025.0.5": ["17", "21", "25"],
         "release/2024.0.9": ["17", "21"],
-        "release/2021.0.16": ["8", "11", "17"]
+        "release/2021.0.16": ["8", "11", "17"],
+        "release/2025.1.4.1": ["17", "21", "25"]
       }
     }
   },
