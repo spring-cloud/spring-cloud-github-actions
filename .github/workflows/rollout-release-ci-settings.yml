@@ -1,0 +1,174 @@
+name: Rollout Release CI Settings
+
+# Copies config/release-ci-settings.xml onto every branch in branches.scheduled of
+# config/projects.json that ALREADY carries a release-ci-settings.xml whose content
+# differs from the template. Branches without the file are never given one.
+#
+# Defaults to a dry run. Set dry_run to false to actually commit and push.
+# Commits carry [skip actions] so the rollout does not start CI on every branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Comma-separated Spring Cloud project names (e.g. spring-cloud-build,spring-cloud-config). Empty means every project in projects.json.'
+        required: false
+        type: string
+        default: ''
+      repo_type:
+        description: 'Update commercial, oss, or both?'
+        required: false
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - oss
+          - commercial
+      dry_run:
+        description: 'Dry run, if checked no changes will be committed, but you can see what would be updated'
+        required: false
+        type: boolean
+        default: true
+      token:
+        description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      count: ${{ steps.build-matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: build-matrix
+        env:
+          PROJECTS_FILTER: ${{ inputs.projects }}
+          REPO_TYPE: ${{ inputs.repo_type }}
+          MATRIX_LIB: ${{ github.workspace }}/.github/scripts/project-branch-matrix.js
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const { buildBranchMatrix } = require(process.env.MATRIX_LIB);
+
+          const projects = JSON.parse(fs.readFileSync('config/projects.json', 'utf8'));
+
+          // -internal branches carry the file, so keep them (excludeInternal: false).
+          // Whether a branch actually has the file is decided per branch by the sync action.
+          const { entries } = buildBranchMatrix(projects, {
+            filter: process.env.PROJECTS_FILTER,
+            repoType: process.env.REPO_TYPE,
+            excludeInternal: false,
+          });
+          const include = entries.map(({ repo, branch, type }) => ({ repo, branch, type }));
+
+          console.log(`${include.length} (repo, branch) pairs`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `matrix=${JSON.stringify({ include })}\n` +
+            `count=${include.length}\n`);
+          JSEOF
+
+  sync:
+    name: "Sync — ${{ matrix.repo }}@${{ matrix.branch }}"
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Sync release-ci-settings.xml
+        id: sync
+        uses: ./.github/actions/sync-release-ci-settings
+        with:
+          repository: ${{ matrix.repo }}
+          branch:     ${{ matrix.branch }}
+          dry-run:    ${{ inputs.dry_run }}
+          token:      ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Record result
+        if: always()
+        id: record
+        env:
+          REPO: ${{ matrix.repo }}
+          BRANCH: ${{ matrix.branch }}
+          STATUS: ${{ steps.sync.outputs.status }}
+          OUTCOME: ${{ steps.sync.outcome }}
+        run: |
+          set -euo pipefail
+          safe="${REPO//\//-}-${BRANCH//\//-}"
+          echo "safe-name=${safe}" >> "$GITHUB_OUTPUT"
+          jq -n --arg repo "$REPO" --arg branch "$BRANCH" \
+            --arg status "${STATUS:-failed}" --arg outcome "$OUTCOME" \
+            '{repo: $repo, branch: $branch, status: $status, outcome: $outcome}' \
+            > "result-${safe}.json"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ steps.record.outputs.safe-name }}
+          path: result-${{ steps.record.outputs.safe-name }}.json
+
+  summary:
+    name: Summary
+    needs: [setup, sync]
+    runs-on: ubuntu-latest
+    if: always() && needs.setup.outputs.count != '0'
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: results
+
+      - name: Write summary
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          node - << 'JSEOF'
+          const fs = require('fs');
+          const results = fs.readdirSync('results').filter(f => f.endsWith('.json'))
+            .map(f => JSON.parse(fs.readFileSync(`results/${f}`, 'utf8')))
+            .sort((a, b) => a.repo.localeCompare(b.repo) || a.branch.localeCompare(b.branch));
+
+          const dryRun = process.env.DRY_RUN === 'true';
+          const failed = r => r.outcome !== 'success';
+          const changed = results.filter(r => !failed(r) && (r.status === 'updated' || r.status === 'would-update'));
+          const count = s => results.filter(r => !failed(r) && r.status === s).length;
+
+          const lines = [dryRun ? '## Release CI settings rollout (dry run — nothing pushed)' : '## Release CI settings rollout', ''];
+          if (changed.length) {
+            lines.push('| Repository | Branch | Result |', '|---|---|---|');
+            for (const r of changed) lines.push(`| \`${r.repo}\` | \`${r.branch}\` | ${r.status} |`);
+            lines.push('');
+          }
+          lines.push(`**${results.length}** branches checked — ` +
+            `**${changed.length}** ${dryRun ? 'would change' : 'changed'}, ` +
+            `**${count('no-change')}** already match, ` +
+            `**${count('absent')}** have no file, ` +
+            `**${count('skipped')}** skipped, ` +
+            `**${results.filter(failed).length}** failed.`);
+          const failures = results.filter(failed);
+          if (failures.length) lines.push('', 'Failed: ' + failures.map(r => `\`${r.repo}@${r.branch}\``).join(', '));
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          console.log(lines.join('\n'));
+          if (failures.length) process.exit(1);
+          JSEOF

@@ -1,0 +1,116 @@
+name: Sync Release CI Settings
+description: >
+  Overwrites release-ci-settings.xml on one branch of one repository with the
+  canonical template (config/release-ci-settings.xml in the calling workspace),
+  but only when the branch already carries that file and its content differs.
+  Branches without the file are never given one. Idempotent.
+author: Spring Cloud Team
+
+inputs:
+  repository:
+    description: 'Repository to update (e.g. spring-cloud/spring-cloud-vault-commercial)'
+    required: true
+  branch:
+    description: 'Branch to update'
+    required: true
+  template:
+    description: 'Path to the canonical settings file. Defaults to config/release-ci-settings.xml in the workspace.'
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token with contents: write on the target repository'
+    required: true
+  git-user-name:
+    description: 'Git author name for the commit'
+    required: false
+    default: 'Spring Builds'
+  git-user-email:
+    description: 'Git author email for the commit'
+    required: false
+    default: 'svc.spring-builds@broadcom.com'
+  commit-message:
+    description: 'Commit message for the change'
+    required: false
+    default: 'Update release-ci-settings.xml [skip actions]'
+  dry-run:
+    description: 'Report the change without committing or pushing'
+    required: false
+    default: 'false'
+
+outputs:
+  status:
+    description: 'updated, would-update, no-change, absent, or skipped'
+    value: ${{ steps.sync.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    - name: Sync release-ci-settings.xml
+      id: sync
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repository }}
+        BRANCH: ${{ inputs.branch }}
+        TEMPLATE: ${{ inputs.template }}
+        COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        GIT_USER_NAME: ${{ inputs.git-user-name }}
+        GIT_USER_EMAIL: ${{ inputs.git-user-email }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+
+        TEMPLATE="${TEMPLATE:-${GITHUB_WORKSPACE}/config/release-ci-settings.xml}"
+        if [[ ! -f "$TEMPLATE" ]]; then
+          echo "::error::Template $TEMPLATE not found."
+          exit 1
+        fi
+
+        # Work from outside the calling checkout so its GITHUB_TOKEN extraheader
+        # cannot override the token given to this action.
+        WORKDIR="$(mktemp -d)"
+        cd "$WORKDIR"
+
+        REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+        if ! git clone --quiet --depth 1 --single-branch --branch "$BRANCH" \
+             "$REMOTE_URL" repo 2>/dev/null; then
+          echo "::warning::Could not clone ${REPO}@${BRANCH} - skipping."
+          echo "status=skipped" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        cd repo
+
+        # Only branches that already carry the file are in scope; it is release
+        # scaffolding, and adding it elsewhere would change how deploy.yml builds.
+        if [[ ! -f release-ci-settings.xml ]]; then
+          echo "${REPO}@${BRANCH} has no release-ci-settings.xml - leaving alone."
+          echo "status=absent" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if cmp -s "$TEMPLATE" release-ci-settings.xml; then
+          echo "${REPO}@${BRANCH} already matches the template."
+          echo "status=no-change" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        cp "$TEMPLATE" release-ci-settings.xml
+        git --no-pager diff
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+          echo "[dry run] not committing."
+          echo "status=would-update" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git config user.name  "$GIT_USER_NAME"
+        git config user.email "$GIT_USER_EMAIL"
+        git commit --quiet -am "$COMMIT_MESSAGE"
+        git push --quiet origin "$BRANCH"
+        echo "Pushed to ${REPO}@${BRANCH}."
+        echo "status=updated" >> "$GITHUB_OUTPUT"
+
+branding:
+  icon: 'git-branch'
+  color: 'green'
