@@ -18,6 +18,10 @@
 //   create-commercial-release-branch  reads <train>,                   creates release/<x.y.z>
 //   create-hotfix-release-branch      reads <train>,                   creates release/<x.y.z.h>
 //
+// The -INTERNAL-SNAPSHOT file lists every project, but only the ones being released in the
+// train are at -INTERNAL-SNAPSHOT. The rest are at plain -SNAPSHOT and have neither a tag nor a
+// release branch yet, so the tag and branch checks cannot tell them apart - the suffix does.
+//
 // Hotfix versions are the 4-segment ones. The releaser config lists them as -SNAPSHOT, since
 // the train is not finalized when the branches are cut.
 
@@ -66,6 +70,9 @@ const branchFor = (mode, rawVersion, qualifier) => {
   }
 
   if (mode === 'create-oss-release-branch') {
+    if (!/-INTERNAL-SNAPSHOT$/i.test(rawVersion)) {
+      return { skip: 'not being released in this train (not -INTERNAL-SNAPSHOT)' };
+    }
     // 5.1.0-INTERNAL-SNAPSHOT -> 5.1.0: everything after the first `-` goes.
     const version = rawVersion.split('-')[0];
     if (!/^\d+\.\d+(\..+)?$/.test(version)) return { skip: `unusable version '${rawVersion}'` };

@@ -15,7 +15,7 @@ The plan logic is [`release-branch-plan.js`](../scripts/release-branch-plan.js).
 
 | Mode | Properties file | Branch (and `v<version>` tag) checked | Projects included |
 |------|-----------------|----------------|-------------------|
-| `create-oss-release-branch` | `<train>-INTERNAL-SNAPSHOT` (the `-M<n>`/`-RC<n>` phase is stripped for the lookup) | `release/<x.y.z>[-M1\|-RC2]` | every project |
+| `create-oss-release-branch` | `<train>-INTERNAL-SNAPSHOT` (the `-M<n>`/`-RC<n>` phase is stripped for the lookup) | `release/<x.y.z>[-M1\|-RC2]` | only projects whose version is `-INTERNAL-SNAPSHOT`; plain `-SNAPSHOT` entries aren't being released in the train |
 | `create-commercial-release-branch` | `<train>` | `release/<x.y.z>` | every project; the source branch is resolved per project with `resolve-release-branch` |
 | `create-hotfix-release-branch` | `<train>` | `release/<x.y.z.h>` | only projects with a 4-segment version (e.g. `5.0.4.1-SNAPSHOT`) |
 

@@ -38,6 +38,12 @@ describe('branchFor', () => {
       .toEqual({ version: '5.1.0-M1', branch: 'release/5.1.0-M1' });
   });
 
+  it('OSS skips versions that are not -INTERNAL-SNAPSHOT', () => {
+    expect(branchFor(OSS, '5.0.4-SNAPSHOT', '').skip).toMatch(/not being released/);
+    expect(branchFor(OSS, '5.0.3', '').skip).toMatch(/not being released/);
+    expect(branchFor(OSS, '5.1.0-internal-snapshot', '').branch).toBe('release/5.1.0');
+  });
+
   it('commercial strips only -SNAPSHOT', () => {
     expect(branchFor(COMMERCIAL, '5.0.3-SNAPSHOT', '').branch).toBe('release/5.0.3');
     expect(branchFor(COMMERCIAL, '5.0.3', '').branch).toBe('release/5.0.3');
@@ -81,6 +87,17 @@ describe('buildPlan', () => {
       { project: 'spring-cloud-config', branch: 'release/5.1.0', reason: 'branch already exists' }]);
   });
 
+  it('only plans the -INTERNAL-SNAPSHOT projects of an OSS train', () => {
+    const { todo, skipped } = buildPlan({
+      mode: OSS, train: '2026.1.0', ...noTags,
+      entries: entries([['spring-cloud-config', '5.1.0-INTERNAL-SNAPSHOT'],
+        ['spring-cloud-commons', '5.1.0-SNAPSHOT'], ['spring-cloud-release', '2026.1.0-INTERNAL-SNAPSHOT']]),
+    });
+    expect(todo.map(t => t.project)).toEqual(['spring-cloud-config', 'spring-cloud-release']);
+    expect(skipped).toEqual([{
+      project: 'spring-cloud-commons', reason: 'not being released in this train (not -INTERNAL-SNAPSHOT)' }]);
+  });
+
   it('only plans the hotfix projects of a hotfix train', () => {
     const { todo, skipped } = buildPlan({
       mode: HOTFIX, train: '2025.1.2', ...noTags,
@@ -96,9 +113,9 @@ describe('buildPlan', () => {
   ])('skips a version already tagged in the %s, even with no branch', (_, taggedRepo) => {
     const tagExists = (repo, tag) => repo === taggedRepo && tag === 'v5.0.3';
     const { todo, skipped } = buildPlan({
-      mode: OSS, train: '2026.1.0', branchExists: none, tagExists,
+      mode: COMMERCIAL, train: '2025.1.2', branchExists: none, tagExists,
       // Not being released in this train: the entry still names the previous release.
-      entries: entries([['spring-cloud-config', '5.0.3'], ['spring-cloud-commons', '5.1.0-INTERNAL-SNAPSHOT']]),
+      entries: entries([['spring-cloud-config', '5.0.3'], ['spring-cloud-commons', '5.0.4']]),
     });
     expect(todo.map(t => t.project)).toEqual(['spring-cloud-commons']);
     expect(skipped).toEqual([{
