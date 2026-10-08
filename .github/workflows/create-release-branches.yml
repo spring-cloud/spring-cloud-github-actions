@@ -5,7 +5,8 @@ run-name: "Create Release Branches - ${{ inputs.mode }} - ${{ inputs.spring_clou
 # Runs one of the single-project branch-creation workflows for every project in a release
 # train that does not have its release branch yet.
 #
-#   create-oss-release-branch         OSS release; reads <train>-INTERNAL-SNAPSHOT
+#   create-oss-release-branch         OSS release; reads <train>-INTERNAL-SNAPSHOT, the -INTERNAL-SNAPSHOT
+#                                     projects only (plain -SNAPSHOT ones aren't being released)
 #   create-commercial-release-branch  commercial-only release; reads <train>
 #   create-hotfix-release-branch      hotfix; reads <train>, the 4-segment (x.y.z.h) projects only
 #
