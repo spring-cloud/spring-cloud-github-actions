@@ -1,0 +1,151 @@
+name: Rebase Release Branches
+
+run-name: "Rebase Release Branches - ${{ inputs.spring_release_train }}${{ inputs.dry_run && ' - Dry Run' || '' }}"
+
+# Brings the release/ and -internal branches of every spring-cloud project in a Spring release
+# train up to date with their .x branches, instead of rebasing each by hand.
+#
+# The projects and versions come from spring-io/release-train's train.yml, read at the tag
+# named after the train. Each version there is release/<version> in <project>-commercial.
+#
+#   deployment-destination: maven_central     OSS release
+#       1. <x.y>.x-internal (commercial repo) is rebased onto the OSS <x.y>.x branch
+#          (main when main is on that line, as for a new minor)
+#       2. release/<version> is rebased onto the rebased <x.y>.x-internal
+#
+#   deployment-destination: spring_enterprise commercial release
+#       release/<version> is rebased onto the commercial <x.y>.x branch
+#
+#   hotfix (4-segment version, e.g. 5.0.4.1)  spring_enterprise in train.yml, but when the
+#       project has an <x.y>.x-internal branch it follows the OSS steps above, so -internal is
+#       rebased once and release/5.0.4 and release/5.0.4.1 both follow it.
+#
+# Only -internal and release/* branches are rewritten. The OSS and commercial .x branches are
+# bases: they are read and never pushed. Pushes use --force-with-lease against the sha that was
+# rebased.
+#
+# A rebase that conflicts is aborted, and the branches that depend on it are reported as
+# blocked. The summary lists every such project and branch under "must be rebased by hand";
+# the other projects carry on. Branches that do not exist are skipped, and branches already on
+# their base are left alone, so re-running after fixing something by hand only does what is left.
+#
+# dry_run (the default) does every rebase locally and reports the result without pushing.
+#
+# The plan is .github/scripts/rebase-plan.js, the per-project git work is
+# .github/scripts/rebase-branches.sh and the report is .github/scripts/rebase-summary.js.
+
+on:
+  workflow_dispatch:
+    inputs:
+      spring_release_train:
+        description: 'Spring release train version, the tag of spring-io/release-train whose train.yml is used (e.g. 2026.10.22)'
+        required: true
+        type: string
+      projects:
+        description: 'Comma separated spring-cloud projects to rebase (e.g. spring-cloud-config,spring-cloud-bus). Blank rebases every spring-cloud project in train.yml.'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Rebase locally and report, without pushing'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:   ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Work out which branches need rebasing
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          TRAIN: ${{ inputs.spring_release_train }}
+          PROJECTS: ${{ inputs.projects }}
+        run: node .github/scripts/rebase-plan.js "$TRAIN" "$PROJECTS"
+
+  rebase:
+    name: ${{ matrix.project }} ${{ matrix.line }}.x (${{ matrix.mode }})
+    needs: plan
+    if: ${{ needs.plan.outputs.has_work == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -internal sits on the OSS branch of the same line: <x.y>.x, or main when main is on
+      # that line. Never fails the job - an unresolved branch is reported in the summary.
+      - name: Resolve the OSS base branch
+        id: oss_base
+        if: ${{ matrix.mode == 'oss' }}
+        uses: ./.github/actions/resolve-release-branch
+        with:
+          repo: spring-cloud/${{ matrix.project }}
+          version: ${{ matrix.base_version }}
+          commercial: 'false'
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # Commercial repos have no main to fall back on.
+      - name: Resolve the commercial base branch
+        id: commercial_base
+        if: ${{ matrix.mode == 'commercial' }}
+        uses: ./.github/actions/resolve-release-branch
+        with:
+          repo: spring-cloud/${{ matrix.project }}-commercial
+          version: ${{ matrix.base_version }}
+          commercial: 'true'
+          token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      - name: Rebase
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          PROJECT: ${{ matrix.project }}
+          LINE: ${{ matrix.line }}
+          MODE: ${{ matrix.mode }}
+          VERSIONS: ${{ matrix.versions }}
+          OSS_BASE: ${{ steps.oss_base.outputs.branch }}
+          COMMERCIAL_BASE: ${{ steps.commercial_base.outputs.branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RESULT_FILE: ${{ runner.temp }}/result.jsonl
+        run: .github/scripts/rebase-branches.sh
+
+      - name: Upload result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.project }}-${{ matrix.line }}
+          path: ${{ runner.temp }}/result.jsonl
+          if-no-files-found: ignore
+
+  summary:
+    needs: [plan, rebase]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+
+      - name: Summarize
+        env:
+          TRAIN: ${{ inputs.spring_release_train }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: node .github/scripts/rebase-summary.js "$TRAIN" "$DRY_RUN" results
