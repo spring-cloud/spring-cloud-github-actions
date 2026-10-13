@@ -4,7 +4,7 @@ Runs the [github-actions-workflow-generator](https://github.com/spring-io/github
 
 ## What It Does
 
-For every repository and branch tracked in [`config/projects.json`](../config/projects.json):
+For every repository and `.x` branch tracked in [`config/projects.json`](../config/projects.json):
 
 1. Copies `.github/actions/release-train-build/action.yml` and `.github/actions/release-train-test/action.yml` into the target repo from this repo (see [Release Train Actions](#release-train-actions)).
 2. Copies `release-train-settings.xml` to the root of the target repo.
@@ -14,6 +14,8 @@ For every repository and branch tracked in [`config/projects.json`](../config/pr
 The primary Java version passed to the generator is determined per-branch from `projects.json`:
 - `8` if JDK 8 is listed in the branch's `jdkVersions`
 - `17` otherwise
+
+`release/*` and `*-internal` branches are never processed, even when listed in `projects.json`. They are rebased onto the `.x` branches and pick up the regenerated workflow files that way.
 
 ## Triggering the Workflow
 
@@ -25,7 +27,6 @@ The workflow is triggered manually via **Actions → Run GitHub Actions Workflow
 |---|---|---|---|
 | `generator-version` | No | Latest release | Version of `github-actions-workflow-generator` to use (e.g. `0.0.5`). |
 | `sha` | No | Triggering commit | Commit SHA of this repo to copy release-train action files from. Useful for rolling out a specific version of the build/test logic. |
-| `spring-release` | No | _(empty)_ | Spring release train version (e.g. `2026.1`). When set, also processes `release/[version]` branches found in the `spring-io/release-train` README for that version. See [Spring Release Branches](#spring-release-branches). |
 | `projects` | No | _(empty — all projects)_ | Comma-separated list of Spring Cloud project names to limit the run to (e.g. `spring-cloud-build,spring-cloud-config`). When empty, every project in `projects.json` is processed. |
 | `dry_run` | No | `true` | When true, reports which repos and branches would be updated and pushes nothing. Uncheck to actually commit and push. |
 | `token` | No | `GH_ACTIONS_REPO_TOKEN` | GitHub token with write access to all target repos. Falls back to the `GH_ACTIONS_REPO_TOKEN` organisation secret. |
@@ -69,18 +70,6 @@ Useful when you want to roll out a specific version of the build/test action log
 ```
 sha: 348109524f9790dc1e20d48043fb1ef4765373b8
 ```
-
-### Include active release-train branches
-
-```
-spring-release: 2026.1
-```
-
-## Spring Release Branches
-
-When `spring-release` is set, the workflow fetches `README.adoc` from the `spring-io/release-train` repository at the specified ref (e.g. `2026.1`) and scans it for Spring Cloud entries. For each entry it finds a `release/[version]` branch in the corresponding commercial repository and runs the same generator steps against it.
-
-The primary JDK for a release branch is determined by deriving the parent branch from the version number (e.g. `release/3.1.15` → parent `3.1.x`) and looking up that branch's `jdkVersions` in `projects.json`.
 
 ## Release Train Actions
 

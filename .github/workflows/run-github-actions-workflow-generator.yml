@@ -15,11 +15,6 @@ on:
         required: false
         type: string
         default: ''
-      spring-release:
-        description: 'Spring release train version (e.g. 2026.1). When set, also processes release/[version] branches found in the spring-io/release-train README.adoc for that version.'
-        required: false
-        type: string
-        default: ''
       projects:
         description: 'Comma-separated list of Spring Cloud project names to run against (e.g. spring-cloud-build,spring-cloud-config). When empty, all projects in projects.json are processed.'
         required: false
@@ -74,7 +69,6 @@ jobs:
         id: build-matrix
         env:
           GH_TOKEN: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
-          SPRING_RELEASE: ${{ inputs.spring-release }}
           PROJECTS_FILTER: ${{ inputs.projects }}
         run: |
           node - << 'JSEOF'
@@ -112,11 +106,11 @@ jobs:
           const entries = [];
           const seen = new Set();
 
-          function addEntry(repo, branch, typeKey, projectKey, jdkLookupBranch) {
+          function addEntry(repo, branch, typeKey, projectKey) {
             const key = `${repo}@${branch}`;
             if (seen.has(key)) return;
             seen.add(key);
-            const jdks = getJdks(projectKey, typeKey, jdkLookupBranch || branch);
+            const jdks = getJdks(projectKey, typeKey, branch);
             entries.push({ repo, branch, primary_jdk: primaryJdk(jdks) });
           }
 
@@ -131,54 +125,10 @@ jobs:
                 ? `spring-cloud/${projectKey}-commercial`
                 : `spring-cloud/${projectKey}`;
               for (const branch of (typeCfg.branches || {}).scheduled || []) {
+                // release/* and *-internal branches are rebased onto the .x branches and
+                // pick up the regenerated workflows that way, so never generate them directly.
+                if (branch.startsWith('release/') || branch.endsWith('-internal')) continue;
                 addEntry(repo, branch, typeKey, projectKey);
-              }
-            }
-          }
-
-          // Optionally add release/[version] branches from the Spring release train README
-          const springRelease = (process.env.SPRING_RELEASE || '').trim();
-          if (springRelease) {
-            let readmeB64;
-            try {
-              readmeB64 = execFileSync('gh', [
-                'api', 'repos/spring-io/release-train/contents/README.adoc',
-                '-X', 'GET', '-f', `ref=${springRelease}`, '--jq', '.content'
-              ], { encoding: 'utf8' }).trim();
-            } catch (err) {
-              console.error(`Warning: could not fetch README.adoc for spring release ${springRelease}: ${err.message}`);
-            }
-            if (readmeB64) {
-              const content = Buffer.from(readmeB64, 'base64').toString('utf8');
-              let currentRepo = null;
-              let currentProjectKey = null;
-              for (const line of content.split('\n')) {
-                if (/^== /.test(line)) {
-                  if (!line.includes('Spring Cloud')) {
-                    currentRepo = null;
-                    currentProjectKey = null;
-                  }
-                  continue;
-                }
-                const releasingMatch = line.match(
-                  /\*\*Releasing from:\*\* https:\/\/github\.com\/spring-cloud\/([^\[]+)\[/
-                );
-                if (releasingMatch) {
-                  const repoName = releasingMatch[1].trim().replace(/\/$/, '');
-                  currentRepo = `spring-cloud/${repoName}`;
-                  currentProjectKey = repoName.replace(/-commercial$/, '');
-                  continue;
-                }
-                if (currentRepo) {
-                  const versionMatch = line.match(/=== .+ (\d+\.\d+(?:\.\d+(?:\.\d+)?)?)\s*$/);
-                  if (versionMatch) {
-                    const version = versionMatch[1];
-                    const parts = version.split('.');
-                    const parentBranch = parts.slice(0, -1).join('.') + '.x';
-                    if (projectsFilter.size > 0 && !projectsFilter.has(currentProjectKey)) continue;
-                    addEntry(currentRepo, `release/${version}`, 'commercial', currentProjectKey, parentBranch);
-                  }
-                }
               }
             }
           }
