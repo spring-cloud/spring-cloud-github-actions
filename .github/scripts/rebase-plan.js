@@ -166,7 +166,7 @@ const summarize = ({ train, jobs, skipped, unknown }) => {
 // thing the run cannot do itself.
 const STATUS_LABEL = { rebased: 'Rebased', 'up-to-date': 'Already up to date', skipped: 'Skipped' };
 
-const summarizeResults = ({ train, results, dryRun }) => {
+const summarizeResults = ({ train, results, dryRun, unknown = [] }) => {
   const by = status => results.filter(r => r.status === status);
   const manual = results.filter(r => ['conflict', 'blocked', 'error'].includes(r.status));
   const row = r => `| ${r.project} | \`${r.branch}\` | ${r.base ? `\`${r.base}\`` : ''} | ${r.detail || ''} |`;
@@ -187,6 +187,9 @@ const summarizeResults = ({ train, results, dryRun }) => {
   } else {
     lines.push(':white_check_mark: Every branch was rebased cleanly or was already up to date.', '');
   }
+  if (unknown.length) {
+    lines.push(`:warning: Not in the train, ignored: ${unknown.map(p => `\`${p}\``).join(', ')}`, '');
+  }
   for (const status of ['rebased', 'up-to-date', 'skipped']) {
     const rows = by(status);
     if (!rows.length) continue;
@@ -202,6 +205,11 @@ module.exports = { isHotfix, lineOf, parseTrainYml, isCloudProject, buildPlan, s
 // `projects` is a comma separated list, blank for every spring-cloud project in the train.
 // Writes `matrix` (a {include:[...]} object) and `has_work` to $GITHUB_OUTPUT and a report to
 // $GITHUB_STEP_SUMMARY, when those are set.
+//
+// The plan only goes to the step summary when there is nothing to rebase. Otherwise the
+// results job writes the one summary, so it is the first thing on the run page rather than
+// the second; the plan stays in this job's log, and any ignored project names are passed on
+// as the `unknown` output for the results job to report.
 if (require.main === module) {
   const [train, projectsArg = ''] = process.argv.slice(2);
   if (!train) {
@@ -219,10 +227,13 @@ if (require.main === module) {
     const report = summarize({ train, ...plan });
 
     process.stdout.write(report + '\n');
-    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, report + '\n');
+    if (process.env.GITHUB_STEP_SUMMARY && !plan.jobs.length) {
+      fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, report + '\n');
+    }
     if (process.env.GITHUB_OUTPUT) {
       fs.appendFileSync(process.env.GITHUB_OUTPUT,
-        `matrix=${JSON.stringify({ include: plan.jobs })}\nhas_work=${plan.jobs.length > 0}\n`);
+        `matrix=${JSON.stringify({ include: plan.jobs })}\nhas_work=${plan.jobs.length > 0}\n` +
+        `unknown=${plan.unknown.join(',')}\n`);
     }
   } catch (err) {
     process.stderr.write(`${err.message}\n`);

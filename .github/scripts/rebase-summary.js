@@ -3,7 +3,7 @@
 // Writes the final report of rebase-release-branches.yml from the result-*.jsonl files the
 // rebase jobs uploaded.
 //
-//   node rebase-summary.js <train> <dry_run> <results-dir>
+//   node rebase-summary.js <train> <dry_run> <results-dir> [ignored,projects]
 //
 // Exits 1 only when a job reported an error (a push that was rejected, a clone that failed).
 // Conflicts do not fail the run: they are the expected "do this by hand" outcome and are
@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { summarizeResults } = require('./rebase-plan');
 
-const [train, dryRun, dir] = process.argv.slice(2);
+const [train, dryRun, dir, ignored = ''] = process.argv.slice(2);
 if (!train || !dir) {
   process.stderr.write('usage: rebase-summary.js <train> <dry_run> <results-dir>\n');
   process.exit(2);
@@ -31,7 +31,8 @@ const walk = d => {
 };
 if (fs.existsSync(dir)) walk(dir);
 
-const report = summarizeResults({ train, results, dryRun: dryRun === 'true' });
+const report = summarizeResults({ train, results, dryRun: dryRun === 'true',
+  unknown: ignored.split(',').filter(Boolean) });
 process.stdout.write(report + '\n');
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, report + '\n');
 

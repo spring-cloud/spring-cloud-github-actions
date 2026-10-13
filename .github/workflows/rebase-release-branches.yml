@@ -61,6 +61,7 @@ jobs:
     outputs:
       matrix:   ${{ steps.plan.outputs.matrix }}
       has_work: ${{ steps.plan.outputs.has_work }}
+      unknown:  ${{ steps.plan.outputs.unknown }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -130,7 +131,11 @@ jobs:
           path: ${{ runner.temp }}/result.jsonl
           if-no-files-found: ignore
 
+  # The only job that writes a step summary when there is work (the plan only does when there
+  # is none), so its report is the first thing on the run page. The name is what GitHub puts in
+  # the heading, as "<name> summary".
   summary:
+    name: Rebase results
     needs: [plan, rebase]
     if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
     runs-on: ubuntu-latest
@@ -148,4 +153,5 @@ jobs:
         env:
           TRAIN: ${{ inputs.spring_release_train }}
           DRY_RUN: ${{ inputs.dry_run }}
-        run: node .github/scripts/rebase-summary.js "$TRAIN" "$DRY_RUN" results
+          IGNORED: ${{ needs.plan.outputs.unknown }}
+        run: node .github/scripts/rebase-summary.js "$TRAIN" "$DRY_RUN" results "$IGNORED"
