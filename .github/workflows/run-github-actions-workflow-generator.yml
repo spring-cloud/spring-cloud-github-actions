@@ -1,5 +1,7 @@
 name: Run GitHub Actions Workflow Generator
 
+run-name: "Run GitHub Actions Workflow Generator${{ inputs.dry_run != false && ' - Dry Run' || '' }}"
+
 on:
   workflow_dispatch:
     inputs:
@@ -23,6 +25,11 @@ on:
         required: false
         type: string
         default: ''
+      dry_run:
+        description: 'Dry run, if checked no changes will be committed or pushed, but you can see what would be updated'
+        required: false
+        type: boolean
+        default: true
       token:
         description: 'GitHub token with write access to all target repos. Falls back to GH_ACTIONS_REPO_TOKEN.'
         required: false
@@ -203,6 +210,7 @@ jobs:
           branch:            ${{ matrix.branch }}
           primary-jdk:       ${{ matrix.primary_jdk }}
           generator-version: ${{ needs.setup.outputs.generator-version }}
+          dry-run:           ${{ inputs.dry_run }}
           token:             ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Record result
@@ -240,6 +248,8 @@ jobs:
           path: results
 
       - name: Write summary
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -256,10 +266,14 @@ jobs:
           const updated   = results.filter(r => r.changed);
           const unchanged = results.filter(r => !r.changed);
 
-          let md = '## Workflow Generator Results\n\n';
+          const dryRun = (process.env.DRY_RUN || 'false') === 'true';
+
+          let md = dryRun
+            ? '## Workflow Generator Results (dry run — nothing pushed)\n\n'
+            : '## Workflow Generator Results\n\n';
 
           if (updated.length > 0) {
-            md += `### Updated (${updated.length})\n\n`;
+            md += `### ${dryRun ? 'Would update' : 'Updated'} (${updated.length})\n\n`;
             md += '| Repository | Branch |\n|---|---|\n';
             for (const r of updated) {
               md += `| \`${r.repo}\` | \`${r.branch}\` |\n`;

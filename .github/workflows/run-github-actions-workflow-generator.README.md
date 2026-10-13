@@ -9,7 +9,7 @@ For every repository and branch tracked in [`config/projects.json`](../config/pr
 1. Copies `.github/actions/release-train-build/action.yml` and `.github/actions/release-train-test/action.yml` into the target repo from this repo (see [Release Train Actions](#release-train-actions)).
 2. Copies `release-train-settings.xml` to the root of the target repo.
 3. Runs the workflow generator JAR, which regenerates `.github/workflows/release-train-*.yml` files (build, test, join, leave, ready) in the target repo.
-4. Commits and pushes any changes with the message `Update generated GitHub Actions workflow files [skip actions]`.
+4. Commits and pushes any changes with the message `Update generated GitHub Actions workflow files [skip actions]`. On a [dry run](#dry-run) the changes are reported but not committed or pushed.
 
 The primary Java version passed to the generator is determined per-branch from `projects.json`:
 - `8` if JDK 8 is listed in the branch's `jdkVersions`
@@ -27,16 +27,27 @@ The workflow is triggered manually via **Actions → Run GitHub Actions Workflow
 | `sha` | No | Triggering commit | Commit SHA of this repo to copy release-train action files from. Useful for rolling out a specific version of the build/test logic. |
 | `spring-release` | No | _(empty)_ | Spring release train version (e.g. `2026.1`). When set, also processes `release/[version]` branches found in the `spring-io/release-train` README for that version. See [Spring Release Branches](#spring-release-branches). |
 | `projects` | No | _(empty — all projects)_ | Comma-separated list of Spring Cloud project names to limit the run to (e.g. `spring-cloud-build,spring-cloud-config`). When empty, every project in `projects.json` is processed. |
+| `dry_run` | No | `true` | When true, reports which repos and branches would be updated and pushes nothing. Uncheck to actually commit and push. |
 | `token` | No | `GH_ACTIONS_REPO_TOKEN` | GitHub token with write access to all target repos. Falls back to the `GH_ACTIONS_REPO_TOKEN` organisation secret. |
+
+## Dry Run
+
+`dry_run` defaults to `true`, so a run with default inputs only previews. The generator still runs against a fresh clone of every target branch, and the job log shows the diff stat of what would change. Nothing is committed or pushed, and the summary lists those branches under **Would update**. Uncheck `dry_run` to apply the changes.
 
 ## Examples
 
-### Update everything
-
-Run with all defaults to regenerate workflow files across every tracked repo and branch:
+### Preview what would change
 
 ```
-Inputs: (all empty)
+dry_run: true
+```
+
+### Update everything
+
+Regenerate workflow files across every tracked repo and branch:
+
+```
+dry_run: false
 ```
 
 ### Target specific projects

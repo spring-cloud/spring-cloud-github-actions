@@ -2,7 +2,7 @@ name: 'Generate Workflows for Branch'
 description: >
   Copies release-train action files, downloads the github-actions-workflow-generator
   JAR, runs the generator on the given repository branch, and commits/pushes any
-  resulting changes.
+  resulting changes. In dry-run mode the changes are reported but not committed or pushed.
 
 inputs:
   repo:
@@ -21,13 +21,17 @@ inputs:
       Defaults to the latest release when not supplied.
     required: false
     default: ''
+  dry-run:
+    description: "When 'true', report what would change but do not commit or push"
+    required: false
+    default: 'false'
   token:
     description: 'GitHub token with write access to the target repository'
     required: true
 
 outputs:
   changed:
-    description: "'true' if workflow files were changed and pushed, 'false' otherwise"
+    description: "'true' if workflow files were changed and pushed (or would be, on a dry run), 'false' otherwise"
     value: ${{ steps.commit.outputs.changed }}
 
 runs:
@@ -148,11 +152,17 @@ runs:
       id: commit
       shell: bash
       working-directory: _gen_repo
+      env:
+        DRY_RUN: ${{ inputs.dry-run }}
       run: |
         git add .github/ release-train-settings.xml
         if git diff --staged --quiet; then
           echo "No changes to commit for ${{ inputs.repo }}@${{ inputs.branch }}."
           echo "changed=false" >> "$GITHUB_OUTPUT"
+        elif [[ "$DRY_RUN" == "true" ]]; then
+          git diff --staged --stat
+          echo "Dry run: would push changes to ${{ inputs.repo }}@${{ inputs.branch }}."
+          echo "changed=true" >> "$GITHUB_OUTPUT"
         else
           git commit -m "Update generated GitHub Actions workflow files [skip actions]"
           git push
