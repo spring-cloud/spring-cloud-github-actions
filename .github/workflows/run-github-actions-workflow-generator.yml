@@ -170,11 +170,17 @@ jobs:
           REPO: ${{ matrix.repo }}
           BRANCH: ${{ matrix.branch }}
           CHANGED: ${{ steps.generate.outputs.changed }}
+          FILES: ${{ steps.generate.outputs.files }}
         run: |
           safe="${REPO//\//-}-${BRANCH//\//-}"
           safe="${safe//./-}"
           echo "safe-name=${safe}" >> "$GITHUB_OUTPUT"
-          echo '{"repo":"'"$REPO"'","branch":"'"$BRANCH"'","changed":'"${CHANGED:-false}"'}' \
+          jq -n -c \
+            --arg repo "$REPO" \
+            --arg branch "$BRANCH" \
+            --argjson changed "${CHANGED:-false}" \
+            --argjson files "${FILES:-[]}" \
+            '{repo: $repo, branch: $branch, changed: $changed, files: $files}' \
             > "result-${safe}.json"
 
       - name: Upload result
@@ -224,9 +230,13 @@ jobs:
 
           if (updated.length > 0) {
             md += `### ${dryRun ? 'Would update' : 'Updated'} (${updated.length})\n\n`;
-            md += '| Repository | Branch |\n|---|---|\n';
+            const statusLabels = { A: 'added', M: 'modified', D: 'deleted', R: 'renamed', C: 'copied', T: 'type changed' };
+            md += '| Repository | Branch | Files |\n|---|---|---|\n';
             for (const r of updated) {
-              md += `| \`${r.repo}\` | \`${r.branch}\` |\n`;
+              const fileList = (r.files || [])
+                .map(f => `\`${f.path}\` (${statusLabels[f.status] || f.status})`)
+                .join('<br>') || '_unknown_';
+              md += `| \`${r.repo}\` | \`${r.branch}\` | ${fileList} |\n`;
             }
             md += '\n';
           } else {
