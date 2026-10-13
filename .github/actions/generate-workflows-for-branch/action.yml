@@ -33,6 +33,11 @@ outputs:
   changed:
     description: "'true' if workflow files were changed and pushed (or would be, on a dry run), 'false' otherwise"
     value: ${{ steps.commit.outputs.changed }}
+  files:
+    description: >
+      JSON array of the files that were changed and pushed (or would be, on a dry run),
+      e.g. [{"status":"M","path":".github/workflows/ci.yml"}]. Empty array when nothing changed.
+    value: ${{ steps.commit.outputs.files }}
 
 runs:
   using: composite
@@ -159,7 +164,15 @@ runs:
         if git diff --staged --quiet; then
           echo "No changes to commit for ${{ inputs.repo }}@${{ inputs.branch }}."
           echo "changed=false" >> "$GITHUB_OUTPUT"
-        elif [[ "$DRY_RUN" == "true" ]]; then
+          echo "files=[]" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        files=$(git diff --staged --name-status | jq -R -s -c \
+          'split("\n") | map(select(length > 0) | split("\t") | {status: .[0][0:1], path: .[-1]})')
+        echo "files=${files}" >> "$GITHUB_OUTPUT"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
           git diff --staged --stat
           echo "Dry run: would push changes to ${{ inputs.repo }}@${{ inputs.branch }}."
           echo "changed=true" >> "$GITHUB_OUTPUT"
