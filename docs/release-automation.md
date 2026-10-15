@@ -69,7 +69,7 @@ The phase comes from the `spring_cloud_release_train` input, because nothing els
 supply it. When the release branch is cut every version in the tree is still
 `-INTERNAL-SNAPSHOT` or `-SNAPSHOT`, so the properties file content is identical whether
 this branch is about to become M1, RC1 or the GA. Passing `2026.0.0-M1` is what makes it a
-milestone — the same string you pass to `release-train-ready` and to `post-release`, so one
+milestone — the same string you pass to `project-ready` and to `post-release`, so one
 train version means the same thing at all three steps.
 
 The phase is stripped again before the internal properties file is looked up, so every
@@ -340,7 +340,7 @@ per project. Its nine jobs, in order:
 
 ### Phase 2 — Per-project readiness
 
-**[`release-train-ready.yml`](../.github/workflows/release-train-ready.yml)** is a thin wrapper
+**[`project-ready.yml`](../.github/workflows/project-ready.yml)** is a thin wrapper
 over the [`spring-release-train-project-ready`](../.github/actions/spring-release-train-project-ready/)
 composite action, which for each project:
 
@@ -353,6 +353,10 @@ composite action, which for each project:
 6. Commit and push as `spring-builds`
 7. Dispatch the project's own generated `release-train-ready.yml` and wait
 8. Remove the release branch from the Antora playbook via [`update-antora-playbook`](../.github/actions/update-antora-playbook/)
+
+To run it for every project in a train at once, use
+**[`mark-release-train-ready.yml`](../.github/workflows/mark-release-train-ready.yml)**
+([README](../.github/workflows/README-mark-release-train-ready.md)).
 
 ### Phase 3 — The meta-release (external)
 
@@ -770,7 +774,7 @@ The `initialize` job pulls in a second workflow, which runs nine actions of its 
 [`update-projects-json`](../.github/actions/update-projects-json/). That chain is why a hotfix branch arrives
 fully converted to commercial form despite being cut from an OSS tag.
 
-### `release-train-ready.yml`
+### `project-ready.yml`
 
 One action does everything:
 [`spring-release-train-project-ready`](../.github/actions/spring-release-train-project-ready/), which is itself a

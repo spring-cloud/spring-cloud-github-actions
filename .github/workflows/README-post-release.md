@@ -726,5 +726,5 @@ Notes on this:
 
 ## Related workflows
 
-- [release-train-ready.yml](release-train-ready.yml) — marks a single project ready in a Spring release train, reading the same `jenkins-releaser-config` properties files
+- [project-ready.yml](project-ready.yml) — marks a single project ready in a Spring release train, reading the same `jenkins-releaser-config` properties files
 - [create-hotfix-release-branch.yml](README-create-hotfix-branch.md) — creates the commercial `release/<version>` branches this workflow later merges back

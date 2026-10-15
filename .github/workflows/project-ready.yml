@@ -1,4 +1,4 @@
-name: Release Train Ready
+name: Project Ready
 
 on:
   workflow_dispatch:
@@ -44,8 +44,8 @@ permissions:
   contents: read
 
 jobs:
-  release-train-ready:
-    name: Release Train Ready - ${{ inputs.project }} ${{ inputs.spring-cloud-release-train-version }}
+  project-ready:
+    name: Project Ready - ${{ inputs.project }} ${{ inputs.spring-cloud-release-train-version }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

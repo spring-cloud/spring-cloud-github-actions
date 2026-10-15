@@ -1,0 +1,73 @@
+name: Mark Release Train Ready
+
+run-name: "Mark Release Train Ready - ${{ inputs.spring_cloud_release_train }}"
+
+# Runs project-ready.yml for every project in a release train whose release branch
+# exists and has not been released yet.
+#
+# The projects and their versions come from the train's jenkins-releaser-config properties
+# file (spring-cloud-release-commercial@jenkins-releaser-config), read as given. For each
+# project release/<version> is looked up in <project>-commercial; projects that are already
+# tagged, or have no release branch, are skipped, so re-running after a partial failure only
+# picks up what is left. The plan logic is .github/scripts/release-ready-plan.js.
+#
+# Each child run is dispatched and waited on. A failing child fails this run, but does not
+# stop the others.
+
+on:
+  workflow_dispatch:
+    inputs:
+      spring_cloud_release_train:
+        description: 'Spring Cloud release train version, as named by the properties file (e.g. 2026.1.0, 2026.0.0-M1 or 2025.1.2.1)'
+        required: true
+        type: string
+      spring_release_train:
+        description: 'Spring release train every project joins (e.g. 2026.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:   ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Work out which projects are ready to be marked ready
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+          TRAIN: ${{ inputs.spring_cloud_release_train }}
+        run: node .github/scripts/release-ready-plan.js "$TRAIN"
+
+  ready:
+    name: ${{ matrix.project }} (${{ matrix.branch }})
+    needs: plan
+    if: ${{ needs.plan.outputs.has_work == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dispatch project-ready and wait
+        uses: ./.github/actions/dispatch-and-wait
+        with:
+          repo:          ${{ github.repository }}
+          workflow:      project-ready.yml
+          ref:           ${{ github.ref_name }}
+          inputs: |
+            project=${{ matrix.project }}-commercial
+            spring-cloud-release-train-version=${{ inputs.spring_cloud_release_train }}
+            spring-release-train-version=${{ inputs.spring_release_train }}
+          summary-title: ${{ matrix.project }}
+          token:         ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
