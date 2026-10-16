@@ -28857,20 +28857,36 @@ function updateBuildGradleContent(content, projectVersion, versions = {}) {
   //
   // A key that resolves to no project is left alone, which is what keeps `javaVersion` and
   // similar build settings out of it.
+  //
+  // Two spellings of the same extra property are recognised:
+  //   springCloudVersion = "2024.0.1-SNAPSHOT"
+  //   set('springCloudVersion', "2024.0.1-SNAPSHOT")      <- what start.spring.io generates
   const updatedProperties = [];
+  const ASSIGNMENT = /^(\s*)([a-zA-Z][a-zA-Z0-9]*Version)(\s*=\s*)(['"])([^'"]+)(['"])(.*)$/;
+  const SET_CALL = /^(\s*set\(\s*)(['"])([a-zA-Z][a-zA-Z0-9]*Version)(['"])(\s*,\s*)(['"])([^'"]+)(['"])(.*)$/;
   const updated = withProjectVersion.split('\n').map((line) => {
-    const match = line.match(
-      /^(\s*)([a-zA-Z][a-zA-Z0-9]*Version)(\s*=\s*)(['"])([^'"]+)(['"])(.*)$/
-    );
-    if (!match) return line;
+    let key, currentValue, rewrite;
+    let match = line.match(ASSIGNMENT);
+    if (match) {
+      const [, indent, k, separator, openQuote, value, closeQuote, trailing] = match;
+      key = k;
+      currentValue = value;
+      rewrite = v => `${indent}${k}${separator}${openQuote}${v}${closeQuote}${trailing}`;
+    } else if ((match = line.match(SET_CALL))) {
+      const [, head, keyOpen, k, keyClose, comma, openQuote, value, closeQuote, trailing] = match;
+      key = k;
+      currentValue = value;
+      rewrite = v => `${head}${keyOpen}${k}${keyClose}${comma}${openQuote}${v}${closeQuote}${trailing}`;
+    } else {
+      return line;
+    }
 
-    const [, indent, key, separator, openQuote, currentValue, closeQuote, trailing] = match;
     const projectName = camelToKebab(key.slice(0, -'Version'.length));
     const targetVersion = versions[projectName];
     if (!targetVersion || currentValue === targetVersion) return line;
 
     updatedProperties.push(`${key}: ${targetVersion}`);
-    return `${indent}${key}${separator}${openQuote}${targetVersion}${closeQuote}${trailing}`;
+    return rewrite(targetVersion);
   }).join('\n');
 
   // Inline dependency coordinates - "group:artifact:version" - for artifacts this train
