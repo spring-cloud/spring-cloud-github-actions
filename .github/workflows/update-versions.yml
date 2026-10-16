@@ -173,9 +173,9 @@ jobs:
           }
           console.log(`Found ${entries.length} version entries.`);
 
-          // spring-boot is in the properties file so that every project picks up its version, but
-          // it is not a Spring Cloud repository and nothing is pushed to it.
-          const NON_REPO_KEYS = new Set(['spring-boot']);
+          // spring-boot and spring-vault are in the properties file so that every project picks up
+          // their versions, but they are not Spring Cloud repositories and nothing is pushed to them.
+          const NON_REPO_KEYS = new Set(['spring-boot', 'spring-vault']);
 
           let wanted = null;
           if (names.length) {

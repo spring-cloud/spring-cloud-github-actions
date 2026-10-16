@@ -37,7 +37,7 @@ For the normal end-of-release path, run [post-release](README-post-release.md) �
 | `dry_run` | Clone, update, and diff without pushing | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
-`spring-boot` is in the properties file so that every project picks up its version, but it is not a Spring Cloud repository — it is never pushed to, and naming it in `projects` is an error.
+`spring-boot` and `spring-vault` are in the properties file so that every project picks up their versions, but they are not Spring Cloud repositories — they are never pushed to, and naming either in `projects` is an error.
 
 ## OSS or commercial, never both
 

@@ -249,9 +249,10 @@ jobs:
           }
           console.log(`Found ${entries.length} version entries.`);
 
-          // spring-boot lives in the properties file but is not a Spring Cloud repository, so it
-          // has no tag, milestone or release of ours. It is still bumped in the snapshot file.
-          const NON_REPO_KEYS = new Set(['spring-boot']);
+          // spring-boot and spring-vault live in the properties file but are not Spring Cloud
+          // repositories, so they have no tag, milestone or release of ours. They are still bumped
+          // in the snapshot file.
+          const NON_REPO_KEYS = new Set(['spring-boot', 'spring-vault']);
 
           let wanted = null;
           if (names.length) {
@@ -1630,7 +1631,7 @@ jobs:
               // ones without access - a row of links that 404 for the audience is worse than
               // no links at all. The module and its version are the useful part either way.
               const included = entries
-                .filter(e => e.key !== 'spring-boot' && e.key !== 'spring-cloud-release')
+                .filter(e => !['spring-boot', 'spring-vault', 'spring-cloud-release'].includes(e.key))
                 .map(e => commercial
                   ? ` - ${titleCase(e.key)} \`${e.version}\``
                   : ` - ${titleCase(e.key)} \`${e.version}\` ` +
@@ -1848,7 +1849,7 @@ jobs:
           // Every project in the train, for the OSS site: it documents the versions currently
           // being documented, and even a project that did not move needs its snapshot entry
           // following the new snapshot train.
-          const projects = entries.filter(e => e.key !== 'spring-boot');
+          const projects = entries.filter(e => !['spring-boot', 'spring-vault'].includes(e.key));
 
           // For the commercial site, only the projects with a tag of their own in the
           // commercial repo. An oss-fallback entry carries the plain OSS version because that
