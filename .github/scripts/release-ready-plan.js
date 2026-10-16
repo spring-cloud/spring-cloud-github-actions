@@ -13,14 +13,23 @@
 //
 // A project the train is not releasing still has an entry, naming its previous release. That
 // release is tagged, or its branch is gone, so the same two checks leave it out.
+//
+// A hotfix train (2025.1.4.1) is the exception. Its file also lists the projects that are not
+// getting a hotfix, at the versions they have in the regular train. Those have no tag yet and
+// do have a branch, so the checks above would pick them up - but the regular train's run
+// marks them ready, so only the 4-segment (x.y.z.h) versions are planned for a hotfix train.
 
 const fs = require('fs');
 const { fetchReleaserConfig } = require('./releaser-config');
 const { NON_PROJECT_KEYS, ORG, ghBranchExists, ghTagExists } = require('./release-branch-plan');
 
+// A hotfix train has four segments, like the hotfix versions in it.
+const isHotfixTrain = train => /^\d+\.\d+\.\d+\.\d+$/.test(String(train).trim());
+
 // Pure: entries in, plan out. `branchExists(repo, branch)` and `tagExists(repo, tag)` are
 // injected so tests need no network.
-const buildPlan = ({ entries, branchExists, tagExists }) => {
+const buildPlan = ({ train, entries, branchExists, tagExists }) => {
+  const hotfix = isHotfixTrain(train);
   const todo = [];
   const skipped = [];
   for (const { key, version: raw } of entries) {
@@ -28,6 +37,10 @@ const buildPlan = ({ entries, branchExists, tagExists }) => {
     const version = raw.replace(/-SNAPSHOT$/i, '');
     if (!/^\d+\.\d+/.test(version)) {
       skipped.push({ project: key, reason: `unusable version '${raw}'` });
+      continue;
+    }
+    if (hotfix && !/^\d+\.\d+\.\d+\.\d+$/.test(version)) {
+      skipped.push({ project: key, reason: `not a hotfix version '${raw}'` });
       continue;
     }
     const branch = `release/${version}`;
@@ -63,7 +76,7 @@ const summarize = ({ train, file, todo, skipped }) => [
   '',
 ].join('\n');
 
-module.exports = { buildPlan, summarize };
+module.exports = { buildPlan, summarize, isHotfixTrain };
 
 // CLI:  node release-ready-plan.js <spring-cloud-release-train>
 //
@@ -77,7 +90,7 @@ if (require.main === module) {
   }
   try {
     const { file, entries } = fetchReleaserConfig(train.trim());
-    const plan = buildPlan({ entries, branchExists: ghBranchExists, tagExists: ghTagExists });
+    const plan = buildPlan({ train, entries, branchExists: ghBranchExists, tagExists: ghTagExists });
     const report = summarize({ train, file, ...plan });
 
     process.stdout.write(report + '\n');
