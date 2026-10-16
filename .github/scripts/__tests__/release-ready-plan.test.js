@@ -1,6 +1,6 @@
 'use strict';
 
-const { buildPlan, summarize } = require('../release-ready-plan');
+const { buildPlan, summarize, isHotfixTrain } = require('../release-ready-plan');
 
 const entries = list => list.map(([key, version]) => ({ key, version }));
 const branches = (...list) => (repo, branch) => list.includes(`${repo}:${branch}`);
@@ -67,6 +67,33 @@ describe('buildPlan', () => {
     expect(todo).toEqual([]);
     expect(skipped).toHaveLength(1);
     expect(skipped[0].reason).toMatch(/unusable version/);
+  });
+});
+
+describe('hotfix trains', () => {
+  const all = () => true;
+  const list = entries([
+    ['spring-cloud-config', '5.0.6.1-SNAPSHOT'],
+    ['spring-cloud-commons', '5.0.4-SNAPSHOT'],
+  ]);
+
+  it('recognises a 4-segment train', () => {
+    expect(isHotfixTrain('2025.1.4.1')).toBe(true);
+    expect(isHotfixTrain('2025.1.4')).toBe(false);
+    expect(isHotfixTrain('2026.0.0-RC1')).toBe(false);
+  });
+
+  it('plans only the hotfix versions', () => {
+    const { todo, skipped } = buildPlan({
+      train: '2025.1.4.1', entries: list, branchExists: all, tagExists: noTags,
+    });
+    expect(todo.map(t => t.project)).toEqual(['spring-cloud-config']);
+    expect(skipped).toEqual([{ project: 'spring-cloud-commons', reason: "not a hotfix version '5.0.4-SNAPSHOT'" }]);
+  });
+
+  it('plans the non-hotfix versions for a regular train', () => {
+    const { todo } = buildPlan({ train: '2025.1.4', entries: list, branchExists: all, tagExists: noTags });
+    expect(todo).toHaveLength(2);
   });
 });
 

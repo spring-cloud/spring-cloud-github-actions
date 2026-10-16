@@ -30,6 +30,13 @@ The properties file is read as given, with no `-INTERNAL-SNAPSHOT` filter, so a 
 the train is not releasing is left out only because its entry names a release that is already
 tagged or whose branch is gone. Check the *Skipped* list on an unfamiliar train.
 
+## Hotfix trains
+
+A 4-segment train (e.g. `2025.1.4.1`) lists every project, including those without a hotfix, at
+the versions they have in the regular train. Those have a branch and no tag yet, but the regular
+train's run marks them ready, so for a hotfix train only the 4-segment (`x.y.z.h`) versions are
+planned. The rest are skipped as "not a hotfix version".
+
 ## Concurrent `projects.json` updates
 
 Each child ends by retiring its branch from `config/projects.json`, so the children push to
