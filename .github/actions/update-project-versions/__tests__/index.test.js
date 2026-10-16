@@ -297,6 +297,28 @@ describe('updateBuildGradleContent', () => {
     expect(updated).toContain(`description = 'My project'`);
   });
 
+  it('updates springCloudVersion declared with set() in an ext block', () => {
+    const content = `ext {\n\tset('springCloudVersion', "2024.0.1-SNAPSHOT")\n}\n`;
+    const { updated, updatedProperties } = updateBuildGradleContent(
+      content, '4.2.9', { 'spring-cloud': '2024.0.9' });
+    expect(updated).toBe(`ext {\n\tset('springCloudVersion', "2024.0.9")\n}\n`);
+    expect(updatedProperties).toEqual(['springCloudVersion: 2024.0.9']);
+  });
+
+  it('handles set() with either quote style and spacing', () => {
+    const content = `ext {\n  set( "springCloudVersion" , 'x' )\n}\n`;
+    const { updated } = updateBuildGradleContent(content, '4.2.9', { 'spring-cloud': '2024.0.9' });
+    expect(updated).toBe(`ext {\n  set( "springCloudVersion" , '2024.0.9' )\n}\n`);
+  });
+
+  it('leaves set() of a key that is not a project version alone', () => {
+    const content = `ext {\n\tset('javaVersion', "17")\n\tset('springCloudVersion', "2024.0.9")\n}\n`;
+    const { updated, updatedProperties } = updateBuildGradleContent(
+      content, '4.2.9', { 'spring-cloud': '2024.0.9' });
+    expect(updated).toBe(content);
+    expect(updatedProperties).toEqual([]);
+  });
+
   // spring-cloud-function's Gradle samples declare these in an ext block rather than in
   // gradle.properties, so a release used to leave them at whatever they had been pinned at
   // - Boot 2.1.0.BUILD-SNAPSHOT in a train releasing against Boot 4.
