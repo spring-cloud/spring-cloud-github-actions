@@ -150,7 +150,9 @@ const summarize = ({ mode, train, file, todo, skipped }) => {
   return lines.join('\n');
 };
 
-module.exports = { MODES, NON_PROJECT_KEYS, parseTrain, branchFor, buildPlan, summarize };
+module.exports = {
+  MODES, NON_PROJECT_KEYS, ORG, parseTrain, branchFor, buildPlan, summarize, ghBranchExists, ghTagExists,
+};
 
 // CLI:  node release-branch-plan.js <mode> <spring-cloud-release-train>
 //

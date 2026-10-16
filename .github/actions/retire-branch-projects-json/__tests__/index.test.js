@@ -117,3 +117,50 @@ describe('retireBranch', () => {
     expect(data['spring-cloud-config'].oss.jdkVersions['4.1.x']).toBeUndefined();
   });
 });
+
+// ── run: push retry ──────────────────────────────────────────────────────────
+
+describe('run push retry', () => {
+  const fs = require('fs');
+  const exec = require('@actions/exec');
+  const { run } = require('../src/index');
+
+  const projects = () => JSON.stringify({
+    'spring-cloud-config': {
+      commercial: { branches: { scheduled: ['release/5.0.3'], default: ['5.0.x'] }, jdkVersions: {} },
+    },
+  });
+
+  beforeEach(() => {
+    process.env.GITHUB_REPOSITORY = 'spring-cloud/spring-cloud-github-actions';
+    core.getInput.mockImplementation(name => ({
+      repo: 'spring-cloud/spring-cloud-config-commercial', branch: 'release/5.0.3', token: 't',
+    }[name]));
+    jest.spyOn(fs, 'existsSync').mockReturnValue(false);
+    jest.spyOn(fs, 'readFileSync').mockImplementation(projects);
+    jest.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    jest.spyOn(global, 'setTimeout').mockImplementation(fn => { fn(); return 0; });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('reapplies the change on the new main after a rejected push', async () => {
+    let pushes = 0;
+    exec.exec.mockImplementation(async (cmd, args) => {
+      if (args.includes('diff')) return 1; // something staged
+      if (args.includes('push')) return ++pushes === 1 ? 1 : 0;
+      return 0;
+    });
+    await run();
+    expect(pushes).toBe(2);
+    expect(core.setFailed).not.toHaveBeenCalled();
+    const calls = exec.exec.mock.calls.map(c => c[1].join(' '));
+    expect(calls.some(c => c.includes('reset --hard origin/main'))).toBe(true);
+    expect(calls.filter(c => c.includes(' commit ')).length).toBe(2);
+  });
+
+  test('fails after repeated rejections', async () => {
+    exec.exec.mockImplementation(async (cmd, args) => (args.includes('push') || args.includes('diff') ? 1 : 0));
+    await run();
+    expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('rejected 5 times'));
+  });
+});
