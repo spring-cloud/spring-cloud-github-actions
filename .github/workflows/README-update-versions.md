@@ -54,7 +54,11 @@ If that branch does not exist:
 - **commercial** — the project is skipped. Commercial repos have no `main` to fall back to (`spring-cloud-config-commercial`'s default branch is `4.3.x`).
 - **OSS** — falls back to `main`, but only after reading `pom.xml` on `main` and confirming it is on the same `major.minor` line. Otherwise the project is skipped with `version-mismatch` rather than bumping an unrelated major to these versions.
 
-**There is no input to override this.** Between those two rules every branch the workflow targets is covered: the only names in [`projects.json`](../../config/projects.json) that are not `<major>.<minor>.x` are `main`, which the fallback handles, and the `-internal` branches, which this never targets — those are rebased from the OSS branches it does update. An override input would therefore have no correct use, and would be the one way to push a train's versions onto a branch they do not belong on, since a branch given by hand cannot be checked against the version the way a derived one can.
+### `-INTERNAL-SNAPSHOT` trains
+
+A `release_train_version` such as `2025.1.4-INTERNAL-SNAPSHOT` targets the long-lived `<major>.<minor>.x-internal` branches of the **commercial** repositories instead (`5.1.0-INTERNAL-SNAPSHOT` → `5.1.x-internal`). There is no fallback: a project without that branch is skipped as `branch-not-found`. The run fails early if `commercial` is not set (or the project names lack `-commercial`), since OSS repos have no `-internal` branches. The properties file read is `2025_1_4-internal-snapshot.properties` on `jenkins-releaser-config`, which must already exist.
+
+**There is no input to override this.** Between those two rules every branch the workflow targets is covered: the only names in [`projects.json`](../../config/projects.json) that are not `<major>.<minor>.x` are `main`, which the fallback handles, and the `-internal` branches, which are reached only through an `-INTERNAL` train (above). An override input would therefore have no correct use, and would be the one way to push a train's versions onto a branch they do not belong on, since a branch given by hand cannot be checked against the version the way a derived one can.
 
 ## The raw wait
 
