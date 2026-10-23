@@ -527,7 +527,7 @@ The complete diff is also uploaded as the `website-changes` artifact, and on a d
 
 ## The start.spring.io PR
 
-A one-line PR against [spring-io/start.spring.io](https://github.com/spring-io/start.spring.io), on a branch named `<version>-release`, titled `Upgrade to Spring Cloud <version>` — the shape of [PR #2139](https://github.com/spring-io/start.spring.io/pull/2139).
+A small PR against [spring-io/start.spring.io](https://github.com/spring-io/start.spring.io), on a branch named `<version>-release`, titled `Upgrade to Spring Cloud <version>` — the shape of [PR #2139](https://github.com/spring-io/start.spring.io/pull/2139).
 
 **OSS only.** start.spring.io serves the public Initializr, so a commercial version has no place in it. Also skipped for a hotfix, when `projects` is set, and when `skip_start_site_pr` is checked.
 
@@ -561,11 +561,14 @@ Both ranges are anchored on the Spring Boot version in the release's properties 
 |---------|----------------------------------------|
 | `2026.0.0-M1` (first) | **added**, together with the `-SNAPSHOT` mapping |
 | `2026.0.0-M2` | version only — `[4.2.0-M1,4.2.0-SNAPSHOT)` is unchanged |
-| `2026.0.0-RC1` | the floor moves — `[4.2.0-RC1,4.2.0-SNAPSHOT)` |
+| `2026.0.0-RC1` | version only — the floor stays at `-M1`, so a user on an earlier Boot milestone is still offered the train |
 | `2026.0.0-RC2` | version only |
 | `2026.0.0` (GA) | widened to the next Boot minor — `[4.2.0,4.3.0-M1)` |
+| `2026.0.1` and later patches | version only — `[4.2.0,4.3.0-M1)` is unchanged |
 
-The `-SNAPSHOT` mapping is written once and never rewritten, GA included. Note that after GA its range overlaps the released one for every Boot version from `4.2.0` up, since `4.2.0-SNAPSHOT` sorts below `4.2.0`; which mapping wins is then down to Initializr's resolution order.
+**The train's mappings are found by its line** (`2026.0`), not by the exact version, so a patch release finds the entry it replaces: `2025.1.4` rewrites the `2025.1.3` mapping in place rather than adding a second one. Between two GA releases the range is never re-derived — doing so from the new release's Boot version would narrow `[4.0.0,4.2.0-M1)` to `[4.0.9,4.1.0-M1)` and drop everyone on an earlier Boot.
+
+**The `-SNAPSHOT` mapping is left alone while the train is in milestones and release candidates, and moves on at GA.** Releasing `2026.0.0` rewrites `2026.0.0-SNAPSHOT` to `2026.0.1-SNAPSHOT`, and each later patch bumps it again (`2026.0.1` → `2026.0.2-SNAPSHOT`). Only its version moves — its range and repository stay. A line with no `-SNAPSHOT` mapping, such as a maintenance line, is not given one. Note that after GA the snapshot mapping's range overlaps the released one for every Boot version from `4.2.0` up, since `4.2.0-SNAPSHOT` sorts below `4.2.0`; which mapping wins is then down to Initializr's resolution order.
 
 **Only the `-SNAPSHOT` mapping names a repository.** Spring Boot 4.0 and up publishes milestones to Maven Central — start.spring.io's own `Repositories.java` says as much — so a milestone BOM resolves without one, which is why the other pre-release entries in that file carry no `repositories` key either. Snapshots still come from `repo.spring.io`. `spring-snapshots` and `spring-milestones` are Initializr built-in repository ids; nothing has to be declared in `application.yml` to reference them.
 
@@ -575,8 +578,9 @@ The `-SNAPSHOT` mapping is written once and never rewritten, GA included. Note t
 
 ### When it declines to act
 
-**No PR is opened, and the run says so**, in three cases:
+**No PR is opened, and the run says so**, in four cases:
 
+- `no-mapping` — a **patch** release (`2024.0.9`) for a line the file does not list. The line has aged off the site, and adding it back would offer a Spring Cloud for a Boot range nobody asked to support. A new train — its first milestone, or a `.0` that skipped them — is added instead.
 - `no-boot-version` — the properties file has no `spring-boot` entry, or one this cannot parse. Every range is derived from it.
 - `unexpected-mappings` — the train has a `-SNAPSHOT` mapping but no release mapping beside it. Adding one would leave two mappings for one train and no way to tell which a later run should move.
 - `bom-not-found` / `file-not-found` — the `spring-cloud` bom, or the file itself, has moved.
@@ -591,9 +595,10 @@ The summary gets its own **start.spring.io PR** section spelling out the reason 
 |--------|---------|
 | `created` / `would-create` | the PR was opened; the diff is in the job's own summary |
 | `added` | the train had no mappings, so both were added — its first release |
-| `updated` | the train's existing mapping was rewritten |
-| `already-current` | the mapping already names this version and range — a re-run, or a hand-made PR that already landed |
+| `updated` | the train's existing mapping was rewritten, and at GA its snapshot mapping moved to the next patch |
+| `already-current` | the mapping already names this version and range, and its snapshot has already moved on — a re-run, or a hand-made PR that already landed |
 | `branch-exists` | `<version>-release` is already in the repo; it is left alone and the existing PR is linked |
+| `no-mapping` | ⚠️ a patch release for a line the file does not list, see above |
 | `no-boot-version` | ⚠️ no usable `spring-boot` entry to derive the range from, see above |
 | `unexpected-mappings` | ⚠️ a `-SNAPSHOT` mapping with no release mapping beside it, see above |
 | `error` | ❌ the edit did not produce the expected mappings, so nothing was written |
