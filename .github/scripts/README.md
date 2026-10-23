@@ -78,6 +78,16 @@ on the numeric base of the Spring Boot version in the release's properties file,
 floor set by the *phase* rather than that Boot version verbatim, so the bound does not churn
 on every milestone.
 
+## `start-site-mappings.js`
+
+`updateMappings(text, { releaseVersion, bootVersion })`: the edit `post-release.yml` makes to
+the `spring-cloud` bom in start.spring.io's `application.yml`, as a line splice so the rest of
+that file keeps its formatting. A train's mappings are found by its *line* (`2025.1`), never
+the exact version, so `2025.1.4` finds the `2025.1.3` entry it replaces. Between two GA
+releases only the version moves; at GA the line's `-SNAPSHOT` mapping moves on to the next
+patch. Returns a status instead of throwing when it declines (`no-mapping`,
+`unexpected-mappings`, `no-boot-version`, ...), so the workflow can report it.
+
 ## `version-cmp.js`
 
 `cmp(a, b)`: dotted-numeric version comparison, tolerant of a leading `v` (release tags like

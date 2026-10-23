@@ -65,9 +65,9 @@ describe('rangeFor', () => {
     expect(rangeFor('4.2.0-M3', '2026.0.0-M2')).toBe('[4.2.0-M1,4.2.0-SNAPSHOT)');
   });
 
-  it('moves the floor to -RC1 for release candidates', () => {
-    expect(rangeFor('4.2.0-RC1', '2026.0.0-RC1')).toBe('[4.2.0-RC1,4.2.0-SNAPSHOT)');
-    expect(rangeFor('4.2.0-RC2', '2026.0.0-RC2')).toBe('[4.2.0-RC1,4.2.0-SNAPSHOT)');
+  it('keeps the floor at -M1 for release candidates', () => {
+    expect(rangeFor('4.2.0-RC1', '2026.0.0-RC1')).toBe('[4.2.0-M1,4.2.0-SNAPSHOT)');
+    expect(rangeFor('4.2.0-RC2', '2026.0.0-RC2')).toBe('[4.2.0-M1,4.2.0-SNAPSHOT)');
   });
 
   it('widens to the next Boot minor at GA', () => {
@@ -78,7 +78,7 @@ describe('rangeFor', () => {
     const boot = '4.2.0-M2';
     expect(rangeFor(boot, '2026.0.0-M1')).toBe('[4.2.0-M1,4.2.0-SNAPSHOT)');
     expect(rangeFor(boot, '2026.0.0-M2')).toBe('[4.2.0-M1,4.2.0-SNAPSHOT)');
-    expect(rangeFor(boot, '2026.0.0-RC1')).toBe('[4.2.0-RC1,4.2.0-SNAPSHOT)');
+    expect(rangeFor(boot, '2026.0.0-RC1')).toBe('[4.2.0-M1,4.2.0-SNAPSHOT)');
     expect(rangeFor(boot, '2026.0.0')).toBe('[4.2.0,4.3.0-M1)');
   });
 });

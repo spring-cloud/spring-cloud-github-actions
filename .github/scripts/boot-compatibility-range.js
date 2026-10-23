@@ -51,16 +51,19 @@ const phaseOf = releaseVersion => {
 // The range for the entry carrying the release itself.
 //
 //   milestones -> [<base>-M1,<base>-SNAPSHOT)   floor is the phase, not the Boot version
-//   candidates -> [<base>-RC1,<base>-SNAPSHOT)
+//   candidates -> [<base>-M1,<base>-SNAPSHOT)   the same: the floor stays at -M1
 //   GA         -> [<base>,<nextMinor>-M1)       widened, since GA serves the whole line
 //
-// The pre-release forms stop at <base>-SNAPSHOT so the snapshot entry below takes over
-// from there; the GA form has no such neighbour to defer to.
+// The floor stays at -M1 through the release candidates too. It used to move to -RC1, and
+// the maintainers set it back by hand on start.spring.io every time (68f2f54), because a
+// user on a Boot milestone is still best served by the train's RC. The pre-release forms
+// stop at <base>-SNAPSHOT so the snapshot entry below takes over from there; the GA form
+// has no such neighbour to defer to.
 const rangeFor = (bootVersion, releaseVersion) => {
   const base = bootBase(bootVersion);
   const phase = phaseOf(releaseVersion);
   if (phase === null) return `[${base},${nextBootMinor(bootVersion)}-M1)`;
-  return `[${base}-${phase}1,${base}-SNAPSHOT)`;
+  return `[${base}-M1,${base}-SNAPSHOT)`;
 };
 
 // The range for the entry carrying the train's snapshot line. Written once, when the first
