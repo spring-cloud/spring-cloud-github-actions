@@ -117,6 +117,109 @@ describe('updatePom', () => {
     expect(result).toContain('<pluginRepository>');
     COMMERCIAL_REPOS.forEach(r => expect(result).toContain(r.url));
   });
+
+  describe('keepOssRepositories', () => {
+    const mixed = `<project>
+  <repositories>
+    <repository>
+      <id>spring-snapshots</id>
+      <url>https://repo.spring.io/libs-snapshot-local</url>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+    </repository>
+    <repository>
+      <id>spring-milestones</id>
+      <url>https://repo.spring.io/libs-milestone-local</url>
+    </repository>
+    <repository>
+      <id>internal-mirror</id>
+      <url>https://nexus.example.com/maven</url>
+    </repository>
+  </repositories>
+  <pluginRepositories>
+    <pluginRepository>
+      <id>spring-snapshots</id>
+      <url>https://repo.spring.io/libs-snapshot-local</url>
+    </pluginRepository>
+  </pluginRepositories>
+</project>`;
+
+    test('is off by default: OSS repo.spring.io entries are dropped', () => {
+      const result = updatePom(mixed);
+      expect(result).not.toContain('libs-snapshot-local');
+      expect(result).not.toContain('libs-milestone-local');
+    });
+
+    test('keeps the old repo.spring.io entries in both block types', () => {
+      const result = updatePom(mixed, new Set(), false, true);
+      expect(result.match(/libs-snapshot-local/g)).toHaveLength(2);
+      expect(result.match(/libs-milestone-local/g)).toHaveLength(1);
+      COMMERCIAL_REPOS.forEach(r => expect(result).toContain(r.url));
+    });
+
+    test('puts the commercial repos before the kept OSS ones', () => {
+      const result = updatePom(mixed, new Set(), false, true);
+      const firstBlock = result.slice(0, result.indexOf('</repositories>'));
+      expect(firstBlock.indexOf('spring-enterprise-maven-prod-local'))
+        .toBeLessThan(firstBlock.indexOf('libs-snapshot-local'));
+    });
+
+    test('does not keep entries that are not repo.spring.io', () => {
+      const result = updatePom(mixed, new Set(), false, true);
+      expect(result).not.toContain('nexus.example.com');
+    });
+
+    test('is idempotent', () => {
+      const once = updatePom(mixed, new Set(), false, true);
+      expect(updatePom(once, new Set(), false, true)).toBe(once);
+    });
+
+    test('does not declare spring-snapshots twice alongside includeSnapshotRepo', () => {
+      const result = updatePom(mixed, new Set(), true, true);
+      const firstBlock = result.slice(0, result.indexOf('</repositories>'));
+      expect(firstBlock.match(/<id>spring-snapshots<\/id>/g)).toHaveLength(1);
+      expect(firstBlock).toContain('https://repo.spring.io/snapshot');
+      expect(firstBlock).not.toContain('libs-snapshot-local');
+    });
+
+    describe('id collision with a commercial repository', () => {
+      const clash = `<project>
+  <repositories>
+    <repository>
+      <id>spring-commercial-release</id>
+      <url>https://repo.spring.io/release</url>
+    </repository>
+  </repositories>
+</project>`;
+
+      test('throws, naming the id, the block and the URL', () => {
+        expect(() => updatePom(clash, new Set(), false, true))
+          .toThrow(/<repositories> entry 'spring-commercial-release' \(https:\/\/repo\.spring\.io\/release\)/);
+      });
+
+      test('throws for a pluginRepository too', () => {
+        const plugin = clash
+          .replace(/repositories>/g, 'pluginRepositories>')
+          .replace(/repository>/g, 'pluginRepository>');
+        expect(() => updatePom(plugin, new Set(), false, true)).toThrow(/<pluginRepositories> entry/);
+      });
+
+      test('does not throw when the OSS entries are being dropped anyway', () => {
+        expect(() => updatePom(clash)).not.toThrow();
+      });
+
+      test('does not throw for the same id on a non-OSS URL, which is dropped', () => {
+        const nonOss = clash.replace('https://repo.spring.io/release', 'https://nexus.example.com/maven');
+        expect(() => updatePom(nonOss, new Set(), false, true)).not.toThrow();
+      });
+    });
+
+    test('does not duplicate an entry that is also in preserveIds', () => {
+      const result = updatePom(mixed, new Set(['spring-milestones']), false, true);
+      expect(result.match(/<id>spring-milestones<\/id>/g)).toHaveLength(1);
+    });
+  });
 });
 
 // ── findBraceEnd ──────────────────────────────────────────────────────────────
@@ -242,6 +345,22 @@ describe('processFile', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('reports the file and leaves it unwritten when a kept OSS id collides with a commercial one', () => {
+    const content = `<project>
+  <repositories>
+    <repository>
+      <id>spring-commercial-snapshot</id>
+      <url>https://repo.spring.io/libs-snapshot-local</url>
+    </repository>
+  </repositories>
+</project>`;
+    const filePath = path.join(tmpDir, 'pom.xml');
+    fs.writeFileSync(filePath, content);
+    expect(() => processFile(filePath, new Set(), new Set(), false, false, true))
+      .toThrow(new RegExp(`${filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: <repositories> entry 'spring-commercial-snapshot'`));
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe(content);
   });
 
   test('updates a pom.xml with old spring.io repos', () => {

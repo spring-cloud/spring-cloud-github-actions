@@ -17,6 +17,8 @@ Any `<repositories>` or `<pluginRepositories>` block in a POM file, and any `rep
 
 Each `<repositories>` and `<pluginRepositories>` block containing old `repo.spring.io` URLs is replaced in its entirety with the four commercial entries above, preserving the surrounding indentation. Blocks that do not reference old `repo.spring.io` URLs are left untouched.
 
+With `keep-oss-repositories: 'true'`, the existing old `repo.spring.io` entries (snapshots, milestones, release) are kept after the four commercial ones instead of being dropped, so a build can resolve both commercial and OSS-only artifacts. Entries that are neither commercial nor `repo.spring.io` are still dropped. If a kept entry has the same `<id>` as one of the four commercial repositories, the action fails, naming the file, the id and the URL, and commits nothing: Maven rejects a block that declares an id twice, and the commercial repository's credentials are matched by id. This is for hotfix branches, whose dependencies mix commercial hotfix releases with OSS-only releases.
+
 ### Gradle files (`.gradle`, `.gradle.kts`)
 
 Within each `repositories { }` block, individual `maven { url '...' }` entries referencing old `repo.spring.io` URLs are removed and replaced with the four commercial entries. Other entries (e.g. `mavenCentral()`, `gradlePluginPortal()`) are preserved.
@@ -74,6 +76,8 @@ After editing `src/index.js`, rebuild the bundle with `npm run build` and commit
 | `repository` | yes | — | Repository to update (`org/repo-name`) |
 | `branch` | yes | — | Branch to update |
 | `token` | yes | — | GitHub token with `contents: write` permission on the repository |
+| `add-snapshot-repo` | no | `false` | Also add `https://repo.spring.io/snapshot` as a snapshot-only repository |
+| `keep-oss-repositories` | no | `false` | Keep existing old `repo.spring.io` entries in POM blocks after the commercial ones. No effect on Gradle files |
 | `commit-message` | no | `Updating repositories to commercial Broadcom repositories` | Commit message |
 | `git-user-name` | no | `Spring Builds` | Git author name |
 | `git-user-email` | no | `svc.spring-builds@broadcom.com` | Git author email |
