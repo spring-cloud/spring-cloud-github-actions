@@ -218,11 +218,35 @@ jobs:
 
           echo "servers=$SERVERS" >> "$GITHUB_OUTPUT"
 
+      # Hotfix tags (four-part versions such as v5.0.4.1) have a parent POM that
+      # only exists in the commercial release repository, and the tag's own
+      # pom/.settings.xml only declare repo.spring.io. Add the commercial
+      # release repository to settings.xml, but only for commercial repos that
+      # actually have hotfix tags, so other builds are unaffected.
+      - name: Determine Maven repositories
+        id: maven-repositories
+        if: needs.setup.outputs.commercial == 'true'
+        run: |
+          set -euo pipefail
+
+          REPOSITORIES=''
+
+          if git ls-remote --tags --refs "https://github.com/${GITHUB_REPOSITORY}" \
+              | grep -Eq 'refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Hotfix tags found - adding the commercial release repository to settings.xml"
+            REPOSITORIES='[{"id":"spring-commercial-release","url":"https://usw1.packages.broadcom.com/artifactory/spring-enterprise-maven-prod-local","releases":{"enabled":true},"snapshots":{"enabled":false}}]'
+          else
+            echo "No hotfix tags found - not adding any repositories"
+          fi
+
+          echo "repositories=$REPOSITORIES" >> "$GITHUB_OUTPUT"
+
       - name: Configure Maven settings
         if: steps.maven-servers.outputs.servers != '[]'
         uses: s4u/maven-settings-action@894661b3ddae382f1ae8edbeab60987e08cf0788
         with:
           servers: ${{ steps.maven-servers.outputs.servers }}
+          repositories: ${{ steps.maven-repositories.outputs.repositories }}
 
       - name: Run Antora
         timeout-minutes: ${{ inputs.timeout_minutes }}
