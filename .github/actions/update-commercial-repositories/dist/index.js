@@ -25689,6 +25689,7 @@ const COMMERCIAL_REPOS = [
 ];
 
 const COMMERCIAL_URLS = new Set(COMMERCIAL_REPOS.map(r => r.url));
+const COMMERCIAL_IDS  = new Set(COMMERCIAL_REPOS.map(r => r.id));
 
 const SPRING_SNAPSHOT_REPO = {
   id:               'spring-snapshots',
@@ -25767,20 +25768,37 @@ function buildPomBlock(tag, indent, preservedEntries = [], includeSnapshotRepo =
  * Updates <repositories> and <pluginRepositories> blocks in POM content.
  * preserveIds is a Set of repository IDs to keep alongside the commercial repos.
  * includeSnapshotRepo adds https://repo.spring.io/snapshot as a snapshot-only entry.
+ * keepOssRepositories keeps every existing entry whose URL is an old (non-commercial)
+ * repo.spring.io one, after the commercial repos, so a build can resolve both commercial
+ * and OSS-only artifacts. Skipped for an entry with id spring-snapshots when
+ * includeSnapshotRepo is set, which would otherwise be declared twice.
+ * Throws if a kept entry has the same id as one of the commercial repos: Maven rejects a
+ * block that declares an id twice, and credentials are matched by id, so the clash can
+ * only be resolved by a person.
  * Exported for unit testing.
  */
-function updatePom(content, preserveIds = new Set(), includeSnapshotRepo = false) {
+function updatePom(content, preserveIds = new Set(), includeSnapshotRepo = false, keepOssRepositories = false) {
   const replaceBlock = (match, indent, body, tag) => {
     if (!OLD_SPRING_IO_RE.test(match)) return match;
     if ([...COMMERCIAL_URLS].some(u => match.includes(u))) return match;
 
     let preserved = [];
-    if (preserveIds.size > 0) {
+    if (preserveIds.size > 0 || keepOssRepositories) {
       const entryTag = tag === 'repositories' ? 'repository' : 'pluginRepository';
       const entryRe  = new RegExp(`[ \\t]*<${entryTag}>[\\s\\S]*?<\\/${entryTag}>`, 'g');
       for (const m of match.matchAll(entryRe)) {
-        const idMatch = m[0].match(/<id>(.*?)<\/id>/);
-        if (idMatch && preserveIds.has(idMatch[1].trim())) {
+        const id  = (m[0].match(/<id>(.*?)<\/id>/)   || [])[1]?.trim();
+        const url = (m[0].match(/<url>(.*?)<\/url>/) || [])[1]?.trim();
+        const isOss = keepOssRepositories && url && OLD_SPRING_IO_RE.test(url)
+          && !(includeSnapshotRepo && id === SPRING_SNAPSHOT_REPO.id);
+        if (isOss && id && COMMERCIAL_IDS.has(id)) {
+          throw new Error(
+            `<${tag}> entry '${id}' (${url}) uses the same id as a commercial repository. ` +
+            `Keeping both would declare the id twice, which Maven rejects, and the credentials ` +
+            `for the commercial repository would apply to the wrong URL. Rename the entry.`
+          );
+        }
+        if ((id && preserveIds.has(id)) || isOss) {
           preserved.push(m[0].trim());
         }
       }
@@ -25978,7 +25996,7 @@ function updateGradle(content, isKotlin, withCredentials = false, includeSnapsho
  * Returns true when the file was modified.
  * Exported for unit testing.
  */
-function processFile(filePath, updatedSet = new Set(), preserveIds = new Set(), withCredentials = false, includeSnapshotRepo = false) {
+function processFile(filePath, updatedSet = new Set(), preserveIds = new Set(), withCredentials = false, includeSnapshotRepo = false, keepOssRepositories = false) {
   const ext      = path.extname(filePath).toLowerCase();
   const isKts    = filePath.endsWith('.gradle.kts');
   const isGradle = ext === '.gradle' || isKts;
@@ -26001,7 +26019,11 @@ function processFile(filePath, updatedSet = new Set(), preserveIds = new Set(), 
   let changed = false;
 
   if (isXml) {
-    newContent = updatePom(content, preserveIds, includeSnapshotRepo);
+    try {
+      newContent = updatePom(content, preserveIds, includeSnapshotRepo, keepOssRepositories);
+    } catch (e) {
+      throw new Error(`${filePath}: ${e.message}`);
+    }
     changed    = newContent !== content;
   } else {
     [newContent, changed] = updateGradle(content, isKts, withCredentials, includeSnapshotRepo);
@@ -26031,7 +26053,7 @@ const PROJECT_OVERRIDES = {
  *   POM: replaces repo.spring.io repos while preserving the spring-milestones entry.
  *   Gradle: replaces with named maven {} blocks that include credentials.
  */
-function springCloudContractUpdate(root) {
+function springCloudContractUpdate(root, { keepOssRepositories = false } = {}) {
   const updated   = new Set();
   const preserveIds = new Set(['spring-milestones']);
 
@@ -26057,7 +26079,11 @@ function springCloudContractUpdate(root) {
     let changed    = false;
 
     if (isXml) {
-      newContent = updatePom(content, preserveIds);
+      try {
+        newContent = updatePom(content, preserveIds, false, keepOssRepositories);
+      } catch (e) {
+        throw new Error(`${filePath}: ${e.message}`);
+      }
       changed    = newContent !== content;
     } else {
       [newContent, changed] = updateGradle(content, isKts, true);
@@ -26101,7 +26127,8 @@ async function run() {
     const branch          = core.getInput('branch',           { required: true });
     const token           = core.getInput('token',            { required: true });
     const addSnapshotRepo = (core.getInput('add-snapshot-repo') || 'false').toLowerCase() === 'true';
-    const commitMsg       = core.getInput('commit-message') || 'Updating repositories to commercial Broadcom repositories';
+    const keepOssRepositories = (core.getInput('keep-oss-repositories') || 'false').toLowerCase() === 'true';
+    const commitMsg      = core.getInput('commit-message') || 'Updating repositories to commercial Broadcom repositories';
     const gitName         = core.getInput('git-user-name')  || 'Spring Builds';
     const gitEmail        = core.getInput('git-user-email') || 'svc.spring-builds@broadcom.com';
     core.setSecret(token);
@@ -26110,6 +26137,7 @@ async function run() {
     core.info(`Repository:         ${repository}`);
     core.info(`Branch:             ${branch}`);
     core.info(`Add snapshot repo:  ${addSnapshotRepo}`);
+    core.info(`Keep OSS repos:     ${keepOssRepositories}`);
     core.info('');
 
     const repoDir = path.join(os.tmpdir(), '_repos_repo');
@@ -26132,14 +26160,14 @@ async function run() {
 
     if (override) {
       core.info(`Running project-specific override for: ${repoName}`);
-      updatedByOverride = override(repoDir);
+      updatedByOverride = override(repoDir, { keepOssRepositories });
       core.info('');
     }
 
     core.info('Scanning for old repo.spring.io repository references...');
     let changed = 0;
     walkDir(repoDir, (filePath) => {
-      if (processFile(filePath, updatedByOverride, new Set(), false, addSnapshotRepo)) changed++;
+      if (processFile(filePath, updatedByOverride, new Set(), false, addSnapshotRepo, keepOssRepositories)) changed++;
     });
     core.info(`\nUpdated repository references in ${changed} file(s).`);
 

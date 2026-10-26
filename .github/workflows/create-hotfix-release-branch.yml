@@ -281,13 +281,18 @@ jobs:
   # history (so the hotfix branch can later be rebased onto an updated -internal branch),
   # then layers on only what -internal doesn't already have: a retargeted ci-release.yml
   # (mirrors create-oss-release-branch.yml's release/<version>-from-internal flow —
-  # distribution-management/workflow-rewrite/settings.xml are redundant here, since
+  # distribution-management and the ci.yml/pr.yml rewrite are redundant here, since
   # ci-release.yml + release-ci-settings.xml already point the build at the commercial
   # deploy target), Broadcom license headers (and checkstyle-header.txt in the same
   # commit), and a config/projects.json registration — a hotfix branch carries real changes
   # on top of -internal and can fail its own CI independently of it, unlike a GA
   # release/<version>, so it needs its own scheduled CI entry. The entry is removed again
-  # by spring-release-train-project-ready once the hotfix ships. A no-op when use_tag is set.
+  # by spring-release-train-project-ready once the hotfix ships.
+  #
+  # .settings.xml and the pom/Gradle repository blocks are restored too, which a GA
+  # release/<version> doesn't need: the docs build of the hotfix tag runs Maven with
+  # --settings .settings.xml (forced by .mvn/maven.config), not release-ci-settings.xml, and
+  # must resolve the commercial-only hotfix parent POMs from usw1. A no-op when use_tag is set.
   create-internal-release-branch:
     needs: [derive, validate-internal-branch]
     if: ${{ !inputs.use_tag }}
@@ -325,6 +330,50 @@ jobs:
           echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
           echo "Branch ${COMMERCIAL_BRANCH} created."
 
+      # source-branch is left to default to the repo's default branch, as the original
+      # (orphan) flow did, so the hotfix gets the same commercial servers and repositories.
+      - name: Copy settings.xml
+        uses: ./.github/actions/copy-settings-xml
+        with:
+          repository:    ${{ needs.derive.outputs.commercial_repo }}
+          target-branch: ${{ needs.derive.outputs.commercial_branch }}
+          token:         ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # copy-settings-xml silently does nothing when its source branch has no .settings.xml,
+      # and the default branch is only a good source while it is a hand-initialised commercial
+      # branch. If it ever became an OSS-mirroring -internal branch, or lost the file, the
+      # branch would be created without the one file the docs build of the tag resolves its
+      # dependencies through. So the file must exist, and must actually configure the commercial
+      # release repository and its credentials (parsed, not grepped: a comment or a lone
+      # <server> must not satisfy it).
+      - name: Verify settings.xml carries commercial config
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+        run: |
+          COMMERCIAL_REPO="${{ needs.derive.outputs.commercial_repo }}"
+          COMMERCIAL_BRANCH="${{ needs.derive.outputs.commercial_branch }}"
+
+          if ! CONTENT=$(gh api "repos/${COMMERCIAL_REPO}/contents/.settings.xml" \
+                -X GET -f ref="$COMMERCIAL_BRANCH" --jq '.content' 2>/tmp/settings-err); then
+            cat /tmp/settings-err
+            echo "ERROR: could not read .settings.xml from ${COMMERCIAL_BRANCH} in ${COMMERCIAL_REPO}."
+            if grep -q "404" /tmp/settings-err; then
+              echo "The file does not exist, so copy-settings-xml had nothing to copy: the default"
+              echo "branch of ${COMMERCIAL_REPO} has no .settings.xml. The docs build of the hotfix tag"
+              echo "needs it to resolve the commercial hotfix dependencies."
+            fi
+            exit 1
+          fi
+
+          echo "$CONTENT" | base64 -d > /tmp/settings.xml
+          if ! node .github/scripts/verify-commercial-settings.js /tmp/settings.xml; then
+            echo "ERROR: .settings.xml on ${COMMERCIAL_BRANCH} does not configure the commercial release"
+            echo "repository. The default branch of ${COMMERCIAL_REPO} is not a usable source for it; the"
+            echo "docs build of the hotfix tag would fail to resolve dependencies."
+            exit 1
+          fi
+          echo ".settings.xml on ${COMMERCIAL_BRANCH} configures the commercial release repository and its credentials."
+
       - name: Add commercial release CI files
         uses: ./.github/actions/add-commercial-release-files
         with:
@@ -339,6 +388,17 @@ jobs:
           repository: ${{ needs.derive.outputs.commercial_repo }}
           branch:     ${{ needs.derive.outputs.commercial_branch }}
           token:      ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
+
+      # A hotfix mixes commercial hotfix releases (usw1) with OSS-only releases that have no
+      # commercial counterpart (repo.spring.io), so the existing OSS repositories stay
+      # alongside the commercial ones rather than being replaced by them.
+      - name: Update repositories to commercial Broadcom repositories
+        uses: ./.github/actions/update-commercial-repositories
+        with:
+          repository:            ${{ needs.derive.outputs.commercial_repo }}
+          branch:                ${{ needs.derive.outputs.commercial_branch }}
+          keep-oss-repositories: 'true'
+          token:                 ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Update projects.json
         uses: ./.github/actions/update-projects-json

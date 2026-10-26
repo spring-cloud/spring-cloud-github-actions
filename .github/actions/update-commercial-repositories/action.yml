@@ -16,6 +16,10 @@ inputs:
     description: 'When true, also add https://repo.spring.io/snapshot as a snapshot-only repository (no releases). Use when creating an OSS release branch that needs snapshot dependencies.'
     required: false
     default: 'false'
+  keep-oss-repositories:
+    description: 'When true, POM <repositories>/<pluginRepositories> blocks keep their existing old repo.spring.io entries (snapshots, milestones, release) after the commercial ones, so a build can resolve both commercial and OSS-only artifacts. Fails if a kept entry has the same id as a commercial repository. Has no effect on Gradle files. Use for hotfix branches, whose dependencies mix commercial hotfix releases with OSS-only releases.'
+    required: false
+    default: 'false'
   commit-message:
     description: 'Commit message for the repository updates'
     required: false
