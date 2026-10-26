@@ -247,6 +247,9 @@ jobs:
         with:
           servers: ${{ steps.maven-servers.outputs.servers }}
           repositories: ${{ steps.maven-repositories.outputs.repositories }}
+          # Plugin dependencies (e.g. spring-cloud-build-tools for checkstyle)
+          # resolve from plugin repositories, not regular ones.
+          pluginRepositories: ${{ steps.maven-repositories.outputs.repositories }}
 
       - name: Run Antora
         timeout-minutes: ${{ inputs.timeout_minutes }}
