@@ -310,7 +310,7 @@
     },
     "commercial": {
       "branches": {
-        "scheduled": ["release/5.1.0.1", "release/4.3.7", "release/4.2.11", "release/3.1.17", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.1.x"],
+        "scheduled": ["release/5.0.7.1", "release/5.1.0.1", "release/4.3.7", "release/4.2.11", "release/3.1.17", "5.1.x-internal", "5.0.x-internal", "4.3.x", "4.2.x", "3.1.x"],
         "default": ["4.3.x"]
       },
       "jdkVersions": {
@@ -322,7 +322,8 @@
         "release/3.1.17": ["8", "11", "17"],
         "release/4.2.11": ["17", "21"],
         "release/4.3.7": ["17", "21", "25"],
-        "release/5.1.0.1": ["17", "21", "25"]
+        "release/5.1.0.1": ["17", "21", "25"],
+        "release/5.0.7.1": ["17", "21", "25"]
       }
     }
   },
