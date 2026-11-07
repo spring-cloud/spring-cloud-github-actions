@@ -30,6 +30,7 @@ same project is refused rather than silently rewriting `main`.
 |-------|-------------|----------|---------|
 | `repo` | Full repository path (e.g. `spring-cloud/spring-cloud-config`) | Yes | |
 | `internal` | Resolve `<major>.<minor>.x-internal` instead of `<major>.<minor>.x`. No `main` fallback; a missing branch is `branch-not-found`. | No | `false` |
+| `release-branch` | Resolve `release/<version>` (e.g. `release/5.0.5.1`) instead of the maintenance branch — where hotfix and release branches live. No `main` fallback; a missing branch is `branch-not-found`. Mutually exclusive with `internal`. | No | `false` |
 | `version` | The version whose line is wanted. Any qualifier is stripped first, so `5.0.4-SNAPSHOT`, `5.1.0-INTERNAL-SNAPSHOT`, `5.1.0-M1` and `5.0.3` all resolve the same way. | Yes | |
 | `commercial` | Repository is a commercial one, so there is no `main` to fall back to | No | `false` |
 | `token` | Token with read access to the repository | Yes | |

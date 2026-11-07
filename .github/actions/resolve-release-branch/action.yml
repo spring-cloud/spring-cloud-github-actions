@@ -2,7 +2,8 @@ name: 'Resolve Release Branch'
 description: >
   Resolves the maintenance branch a given project version belongs to: <major>.<minor>.x
   when it exists, otherwise main for OSS repositories whose main is on that same line. With
-  internal=true it resolves <major>.<minor>.x-internal instead, with no fallback.
+  internal=true it resolves <major>.<minor>.x-internal instead, and with release-branch=true
+  it resolves release/<version> (e.g. release/5.0.5.1), both with no fallback.
 
 inputs:
   repo:
@@ -26,6 +27,14 @@ inputs:
       When true, resolve the long-lived <major>.<minor>.x-internal branch of a commercial
       repository rather than <major>.<minor>.x. A missing branch is reported, never replaced
       by main.
+    required: false
+    default: 'false'
+  release-branch:
+    description: >
+      When true, resolve the release/<version> branch (qualifier stripped, so 5.0.5.1-SNAPSHOT
+      resolves release/5.0.5.1) instead of the maintenance branch. This is where hotfix and
+      release branches live. A missing branch is reported, never replaced by main. Mutually
+      exclusive with internal.
     required: false
     default: 'false'
   token:
@@ -57,6 +66,7 @@ runs:
         VERSION: ${{ inputs.version }}
         COMMERCIAL: ${{ inputs.commercial }}
         INTERNAL: ${{ inputs.internal }}
+        RELEASE_BRANCH: ${{ inputs.release-branch }}
       run: |
         node - << 'JSEOF'
         const fs = require('fs');
@@ -66,6 +76,7 @@ runs:
         const version = process.env.VERSION;
         const commercial = process.env.COMMERCIAL === 'true';
         const internal = process.env.INTERNAL === 'true';
+        const releaseBranch = process.env.RELEASE_BRANCH === 'true';
 
         const out = process.env.GITHUB_OUTPUT;
         const emit = (k, v) => fs.appendFileSync(out, `${k}=${v}\n`);
@@ -88,8 +99,12 @@ runs:
           stop('version-mismatch',
             `ERROR: '${version}' is not a numeric version, so no branch can be derived from it.`);
         }
+        if (internal && releaseBranch) {
+          stop('version-mismatch', 'ERROR: internal and release-branch are mutually exclusive.');
+        }
         const line = parts.slice(0, -1).join('.') + '.x';
-        const target = internal ? `${line}-internal` : line;
+        const target = releaseBranch ? `release/${plain}`
+          : internal ? `${line}-internal` : line;
 
         const branchExists = branch => {
           try {
@@ -107,9 +122,9 @@ runs:
           process.exit(0);
         }
 
-        // An -internal branch is a copy of the OSS branch kept for the commercial repos; main is
-        // never a stand-in for it.
-        if (internal) {
+        // An -internal or release/<version> branch is a specific branch, not a line; main is
+        // never a stand-in for either.
+        if (internal || releaseBranch) {
           stop('branch-not-found', `ERROR: ${repo} has no ${target} branch. Skipping this project.`);
         }
 

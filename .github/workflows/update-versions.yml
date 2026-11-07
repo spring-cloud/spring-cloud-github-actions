@@ -45,6 +45,11 @@ on:
         required: false
         type: string
         default: ''
+      release_branches:
+        description: 'Update the release/<version> branches (e.g. release/5.0.5.1 for a hotfix) instead of the <major>.<minor>.x maintenance branches. Each project''s branch is derived from its own version in the properties file; projects without that branch are skipped.'
+        required: false
+        type: boolean
+        default: false
       dry_run:
         description: 'Dry run, if checked nothing is committed or pushed, but you can see what would change'
         required: false
@@ -81,6 +86,7 @@ jobs:
           TRAIN_VERSION: ${{ inputs.release_train_version }}
           COMMERCIAL: ${{ inputs.commercial }}
           PROJECTS_FILTER: ${{ inputs.projects }}
+          RELEASE_BRANCHES: ${{ inputs.release_branches }}
         run: |
           node - << 'JSEOF'
           const fs = require('fs');
@@ -145,6 +151,11 @@ jobs:
               console.log(`Note: the commercial input (${commercialInput}) is ignored when ` +
                 `projects is supplied; derived commercial=${commercial} from the project names.`);
             }
+          }
+
+          if (internal && process.env.RELEASE_BRANCHES === 'true') {
+            fail(`ERROR: ${trainVersion} is an -INTERNAL train, which targets the -internal ` +
+              'branches; it cannot be combined with release_branches.');
           }
 
           if (internal && !commercial) {
@@ -281,7 +292,8 @@ jobs:
       # input to override it. Between the .x derivation and the main fallback the action
       # makes, every OSS and commercial release-line branch this workflow targets is covered.
       # An -INTERNAL train is the exception: it resolves to <major>.<minor>.x-internal, with
-      # no fallback, and only in the commercial repos.
+      # no fallback, and only in the commercial repos. With release_branches it resolves
+      # release/<version> instead (hotfix and release branches), also with no fallback.
       - name: Resolve target branch
         id: branch
         uses: ./.github/actions/resolve-release-branch
@@ -290,6 +302,7 @@ jobs:
           version: ${{ matrix.version }}
           commercial: ${{ needs.setup.outputs.commercial }}
           internal: ${{ needs.setup.outputs.internal }}
+          release-branch: ${{ inputs.release_branches }}
           token: ${{ inputs.token || secrets.GH_ACTIONS_REPO_TOKEN }}
 
       - name: Clone project

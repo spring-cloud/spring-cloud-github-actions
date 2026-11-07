@@ -34,6 +34,7 @@ For the normal end-of-release path, run [post-release](README-post-release.md) �
 | `release_train_version` | Version whose properties file supplies the versions, e.g. `2025.1.3-SNAPSHOT` or `2025.1.2`. Resolved to a file name exactly the way the action does: `2025.1.3-SNAPSHOT` → `2025_1_3-snapshot.properties`. | Yes | string |
 | `commercial` | Update the `-commercial` repositories. Ignored when `projects` is supplied. | No | boolean (default: `false`) |
 | `projects` | Comma-separated projects, including the `-commercial` suffix where applicable. Empty processes every project in the file. | No | string |
+| `release_branches` | Update the `release/<version>` branches (e.g. `release/5.0.5.1`) instead of the `<major>.<minor>.x` branches. See [`release/<version>` branches](#releaseversion-branches-hotfixes). | No | boolean (default: `false`) |
 | `dry_run` | Clone, update, and diff without pushing | No | boolean (default: `true`) |
 | `token` | Token with write access to all target repos. Falls back to `GH_ACTIONS_REPO_TOKEN`. | No | string |
 
@@ -58,7 +59,15 @@ If that branch does not exist:
 
 A `release_train_version` such as `2025.1.4-INTERNAL-SNAPSHOT` targets the long-lived `<major>.<minor>.x-internal` branches of the **commercial** repositories instead (`5.1.0-INTERNAL-SNAPSHOT` → `5.1.x-internal`). There is no fallback: a project without that branch is skipped as `branch-not-found`. The run fails early if `commercial` is not set (or the project names lack `-commercial`), since OSS repos have no `-internal` branches. The properties file read is `2025_1_4-internal-snapshot.properties` on `jenkins-releaser-config`, which must already exist.
 
-**There is no input to override this.** Between those two rules every branch the workflow targets is covered: the only names in [`projects.json`](../../config/projects.json) that are not `<major>.<minor>.x` are `main`, which the fallback handles, and the `-internal` branches, which are reached only through an `-INTERNAL` train (above). An override input would therefore have no correct use, and would be the one way to push a train's versions onto a branch they do not belong on, since a branch given by hand cannot be checked against the version the way a derived one can.
+### `release/<version>` branches (hotfixes)
+
+Hotfix and release branches are named `release/<version>`, and a four-segment hotfix version such as `5.0.5.1` would derive `5.0.5.x` under the rule above, which does not exist. Check `release_branches` to target `release/<version>` instead, derived from each project's own version with the qualifier stripped (`5.0.5.1-SNAPSHOT` → `release/5.0.5.1`). There is no fallback: a project without that branch is skipped as `branch-not-found`. It cannot be combined with an `-INTERNAL` train.
+
+To repair a hotfix branch that was created with the wrong versions, run with `release_train_version: 2025.1.5.1-SNAPSHOT`, `projects: spring-cloud-build-commercial`, and `release_branches` checked. Set `projects`, because without it every project on the train is attempted.
+
+The branch is still derived from the version, never typed in, so the checkbox keeps the property below: a train's versions cannot be pushed onto a branch they do not belong to.
+
+**There is no input to name a branch directly.** Between those rules every branch the workflow targets is covered: the only names in [`projects.json`](../../config/projects.json) that are not `<major>.<minor>.x` are `main`, which the fallback handles, and the `-internal` branches, which are reached only through an `-INTERNAL` train (above). An override input would therefore have no correct use, and would be the one way to push a train's versions onto a branch they do not belong on, since a branch given by hand cannot be checked against the version the way a derived one can.
 
 ## The raw wait
 
