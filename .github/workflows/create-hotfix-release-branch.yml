@@ -9,10 +9,13 @@ name: Create Hotfix Release Branch
 # The commercial repo is always the OSS repo with -commercial appended. The hotfix version
 # (e.g. 5.0.4.1) is looked up from this project's own entry in the release train's
 # jenkins-releaser-config properties file (releaser.fixed-versions[<project>]), keyed by
-# release_train_version. That release train is always still unfinalized when a hotfix
-# branch is cut, so the looked-up value always carries a -SNAPSHOT qualifier (e.g.
-# 5.0.4.1-SNAPSHOT) - derive strips it before validating and using the version. From that
-# version:
+# release_train_version with -SNAPSHOT appended (e.g. 2025.1.4.1 -> 2025_1_4_1-snapshot.properties),
+# whether or not the input already carries it. The plain <train>.properties file holds the
+# release versions (spring-boot=4.0.9.1, spring-cloud-build=5.0.4.1, ...), which a hotfix
+# branch must not be stamped with: its project version, parent versions and dependency
+# properties all have to be -SNAPSHOT. So the -snapshot file is the only one this workflow
+# reads, and the looked-up value always carries a -SNAPSHOT qualifier (e.g. 5.0.4.1-SNAPSHOT)
+# - derive strips it before validating and using the version. From that version:
 #   - the release branch is release/<version>                       (e.g. release/5.0.4.1)
 #   - the internal branch is <major>.<minor>.x-internal              (e.g. 5.0.x-internal)
 #   - the internal branch's pom.xml is expected to already be at
@@ -24,7 +27,8 @@ name: Create Hotfix Release Branch
 # -internal branch is out of date and the workflow fails before making any changes.
 #
 # After the branch is initialised, the project version is stamped to <version>-SNAPSHOT
-# (e.g. 5.0.4.1-SNAPSHOT), and dependency versions are updated from the release train.
+# (e.g. 5.0.4.1-SNAPSHOT), and dependency versions are updated from the release train's
+# -snapshot properties file.
 # Optionally, an explicit versions override can be supplied on top.
 # Finally, release-train-join.yml is triggered in the commercial repo, when a
 # spring_release_train is supplied — leaving that input empty prepares the branch
@@ -38,7 +42,7 @@ on:
         required: true
         type: string
       release_train_version:
-        description: "Release train version (e.g. 2025.1.2) whose jenkins-releaser-config properties file names this project's hotfix version and supplies dependency versions"
+        description: "Release train version (e.g. 2025.1.2.1) whose -snapshot jenkins-releaser-config properties file names this project's hotfix version and supplies dependency versions. -SNAPSHOT is appended if not already present"
         required: true
         type: string
       use_tag:
@@ -69,7 +73,7 @@ on:
         required: true
         type: string
       release_train_version:
-        description: "Release train version (e.g. 2025.1.2) whose jenkins-releaser-config properties file names this project's hotfix version and supplies dependency versions"
+        description: "Release train version (e.g. 2025.1.2.1) whose -snapshot jenkins-releaser-config properties file names this project's hotfix version and supplies dependency versions. -SNAPSHOT is appended if not already present"
         required: true
         type: string
       use_tag:
@@ -115,6 +119,7 @@ jobs:
       expected_internal_version: ${{ steps.derive.outputs.expected_internal_version }}
       oss_tag:                   ${{ steps.derive.outputs.oss_tag }}
       auto_version:              ${{ steps.derive.outputs.auto_version }}
+      train_version:             ${{ steps.derive.outputs.train_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,7 +133,20 @@ jobs:
           OSS_REPO="spring-cloud/${{ inputs.oss_repo }}"
           COMMERCIAL_REPO="${OSS_REPO}-commercial"
           COMMERCIAL_PROJECT="${COMMERCIAL_REPO#spring-cloud/}"
-          RELEASE_TRAIN_VERSION="${{ inputs.release_train_version }}"
+          INPUT_TRAIN_VERSION="${{ inputs.release_train_version }}"
+
+          # Always the -SNAPSHOT train, so the properties file read here and the one the
+          # update-versions job applies are the -snapshot one whatever was typed. The plain
+          # file holds release values (see the header). Anything but a numeric train with an
+          # optional -SNAPSHOT is refused rather than quietly read as a different file, such
+          # as <train>-INTERNAL-SNAPSHOT.
+          TRAIN_BASE="${INPUT_TRAIN_VERSION%-SNAPSHOT}"
+          if [[ ! "$TRAIN_BASE" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]]; then
+            echo "ERROR: release_train_version '${INPUT_TRAIN_VERSION}' must be a numeric release train (e.g. 2025.1.2.1), optionally followed by -SNAPSHOT."
+            exit 1
+          fi
+          RELEASE_TRAIN_VERSION="${TRAIN_BASE}-SNAPSHOT"
+          echo "Release train: ${RELEASE_TRAIN_VERSION} (input: ${INPUT_TRAIN_VERSION})"
 
           # Detect the project name from the OSS repo's root pom.xml artifactId, the same
           # way update-project-versions/src/index.js's detectProjectName does.
@@ -214,6 +232,7 @@ jobs:
           echo "expected_internal_version=${EXPECTED_INTERNAL_VERSION}" >> "$GITHUB_OUTPUT"
           echo "oss_tag=${OSS_TAG}"                                     >> "$GITHUB_OUTPUT"
           echo "auto_version=${AUTO_VERSION}"                           >> "$GITHUB_OUTPUT"
+          echo "train_version=${RELEASE_TRAIN_VERSION}"                 >> "$GITHUB_OUTPUT"
 
           echo "OSS repo:                  $OSS_REPO"
           echo "Commercial repo:           $COMMERCIAL_REPO"
@@ -431,13 +450,15 @@ jobs:
           git -C _version_repo config user.name  "Spring Builds"
           git -C _version_repo config user.email "svc.spring-builds@broadcom.com"
 
-      # Updates dependency version properties from the release train. This also stamps the
-      # project version to the release train's value; the next step overwrites that with
-      # the correct hotfix snapshot.
+      # Updates dependency version properties from the release train's -snapshot properties
+      # file (derive normalises release_train_version to <train>-SNAPSHOT), so they come out
+      # as -SNAPSHOT versions. This also stamps the project version to the file's value, which
+      # is already the hotfix snapshot; the next step re-asserts it and applies any versions
+      # override.
       - name: Update dependency versions from release train
         uses: ./.github/actions/update-project-versions
         with:
-          release-train-version: ${{ inputs.release_train_version }}
+          release-train-version: ${{ needs.derive.outputs.train_version }}
           token:                 ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
           directory:             _version_repo
           commercial:            'true' # use release config from commercial repo

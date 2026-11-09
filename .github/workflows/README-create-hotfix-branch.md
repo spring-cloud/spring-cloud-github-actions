@@ -2,17 +2,26 @@
 
 Creates a commercial hotfix release branch. By default, the branch is cut from the tip of the commercial repo's `<major>.<minor>.x-internal` branch, preserving its full git history so the hotfix branch can later be rebased onto an updated `-internal` branch. Setting `use_tag` instead creates the branch from an OSS tag — an orphan branch with no shared history, the workflow's original behaviour. Either way, the workflow stamps the project version to a hotfix snapshot, ensures required release-train workflows are present, and (by default) triggers `release-train-join` in the commercial repo.
 
-The hotfix version itself is never passed in directly — it's looked up from this project's own entry in the release train's `jenkins-releaser-config` properties file, keyed by `release_train_version`.
+The hotfix version itself is never passed in directly — it's looked up from this project's own entry in the release train's `jenkins-releaser-config` properties file, keyed by `release_train_version` — always the `-SNAPSHOT` file (see [Release train input](#release-train-input)).
+
+## Release train input
+
+`release_train_version` is normalised to `<train>-SNAPSHOT` whether or not the input already ends in `-SNAPSHOT`, so `2025.1.5.1` and `2025.1.5.1-SNAPSHOT` behave the same. The workflow only ever reads the `-snapshot` properties file, for two reasons:
+
+- The plain `<train>.properties` file holds the **release** values (`spring-boot=4.0.10.1`, `spring-cloud-build=5.0.5.1`, ...). Applying it to a hotfix branch would stamp the dependency properties and parent versions with non-`-SNAPSHOT` versions, while the project's own version is `-SNAPSHOT`.
+- The `-snapshot` file is the one that matches the branch: the hotfix projects at `<version>-SNAPSHOT`, and every other project at the same `-SNAPSHOT` / `-INTERNAL-SNAPSHOT` version as the train's base `-snapshot` file.
+
+The value must be a numeric train (three or four segments) with at most a `-SNAPSHOT` suffix. Other qualifiers, such as `-INTERNAL-SNAPSHOT` or `-M1`, fail fast instead of being read as a different file.
 
 ## What it does
 
-1. **Looks up the hotfix version and derives names** — detects this project's artifact ID from the OSS repo's root `pom.xml`, then reads `releaser.fixed-versions[<project>]` from the `release_train_version`'s properties file in `spring-cloud-release-commercial@jenkins-releaser-config` to get the hotfix version (e.g. `5.0.4.1`). From it: the commercial branch is `release/<version>` (e.g. `release/5.0.4.1`), the internal branch is `<major>.<minor>.x-internal` (e.g. `5.0.x-internal`), and (when `use_tag` is set) the OSS tag is `v<major>.<minor>.<patch>` (e.g. `v5.0.4`). The commercial repo is always the OSS repo with `-commercial` appended.
+1. **Looks up the hotfix version and derives names** — detects this project's artifact ID from the OSS repo's root `pom.xml`, then reads `releaser.fixed-versions[<project>]` from the `<release_train_version>-SNAPSHOT` properties file (e.g. `2025_1_4_1-snapshot.properties`) in `spring-cloud-release-commercial@jenkins-releaser-config` to get the hotfix version (e.g. `5.0.4.1`). From it: the commercial branch is `release/<version>` (e.g. `release/5.0.4.1`), the internal branch is `<major>.<minor>.x-internal` (e.g. `5.0.x-internal`), and (when `use_tag` is set) the OSS tag is `v<major>.<minor>.<patch>` (e.g. `v5.0.4`). The commercial repo is always the OSS repo with `-commercial` appended.
 2. **Validates the `-internal` branch** (default path only) — fails before making any changes if the `-internal` branch's `pom.xml` version doesn't exactly match `<major>.<minor>.<patch>-INTERNAL-SNAPSHOT` — i.e. if the `-internal` branch is out of date.
 3. **Creates the branch**:
    - Default (`use_tag: false`): forks `release/<version>` from the tip of the `-internal` branch via the GitHub API, preserving its full git history. Then restores `.settings.xml` from the repo's default branch (`copy-settings-xml`) and verifies it — the file must exist, and its `spring` profile must declare the usw1 `spring-commercial-release` repository in both `<repositories>` and `<pluginRepositories>`, with a `<server>` carrying credentials for it (parsed, not grepped; the job fails otherwise) — the docs build of the hotfix tag runs Maven with `--settings .settings.xml` (forced by `.mvn/maven.config`), not `release-ci-settings.xml`, and must resolve the commercial-only hotfix parent POMs. It adds a retargeted `ci-release.yml`/`release-ci-settings.xml` (via `add-commercial-release-files`, which already point the build at the commercial deploy target — so no workflow rewrite or `pom.xml` distribution-management edit is needed), updates license headers (and `checkstyle-header.txt`), points the pom/Gradle `<repositories>` blocks at the commercial repositories (`update-commercial-repositories`; the pom blocks keep their existing `repo.spring.io` entries after the commercial ones, since a hotfix mixes commercial hotfix releases with OSS-only releases), and registers the branch in `config/projects.json` (a hotfix branch can fail its own CI independently of `-internal`, so it needs its own scheduled CI entry — this entry is removed automatically once the hotfix's release is finalized).
    - `use_tag: true`: delegates to [`initialize-commercial-branch`](initialize-commercial-branch.yml), which creates an orphan branch from the OSS tag and runs the full suite of commercial setup actions: copy `.settings.xml`, update CI/PR workflows, update licence headers, replace OSS repositories with commercial Broadcom repositories, update distribution management, and update `config/projects.json`.
 4. **Creates a milestone** — creates a milestone in the commercial repo for the hotfix version if one does not already exist.
-5. **Stamps the project version** — updates the project version in `pom.xml`, `gradle.properties`, and `build.gradle` files to `<version>-SNAPSHOT` (e.g. `5.0.4.1-SNAPSHOT`), and updates dependency versions from the release train. `versions` can supply additional dependency version overrides on top.
+5. **Stamps the project version** — updates the project version in `pom.xml`, `gradle.properties`, and `build.gradle` files to `<version>-SNAPSHOT` (e.g. `5.0.4.1-SNAPSHOT`), and updates dependency versions from the same `-snapshot` properties file, so they come out as `-SNAPSHOT` versions. `versions` can supply additional dependency version overrides on top.
 6. **Ensures required workflows** — checks that `release-train-join.yml` and `release-train-ready.yml` are present on the new branch. If either is missing, runs the workflow generator for that single branch to create them (see [Workflow generator SHA](#workflow-generator-sha)).
 7. **Triggers release-train-join** — dispatches `release-train-join.yml` in the commercial repo and waits for it to complete. This step is skipped when `spring_release_train` is left empty; the branch is still fully created and initialised.
 8. **Triggers CI**:
@@ -24,7 +33,7 @@ The hotfix version itself is never passed in directly — it's looked up from th
 | Name | Required | Default | Description |
 |------|----------|---------|-------------|
 | `oss_repo` | yes | — | OSS repository name in the `spring-cloud` org (e.g. `spring-cloud-stream`) |
-| `release_train_version` | yes | — | Release train version (e.g. `2025.1.2`) whose `jenkins-releaser-config` properties file names this project's hotfix version and supplies dependency versions |
+| `release_train_version` | yes | — | Release train version (e.g. `2025.1.2.1`) whose `-snapshot` `jenkins-releaser-config` properties file names this project's hotfix version and supplies dependency versions. `-SNAPSHOT` is appended if not already present. |
 | `use_tag` | no | `false` | Create the branch from an OSS tag (`v<major>.<minor>.<patch>`) instead of the `<major>.<minor>.x-internal` branch |
 | `spring_release_train` | no | — | Spring release train this hotfix belongs to (e.g. `2026.1`). Passed to `release-train-join`, and supplying it is what triggers the join — leave it empty to prepare the branch without joining. |
 | `versions` | no | — | JSON map of dependency versions to apply on top of the release train's dependency versions (e.g. `{"spring-boot":"3.3.0","spring-cloud-commons":"4.1.1"}`) |
@@ -52,18 +61,18 @@ Given a release train whose `jenkins-releaser-config` properties file has `relea
 ```bash
 gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
-  -f release_train_version=2025.1.2 \
+  -f release_train_version=2025.1.2.1 \
   -f spring_release_train=2026.1
 ```
 
-This looks up `spring-cloud-foo`'s fixed version for release train `2025.1.2` (e.g. `5.0.4.1`), verifies `5.0.x-internal` in `spring-cloud/spring-cloud-foo-commercial` is at `5.0.4-INTERNAL-SNAPSHOT`, forks `release/5.0.4.1` from it, stamps the project version to `5.0.4.1-SNAPSHOT`, and triggers `release-train-join`.
+This looks up `spring-cloud-foo`'s fixed version for release train `2025.1.2.1` (e.g. `5.0.4.1`), verifies `5.0.x-internal` in `spring-cloud/spring-cloud-foo-commercial` is at `5.0.4-INTERNAL-SNAPSHOT`, forks `release/5.0.4.1` from it, stamps the project version to `5.0.4.1-SNAPSHOT`, and triggers `release-train-join`.
 
 ### From an OSS tag instead of `-internal`
 
 ```bash
 gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
-  -f release_train_version=2025.1.2 \
+  -f release_train_version=2025.1.2.1 \
   -f spring_release_train=2026.1 \
   -f use_tag=true
 ```
@@ -75,7 +84,7 @@ Same version lookup, but creates the branch as an orphan copy of tag `v5.0.4`, w
 ```bash
 gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
-  -f release_train_version=2025.1.2 \
+  -f release_train_version=2025.1.2.1 \
   -f spring_release_train=2026.1 \
   -f versions='{"spring-boot":"3.3.5","spring-cloud-commons":"4.1.2"}'
 ```
@@ -87,7 +96,7 @@ Create and initialise the branch but opt out of joining the release train:
 ```bash
 gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
-  -f release_train_version=2025.1.2
+  -f release_train_version=2025.1.2.1
 ```
 
 Omitting `spring_release_train` is what opts out: everything else runs, and the branch is
@@ -101,7 +110,7 @@ jobs:
     uses: spring-cloud/spring-cloud-github-actions/.github/workflows/create-hotfix-release-branch.yml@v1
     with:
       oss_repo: spring-cloud-foo
-      release_train_version: '2025.1.2'
+      release_train_version: '2025.1.2.1'
       spring_release_train: '2026.1'
     secrets:
       token: ${{ secrets.GH_ACTIONS_REPO_TOKEN }}
@@ -116,7 +125,7 @@ This is useful if you need to ensure a specific version of the build/test action
 ```bash
 gh workflow run create-hotfix-release-branch.yml \
   -f oss_repo=spring-cloud-foo \
-  -f release_train_version=2025.1.2 \
+  -f release_train_version=2025.1.2.1 \
   -f spring_release_train=2026.1 \
   -f sha=348109524f9790dc1e20d48043fb1ef4765373b8
 ```
