@@ -225,7 +225,7 @@ jobs:
         run: |
           # Run Maven install for non-deploying JDK versions (no docs profile needed)
           echo "Building without deployment"
-          ./mvnw clean install -Pspring -B -U $MAVEN_FLAGS $MAVEN_SETTINGS
+          ./mvnw -q clean install -Pspring -B -U $MAVEN_FLAGS $MAVEN_SETTINGS
 
       - name: Build and deploy
         if: ${{ inputs.custom_build_command == '' && env.SHOULD_DEPLOY == 'true' }}
@@ -233,7 +233,7 @@ jobs:
           # Run Maven deploy for the designated JDK version. DEPLOY_PROFILES carries the
           # docs profile unless the caller disabled it via the build_docs input.
           echo "Deploying artifacts with $DEPLOY_PROFILES"
-          ./mvnw clean deploy $DEPLOY_PROFILES -B -U $MAVEN_FLAGS $MAVEN_SETTINGS $MAVEN_DEPLOY_FLAGS
+          ./mvnw -q clean deploy $DEPLOY_PROFILES -B -U $MAVEN_FLAGS $MAVEN_SETTINGS $MAVEN_DEPLOY_FLAGS
 
       - name: Custom build command
         if: ${{ inputs.custom_build_command != '' }}
