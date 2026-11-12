@@ -45,6 +45,7 @@ One matrix entry per `(repository, branch)` pair drawn from `branches.scheduled`
 That is deliberately the set of branches actively built:
 
 - **`ci-release.yml` is only ever touched on `-internal` branches**, and never anywhere else — that split is what keeps the rollout from fighting the rebase.
+- **`release/*` branches are not touched.** [rebase-release-branches](README-rebase-release-branches.md) rewrites them from their `-internal` / `.x` branch, so they pick the pin up from there. They are listed in the setup job log.
 - **Retired branches are not touched.** `retire-branch` removes them from `projects.json`, and their `Locked Branches` rulesets have no bypass actors, so a push would fail by design.
 - **`docs-build` branches are not touched here.** They carry the `deploy-docs` caller and are handled by [rollout-deploy-docs](README-rollout-deploy-docs.md), which resolves the same release.
 - **Archived repositories are not reachable** and are excluded from `projects.json`.

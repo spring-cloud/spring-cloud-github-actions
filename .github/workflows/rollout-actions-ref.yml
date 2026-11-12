@@ -5,7 +5,9 @@ name: Rollout Actions Ref
 #
 #   uses: spring-cloud/spring-cloud-github-actions/.github/workflows/deploy.yml@<sha> # v1.0.0
 #
-# Targets every branch listed under branches.scheduled in config/projects.json.
+# Targets every branch listed under branches.scheduled in config/projects.json,
+# except release/* branches - the rebase-release-branches workflow rewrites those
+# from their -internal / .x branch, so they pick the pin up from there.
 # Retired branches are absent from that file and are left alone - their Locked
 # Branches rulesets would reject a push anyway.
 #
@@ -124,11 +126,17 @@ jobs:
           // ci-release.yml is internal-only and survives the rebase, so it is the one file
           // the rollout owns on those branches - and the one file it must not touch
           // anywhere else.
-          const { entries } = buildBranchMatrix(projects, {
+          //
+          // `release/*` branches are skipped: rebase-release-branches rewrites them from
+          // their -internal / `.x` branch, so a pin written here would be overwritten.
+          const { entries: all } = buildBranchMatrix(projects, {
             filter: process.env.PROJECTS_FILTER,
             repoType: process.env.REPO_TYPE,
             excludeInternal: false,
           });
+          const isRelease = e => e.branch.startsWith('release/');
+          const entries = all.filter(e => !isRelease(e));
+          const skipped = all.filter(isRelease);
 
           const include = entries.map(({ repo, branch, type }) => {
             const internal = branch.endsWith('-internal');
@@ -142,6 +150,8 @@ jobs:
 
           console.log(`${include.length} (repo, branch) pairs:`);
           for (const e of include) console.log(`  ${e.repo}@${e.branch}  [${e.scope}]`);
+          console.log(`Skipped (release/ branches, updated by the rebase job): ${skipped.length}`);
+          for (const e of skipped) console.log(`  ${e.repo}@${e.branch}`);
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT,
             `matrix=${JSON.stringify({ include })}\n` +
