@@ -104,6 +104,15 @@ jobs:
           distribution: ${{ inputs.java_distribution }}
           cache: 'maven'
 
+      # setup-java's `cache: maven` only covers ~/.m2/repository. The wrapper unpacks the
+      # Maven distribution into ~/.m2/wrapper, so without this every job re-downloads it
+      # from Maven Central, which answers with HTTP 429 when many jobs start at once.
+      - name: Cache Maven wrapper distribution
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.m2/wrapper
+          key: ${{ runner.os }}-maven-wrapper-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+
       - name: Configure Maven settings
         uses: s4u/maven-settings-action@894661b3ddae382f1ae8edbeab60987e08cf0788
         with:

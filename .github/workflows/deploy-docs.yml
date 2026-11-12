@@ -131,6 +131,14 @@ jobs:
           java-version: ${{ inputs.java_version }}
           distribution: ${{ inputs.java_distribution }}
 
+      # The default build_command runs ./mvnw, which downloads the Maven distribution into
+      # ~/.m2/wrapper; cache it so concurrent jobs don't hit Maven Central's rate limit (429).
+      - name: Cache Maven wrapper distribution
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.m2/wrapper
+          key: ${{ runner.os }}-maven-wrapper-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+
       # Restricts the Antora build to a single ref instead of rebuilding every
       # branch and tag listed in the playbook. The partial-build-extension
       # bundled with @springio/antora-extensions picks up BUILD_REFNAME and
