@@ -1979,7 +1979,10 @@ jobs:
             for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
               const p = `${dir}/${d.name}`;
               if (d.isDirectory()) walk(p);
-              else if (new RegExp(`^spring-cloud-${dashed}(-|\\.)`).test(d.name)) {
+              // The version must be followed by the end of the slug (-has-been-released, -aka-...)
+              // and not by more of a version: 2026-0-0 must not claim the post for 2026-0-0-M1
+              // (pre-release) or 2026-0-0-1 (hotfix).
+              else if (new RegExp(`^spring-cloud-${dashed}(?:\\.|-(?!(?:M|RC)\\d|\\d))`).test(d.name)) {
                 existingPosts.push(p.replace(/^website\//, ''));
               }
             }
