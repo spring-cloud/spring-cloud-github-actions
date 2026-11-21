@@ -3302,13 +3302,20 @@ jobs:
           for (const t of result.teams) console.log(`  ${t.slug}: ${t.role} (${t.why})`);
 
           if (newBoard && !dryRun && collaborators.size) {
-            graphql(`mutation($id:ID!,$c:[ProjectV2Collaborator!]!){
-              updateProjectV2Collaborators(input:{projectId:$id,collaborators:$c}){ collaborators{ totalCount } }
-            }`, {
-              id: newBoard.id,
-              c: [...collaborators.values()].map(c => ({ teamId: c.teamId, role: c.role })),
-            });
-            console.log(`Granted ${collaborators.size} team(s) access.`);
+            // Not fatal: on a board that already existed - made by hand, or by an earlier run -
+            // the token may not be an admin of it, and the items still need carrying over.
+            try {
+              graphql(`mutation($id:ID!,$c:[ProjectV2Collaborator!]!){
+                updateProjectV2Collaborators(input:{projectId:$id,collaborators:$c}){ collaborators{ totalCount } }
+              }`, {
+                id: newBoard.id,
+                c: [...collaborators.values()].map(c => ({ teamId: c.teamId, role: c.role })),
+              });
+              console.log(`Granted ${collaborators.size} team(s) access.`);
+            } catch (err) {
+              problem(`Could not set team access on ${newBoard.url}: ${err.message}. ` +
+                'Check the board\'s access by hand.');
+            }
           }
 
           // ── d. the Status field on each board ────────────────────────────────────────
@@ -3503,10 +3510,21 @@ jobs:
 
       - name: Record failure
         if: failure()
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          NEXT_VERSION: ${{ needs.setup.outputs.next-version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           if [[ ! -f result-board.json ]]; then
-            printf '%s' '{"phase":"release-board","status":"error"}' > result-board.json
+            node -e '
+              const e = process.env;
+              require("fs").writeFileSync("result-board.json", JSON.stringify({
+                phase: "release-board", status: "error", from: e.RELEASE_VERSION, to: e.NEXT_VERSION,
+                boardUrl: "", boardCreated: false, moved: [], milestones: [], teams: [],
+                closedOld: false,
+                problems: ["The job failed before it finished - see the job log: " + e.RUN_URL],
+              }));'
           fi
 
       - name: Upload result
