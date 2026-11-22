@@ -27,6 +27,7 @@ The workflow configures Maven settings for Artifactory (OSS and optional commerc
 | `runs_on` | Runner to use for the build job. Builds that reach commercial Artifactory **must** set this — see below. | No | string (default: `ubuntu-latest`) |
 | `build_docs` | Include the `docs` profile in the deploying build. Set to `false` for branches whose version cannot produce a parseable Antora component version — see below. | No | boolean (default: `true`) |
 | `timeout_minutes` | Timeout for each build job. Raise it for projects whose reactor does not finish in the default hour on a single runner. GitHub caps a job at 360. | No | number (default: `60`) |
+| `pin_docker_api_version` | Pin the docker-java API version to 1.44 so Testcontainers < 1.21.4 works on Docker 29 runners — see below. | No | boolean (default: `false`) |
 
 ### `runs_on` and commercial Artifactory
 
@@ -48,6 +49,15 @@ The deploying JDK normally builds with `-Pdocs,deploy,spring`. The `antora-compo
 The plugin exposes no configuration for this (its only mojo parameter is `project`), so the component version cannot be overridden on the command line. Setting `build_docs: false` drops `-Pdocs` from the deploy command instead, which is what the commercial release CI (`ci-release.yml`, added by [`add-commercial-release-files`](../actions/add-commercial-release-files/action.yml)) does for `-internal` and `release/` branches.
 
 Non-deploying JDK legs never include the docs profile, so they are unaffected.
+
+### `pin_docker_api_version`
+
+Docker 29 (on `ubuntu-latest` since the Ubuntu 26.04 image) rejects Docker API versions below 1.44. Testcontainers 1.x before 1.21.4 (and 2.0.0–2.0.1) falls back to API 1.32 when none is configured, so builds fail with `client version 1.32 is too old` / `Could not find a valid Docker environment`. Setting this to `true` writes `api.version=1.44` to `~/.docker-java.properties` before Maven runs (an existing `api.version` is left alone). It requires Docker 25+ on the runner. See [testcontainers-java#11212](https://github.com/testcontainers/testcontainers-java/issues/11212).
+
+```yaml
+    with:
+      pin_docker_api_version: true
+```
 
 ## Secrets
 

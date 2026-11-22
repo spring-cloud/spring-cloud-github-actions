@@ -7,6 +7,15 @@ on:
         description: 'Custom run command for the Build and Deploy step (overrides default Maven command)'
         required: false
         type: string
+      pin_docker_api_version:
+        description: >
+          Write api.version=1.44 to ~/.docker-java.properties before the build. Set to true for
+          branches on Testcontainers older than 1.21.4 (or 2.0.0-2.0.1), which otherwise fall back to
+          Docker API 1.32 and fail on Docker 29 runners with "client version 1.32 is too old".
+          Requires Docker 25+. See https://github.com/testcontainers/testcontainers-java/issues/11212
+        required: false
+        type: boolean
+        default: false
     secrets:
       ARTIFACTORY_USERNAME:
         required: false
@@ -42,6 +51,13 @@ jobs:
           RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
           RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
         uses: spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@main
+      # Opt-in workaround for Testcontainers < 1.21.4 on Docker 29, see the pin_docker_api_version input.
+      - name: Pin docker-java API version for Docker 29
+        if: ${{ inputs.pin_docker_api_version }}
+        run: |
+          if ! grep -qs '^api.version=' "$HOME/.docker-java.properties"; then
+            echo "api.version=1.44" >> "$HOME/.docker-java.properties"
+          fi
       - name: Set Maven flags
         run: |
           MAVEN_FLAGS=""
