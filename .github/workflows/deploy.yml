@@ -147,6 +147,17 @@ jobs:
             timeout 10s docker ps -a -q | xargs -n 1 -P 8 -I {} docker stop {} || echo "Failed to stop docker... Hopefully you know what you're doing"
           fi
 
+      # Docker 29 (now on ubuntu-latest) rejects Docker API versions below 1.44. Testcontainers 1.x
+      # falls back to API 1.32 when none is configured, so it fails with "client version 1.32 is too old".
+      # Pinning the docker-java API version works for every Testcontainers version; it requires Docker 25+
+      # (API 1.44), which ubuntu-latest (Docker 29) and the ubuntu22-2-8 runners (Docker 28) both have. See
+      # https://github.com/testcontainers/testcontainers-java/issues/11212
+      - name: Pin docker-java API version for Docker 29
+        run: |
+          if ! grep -qs '^api.version=' "$HOME/.docker-java.properties"; then
+            echo "api.version=1.44" >> "$HOME/.docker-java.properties"
+          fi
+
       - name: Verify Maven installation
         run: ./mvnw --version
 
