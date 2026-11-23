@@ -847,7 +847,7 @@ Two things routinely surprise people:
 - **Commercial builds need a specific runner.** Broadcom's Artifactory
   (`usw1.packages.broadcom.com`) only accepts requests from the `spring-enterprise-builds` runner
   group; GitHub-hosted runners get a network-level 403. Branches carrying `release-ci-settings.xml`
-  — that is, `-internal` and `release/*` — must set `runs_on: ubuntu22-2-8`.
+  — that is, `-internal` and `release/*` — must set `runs_on: ubuntu-latest-2-8-usw1`.
 
 Deploy runs only on the designated JDK (8 if the branch builds on 8, otherwise 17); other JDKs in
 the matrix run `install` only. Which credentials and settings apply is decided by

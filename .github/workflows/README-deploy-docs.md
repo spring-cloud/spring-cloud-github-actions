@@ -14,7 +14,7 @@ OSS and commercial builds differ in exactly two places:
 
 | | OSS | Commercial |
 |---|---|---|
-| Runner | `ubuntu-latest` | `ubuntu22-2-8` |
+| Runner | `ubuntu-latest` | `ubuntu-latest-2-8-usw1` |
 | Publish | `rsync-antora-reference` + `bust-cloudflare-antora-cache` | `google-github-actions/auth` + `upload-cloud-storage` |
 
 Every other step runs in both. The commercial-only steps are harmless in OSS repositories because each is a no-op when the credentials it needs are absent:
@@ -42,7 +42,7 @@ If a project's root `pom.xml` omits a top-level `<version>`, the parent's versio
 | `build_refname` | Git refname to build (e.g. `4.3.x`). Empty builds everything. OSS only. | No | string |
 | `java_version` | JDK version used to run Antora | No | string (default: `17`) |
 | `java_distribution` | Java distribution | No | string (default: `temurin`) |
-| `runs_on` | Runner override | No | string (default: `ubuntu22-2-8` for commercial, `ubuntu-latest` otherwise) |
+| `runs_on` | Runner override | No | string (default: `ubuntu-latest-2-8-usw1` for commercial, `ubuntu-latest` otherwise) |
 | `build_command` | Command used to generate the site | No | string (default: `./mvnw --no-transfer-progress -B antora -Pdocs`) |
 | `timeout_minutes` | Timeout for the Antora build step | No | number (default: `60`) |
 | `context_root` | Context root for the Cloudflare cache bust (OSS only) | No | string (default: repository name minus any `-commercial` suffix) |

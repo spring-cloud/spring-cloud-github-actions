@@ -12,7 +12,7 @@ Relies on `yq` (mikefarah/yq v4), which is pre-installed on GitHub-hosted Ubuntu
 |-------|--------|
 | `on.push.branches` | Replaced with a single-item list containing the input `branch` |
 | `on.workflow_dispatch.inputs.branches.default` | Updated to the input `branch` (skipped if the field is absent) |
-| `jobs.deploy.with.runs_on` | Set to `ubuntu22-2-8` |
+| `jobs.deploy.with.runs_on` | Set to `ubuntu-latest-2-8-usw1` |
 
 ### `pr.yml` / `pr.yaml`
 
