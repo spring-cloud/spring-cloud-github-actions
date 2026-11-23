@@ -50,7 +50,7 @@ jobs:
         env:
           RO_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
           RO_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
-        uses: spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@main
+        uses: spring-cloud/spring-cloud-github-actions/.github/actions/set-commercial-creds-env-vars@v1.1.5
       # Opt-in workaround for Testcontainers < 1.21.4 on Docker 29, see the pin_docker_api_version input.
       - name: Pin docker-java API version for Docker 29
         if: ${{ inputs.pin_docker_api_version }}
