@@ -30,7 +30,7 @@ on:
         type: string
         default: 'temurin'
       runs_on:
-        description: 'Runner override. Defaults to ubuntu22-2-8 for commercial repositories and ubuntu-latest otherwise.'
+        description: 'Runner override. Defaults to ubuntu-latest-2-8-usw1 for commercial repositories and ubuntu-latest otherwise.'
         required: false
         type: string
       build_command:
@@ -106,7 +106,7 @@ jobs:
 
   deploy-docs:
     needs: setup
-    runs-on: ${{ inputs.runs_on || (needs.setup.outputs.commercial == 'true' && 'ubuntu22-2-8' || 'ubuntu-latest') }}
+    runs-on: ${{ inputs.runs_on || (needs.setup.outputs.commercial == 'true' && 'ubuntu-latest-2-8-usw1' || 'ubuntu-latest') }}
     env:
       GRADLE_ENTERPRISE_SECRET_ACCESS_KEY: ${{ secrets.GRADLE_ENTERPRISE_SECRET_ACCESS_KEY }}
       # Antora's collector extension runs a *second* Maven build inside each
