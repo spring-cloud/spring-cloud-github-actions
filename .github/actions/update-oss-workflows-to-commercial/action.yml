@@ -86,7 +86,7 @@ runs:
           # jobs.deploy.with.runs_on — only update if a deploy job already exists
           DEPLOY_EXISTS=$(yq e '.jobs.deploy // "null"' "$CI_FILE")
           if [[ "$DEPLOY_EXISTS" != "null" ]]; then
-            yq e '.jobs.deploy.with.runs_on = "ubuntu22-2-8"' -i "$CI_FILE"
+            yq e '.jobs.deploy.with.runs_on = "ubuntu-latest-2-8-usw1"' -i "$CI_FILE"
           else
             echo "  No 'deploy' job found in ${CI_FILE} — skipping runs_on update."
           fi
